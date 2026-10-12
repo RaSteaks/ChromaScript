@@ -12,6 +12,10 @@
   --color-focus: #B3DDE8;
   --color-scrollbar: #66717F;
   --color-primary: #88BBC8;
+  --color-pickerLight: #FFFFFF;
+  --color-pickerDark: #000000;
+  --color-previewBackground: #343434;
+  --color-previewChecker: #353535;
   --font-sans: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --space-xs: 4px;

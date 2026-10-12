@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import json
 import shutil
+import struct
 import subprocess
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, BinaryIO, Callable, Iterable, Iterator
 
 import numpy as np
 from numpy.typing import NDArray
 
-from .color import tags
+from .color import output_metadata, tags
 from .errors import ChromaError
 from .models import DeliveryPreset, RenderSettings
 
@@ -31,11 +32,80 @@ def available_encoders() -> set[str]:
     }
 
 
+def _video_tags(preset: DeliveryPreset) -> dict[str, str]:
+    result = tags(preset.color.output)
+    if preset.container == "mov" and preset.color.output == "Rec.709":
+        # NCLC has no gamma-2.4 code. A QuickTime gama atom carries the exact
+        # exponent; transfer=2 avoids incorrectly labelling it as the 709 OETF.
+        result["transfer"] = "unknown"
+    return result
+
+
+def _boxes(stream: BinaryIO, start: int, end: int) -> Iterator[tuple[bytes, int, int]]:
+    """Walk bounded box headers, skipping media payloads even for large exports."""
+    while start + 8 <= end:
+        stream.seek(start)
+        size, kind = struct.unpack(">I4s", stream.read(8))
+        header = 8
+        if size == 1:
+            if start + 16 > end:
+                return
+            size = struct.unpack(">Q", stream.read(8))[0]
+            header = 16
+        if size == 0:
+            size = end - start
+        if size < header or start + size > end:
+            return
+        yield kind, start + header, start + size
+        start += size
+
+
+def quicktime_color_metadata(path: Path) -> list[dict[str, Any]]:
+    """Read actual visual sample-entry colr/gama boxes, independently of codec VUI."""
+    entries: list[dict[str, Any]] = []
+    with path.open("rb") as stream:
+
+        def visit(start: int, end: int, depth: int = 0) -> None:
+            if depth > 8:
+                return
+            for kind, payload, box_end in _boxes(stream, start, end):
+                if kind in {b"moov", b"trak", b"mdia", b"minf", b"stbl"}:
+                    visit(payload, box_end, depth + 1)
+                elif kind == b"stsd":
+                    # Full-box flags and entry count precede the sample entries;
+                    # each visual entry has a fixed 78-byte header before children.
+                    for _, sample, sample_end in _boxes(stream, payload + 8, box_end):
+                        record: dict[str, Any] = {}
+                        for child, data, child_end in _boxes(stream, sample + 78, sample_end):
+                            stream.seek(data)
+                            if child == b"colr" and child_end - data >= 10:
+                                color_type = stream.read(4)
+                                if color_type in {b"nclc", b"nclx"}:
+                                    primaries, transfer, matrix = struct.unpack(
+                                        ">HHH", stream.read(6)
+                                    )
+                                    record.update(
+                                        type=color_type.decode(),
+                                        primaries=primaries,
+                                        transfer=transfer,
+                                        matrix=matrix,
+                                    )
+                                    if color_type == b"nclx" and child_end - data >= 11:
+                                        record["full_range"] = bool(stream.read(1)[0] & 128)
+                            elif child == b"gama" and child_end - data == 4:
+                                record["gamma"] = struct.unpack(">I", stream.read(4))[0] / 65536
+                        if record:
+                            entries.append(record)
+
+        visit(0, path.stat().st_size)
+    return entries
+
+
 def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path) -> list[str]:
     executable = shutil.which("ffmpeg")
     if not executable:
         raise ChromaError("ffmpeg_unavailable", "Install FFmpeg and add it to PATH")
-    color_tags = tags(preset.color.output)
+    color_tags = _video_tags(preset)
     pixel = preset.pixel_format
     rgb = pixel.startswith(("gbr", "rgb", "bgr"))
     alpha = preset.alpha
@@ -111,9 +181,29 @@ def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path)
         "pc" if preset.data_range == "full" else "tv",
     ]
     if preset.container in {"mov", "mp4"}:
-        args += ["-movflags", "+faststart+write_colr", "-timecode", settings.timecode]
+        movflags = "+faststart+write_colr"
+        if preset.container == "mov" and preset.color.output == "Rec.709":
+            movflags += "+write_gama"
+            args += ["-mov_gamma", "2.4"]
+        args += ["-movflags", movflags, "-timecode", settings.timecode]
     if preset.container == "mxf":
         args += ["-timecode", settings.timecode, "-f", "mxf"]
+    if preset.color.output == "ACEScct":
+        # No H.273 AP1/ACEScct enums exist. Preserve a machine-readable native
+        # declaration instead of falsely labelling grading data as Rec.709.
+        args += [
+            "-metadata",
+            "comment="
+            + json.dumps(
+                {
+                    "chromascript_color_encoding": "ACEScct",
+                    "primaries": "AP1",
+                    "transfer": "ACEScct",
+                    "data_range": preset.data_range,
+                },
+                separators=(",", ":"),
+            ),
+        ]
     args += ["-threads", "4", str(destination)]
     return args
 
@@ -142,6 +232,13 @@ def encode(
                     or not np.isfinite(frame).all()
                 ):
                     raise ChromaError("encoder_input", "Invalid frame delivered to encoder")
+                if preset.color.output == "ACEScct" and (
+                    np.min(frame[..., :3]) < 0 or np.max(frame[..., :3]) > 1
+                ):
+                    raise ChromaError(
+                        "log_storage_range",
+                        "ACEScct code values exceed integer storage; choose float EXR to preserve them.",
+                    )
                 # Quantization occurs after the ACES output transform, preserving 16-bit
                 # encoder input. Lossy output precision is reported separately.
                 pixels = np.rint(np.clip(frame, 0, 1) * 65535).astype("<u2")
@@ -193,7 +290,10 @@ def probe(path: Path, count_frames: bool = True) -> dict[str, Any]:
     result = subprocess.run([*args, str(path)], capture_output=True, text=True, timeout=180)
     if result.returncode:
         raise ChromaError("probe_failed", result.stderr[-4000:])
-    return json.loads(result.stdout)
+    info = json.loads(result.stdout)
+    if path.suffix.lower() in {".mov", ".mp4"}:
+        info["container_color"] = quicktime_color_metadata(path)
+    return info
 
 
 def check_probe(
@@ -242,20 +342,64 @@ def check_probe(
     count = video.get("nb_read_frames") or video.get("nb_frames")
     if count is None or int(count) != settings.frames:
         issues.append("frame-count mismatch")
-    expected = tags(preset.color.output)
+    expected = _video_tags(preset)
     for key, value in [
         ("color_primaries", expected["primaries"]),
         ("color_transfer", expected["transfer"]),
     ]:
         # Some legacy uncompressed MOV encoders cannot carry all color tags. The file
         # remains experimental instead of being falsely certified by encoder presence.
-        if video.get(key) != value:
+        if video.get(key, "unknown") != value:
             issues.append(f"{key}: expected {value}, got {video.get(key)}")
     expected_matrix = (
         "gbr" if preset.pixel_format.startswith(("gbr", "rgb", "bgr")) else expected["matrix"]
     )
     if video.get("color_space") != expected_matrix:
         issues.append(f"matrix mismatch: {video.get('color_space')}")
+    if preset.container in {"mov", "mp4"}:
+        # A valid codec VUI alone does not prove Resolve can read container color
+        # metadata. Verify the physical colr atom and explicit QuickTime gamma.
+        expected_colr = {
+            "primaries": {"bt2020": 9, "smpte432": 12, "unknown": 2}.get(expected["primaries"], 1),
+            "transfer": {
+                "bt709": 1,
+                "unknown": 2,
+                "iec61966-2-1": 13,
+                "smpte2084": 16,
+                "arib-std-b67": 18,
+            }[expected["transfer"]],
+            "matrix": 0 if expected_matrix == "gbr" else 9 if expected_matrix == "bt2020nc" else 1,
+        }
+        container_color = info.get("container_color", [])
+        if len(container_color) != 1 or any(
+            container_color[0].get(key) != value for key, value in expected_colr.items()
+        ):
+            issues.append("QuickTime/MP4 colr mismatch or missing")
+        elif container_color[0].get("type") == "nclx" and container_color[0].get("full_range") != (
+            preset.data_range == "full"
+        ):
+            issues.append("MP4 colr range mismatch")
+        if (
+            preset.container == "mov"
+            and preset.color.output == "Rec.709"
+            and (
+                len(container_color) != 1
+                or not np.isclose(container_color[0].get("gamma", 0), 2.4, atol=1 / 65536)
+            )
+        ):
+            issues.append("QuickTime gamma mismatch or missing")
+    if preset.color.output == "ACEScct":
+        try:
+            declaration = json.loads(info.get("format", {}).get("tags", {}).get("comment", ""))
+        except (ValueError, TypeError):
+            declaration = {}
+        if declaration != {
+            "chromascript_color_encoding": "ACEScct",
+            "primaries": "AP1",
+            "transfer": "ACEScct",
+            "data_range": preset.data_range,
+        }:
+            issues.append("missing or incorrect native ACEScct declaration")
     expected_range = "pc" if preset.data_range == "full" else "tv"
     actual_range = video.get("color_range")
     implicit_range = actual_range is None and video.get("codec_name") in {
@@ -300,6 +444,13 @@ def check_probe(
         "range_signaling": "codec convention" if implicit_range else "explicit",
         "effective_range": expected_range,
         "container": preset.container,
+        "color_encoding": output_metadata(preset.color.output),
+        "container_color": info.get("container_color"),
+        "color_signaling": "native ACEScct declaration; AP1/transfer flags unspecified, manual interpretation required"
+        if preset.color.output == "ACEScct"
+        else "QuickTime/MP4 colr and codec tags"
+        if preset.container in {"mov", "mp4"}
+        else "container and codec tags",
     }
 
 
@@ -342,8 +493,40 @@ def check_image_metadata(metadata: dict[str, Any], preset: DeliveryPreset) -> li
             np.shape(actual_chroma) != (8,) or not np.allclose(actual_chroma, expected, atol=1e-7)
         ):
             issues.append("EXR chromaticities mismatch")
+        interop_id = {"ACEScg": "lin_ap1_scene", "ACES2065-1": "lin_ap0_scene"}.get(
+            preset.color.output
+        )
+        if preset.color.output == "ACEScct":
+            interop_id = "ocio:acescct_ap1_scene"
+            if metadata.get("chromascript:gamma") != "acescct":
+                issues.append("EXR ACEScct transfer mismatch")
+        if interop_id and metadata.get("colorInteropID") != interop_id:
+            issues.append("EXR colorInteropID mismatch")
         if preset.id == "aces2065-archive" and metadata.get("acesImageContainerFlag") != 1:
             issues.append("missing ACES image container flag")
+        if preset.color.output in {"ACEScg", "ACEScct"} and metadata.get("acesImageContainerFlag"):
+            issues.append("AP1 data must not carry the AP0 ACES image container flag")
+    elif preset.container == "png":
+        # Require physical PNG color chunks, not the reader's assumed sRGB space.
+        if metadata.get("png:sRGB") not in {0, 1, 2, 3}:
+            issues.append("missing PNG sRGB chunk")
+        if not np.isclose(metadata.get("png:Gamma", 0), 0.45455, atol=1e-5):
+            issues.append("PNG gamma mismatch")
+        chroma = metadata.get("png:Chromaticities", [])
+        if np.shape(chroma) != (8,) or not np.allclose(
+            chroma, (0.3127, 0.329, 0.64, 0.33, 0.30, 0.60, 0.15, 0.06), atol=1e-5
+        ):
+            issues.append("PNG chromaticities mismatch")
+    elif preset.container == "tiff":
+        if not metadata.get("ICCProfile", {}).get("matches_srgb"):
+            issues.append("missing or mismatched TIFF sRGB ICC profile")
+    elif preset.container == "dpx":
+        if metadata.get("dpx:Colorimetric") != "ITU-R 709-4":
+            issues.append("DPX colorimetric mismatch")
+        if metadata.get("dpx:Transfer") != "User defined" or not np.isclose(
+            metadata.get("dpx:Gamma", 0), 2.4, atol=1e-6
+        ):
+            issues.append("DPX gamma mismatch")
     if preset.alpha and preset.container in {"png", "tiff"}:
         associated = not metadata.get("oiio:UnassociatedAlpha", 0)
         if associated != (preset.alpha_mode == "premultiplied"):

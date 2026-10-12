@@ -11,9 +11,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from .color import GAMMA_LABELS, SPACE_LABELS, output_metadata
 from .encoding import available_encoders
 from .errors import ChromaError
-from .models import ColorPipeline, DeliveryConfiguration, DeliveryPreset
+from .models import OUTPUT_ENCODINGS, ColorPipeline, DeliveryConfiguration, DeliveryPreset
 from .presets import FRAME_RATES
 from .store import canonical
 
@@ -47,7 +48,9 @@ LABELS = {
     "bit_depth": "位深",
     "sampling": "色度采样",
     "alpha_mode": "Alpha",
-    "color_output": "输出色彩",
+    "color_space": "输出色彩空间",
+    "gamma": "传递函数 / Gamma",
+    "color_output": "色彩编码（兼容）",
     "data_range": "数据范围",
     "compression": "图像压缩",
     "quality_mode": "质量控制",
@@ -73,13 +76,10 @@ PROFILE_LABELS = {
     "hqx": "HQX",
     "444": "444",
 }
+# Keep API aliases compatible while reporting the same complete color encoding.
 COLOR_LABELS = {
-    "ACEScg": "ACEScg / AP1 线性",
-    "ACES2065-1": "ACES2065-1 / AP0 线性",
-    "sRGB": "sRGB",
-    "Rec.709": "Rec.709 / Rec.1886",
-    "PQ": "PQ · 1000 nit",
-    "HLG": "HLG · 1000 nit",
+    output: f"{SPACE_LABELS[space]} / {GAMMA_LABELS[gamma]}"
+    for output, (space, gamma) in OUTPUT_ENCODINGS.items()
 }
 ALPHA_LABELS = {"none": "无 Alpha", "straight": "直通 Alpha", "premultiplied": "预乘 Alpha"}
 MXF_RATES = {"24/1", "25/1", "30/1", "50/1", "60/1", "24000/1001", "30000/1001", "60000/1001"}
@@ -206,14 +206,21 @@ def _alpha_modes(codec: str, variant: Variant) -> list[str]:
     return ["none"]
 
 
-def _colors(codec: str, depth: int = 32) -> list[str]:
+def _colors(codec: str, depth: int = 32, container: str | None = None) -> list[str]:
     if codec == "exr":
-        return ["ACEScg", "ACES2065-1"]
+        return ["ACEScg", "ACES2065-1", "ACEScct"]
     if codec in {"png", "tiff"}:
         return ["sRGB"]
     if codec == "dpx":
         return ["Rec.709"]
-    return ["Rec.709", "sRGB"] + (["PQ", "HLG"] if depth >= 10 and codec != "h264" else [])
+    outputs = ["Rec.709", "sRGB", "Display-P3"]
+    # Integer log exports need useful precision and a container with explicit
+    # user metadata. Float EXR remains available for values outside [0, 1].
+    if depth >= 10 and container != "mxf":
+        outputs += ["ACEScct"]
+    if depth >= 10 and codec != "h264":
+        outputs += ["PQ", "HLG", "P3-PQ"]
+    return outputs
 
 
 def _pick(value: Any, values: list[Any]) -> Any:
@@ -234,6 +241,9 @@ def delivery_options(
         raise ChromaError("delivery_field", "Unknown delivery field", field=changed_field)
     requested = configuration or DeliveryConfiguration()
     values = requested.model_dump()
+    if changed_field == "color_output":
+        # Old clients changing the combined alias receive the same split settings.
+        values["color_space"], values["gamma"] = OUTPUT_ENCODINGS[requested.color_output]
     supported = supported_variants()
     containers = [c for c in CONTAINERS if any(c in CODECS[k][2] for k in supported)]
     if not containers:
@@ -260,11 +270,24 @@ def delivery_options(
         if field == "alpha_mode":
             return values[field] in _alpha_modes(codec, v)
         if field == "color_output":
-            return values[field] in _colors(codec, v.depth)
+            return values[field] in _colors(codec, v.depth, values["container"])
+        if field in {"color_space", "gamma"}:
+            index = 0 if field == "color_space" else 1
+            return any(
+                OUTPUT_ENCODINGS[c][index] == values[field]
+                for c in _colors(codec, v.depth, values["container"])
+            )
         return True
 
     # The field the user changed wins; compatible choices survive, conflicts are explicit.
-    priorities = [changed_field, "profile", "bit_depth", "sampling", "alpha_mode", "color_output"]
+    order = ["profile", "bit_depth", "sampling", "alpha_mode", "color_space", "gamma"]
+    # Partial MCP/CLI requests must not lose an explicit log/HDR choice to an
+    # implicit 8-bit default. Full drafts still prioritize the field just edited.
+    priorities = [
+        changed_field,
+        *[field for field in order if field in requested.model_fields_set],
+        *order,
+    ]
     for field in dict.fromkeys(f for f in priorities if f is not None):
         matching = [v for v in candidates if matches(v, field)]
         if matching:
@@ -288,8 +311,30 @@ def delivery_options(
             if values["alpha_mode"] != "none" and "straight" in alpha_modes
             else alpha_modes[0]
         )
-    colors = _colors(codec, variant.depth)
-    values["color_output"] = _pick(values["color_output"], colors)
+    colors = _colors(codec, variant.depth, values["container"])
+    # The changed gamut/gamma wins, then retain the other control where compatible.
+    # This also promotes HEVC to 10-bit when Rec.2020 HDR is selected.
+    color_candidates = colors
+    for color_field in dict.fromkeys([changed_field, "color_space", "gamma"]):
+        if color_field is None:
+            continue
+        field = color_field
+        if field not in {"color_space", "gamma", "color_output"}:
+            continue
+        matching_colors = [
+            c
+            for c in color_candidates
+            if (
+                c
+                if field == "color_output"
+                else OUTPUT_ENCODINGS[c][0 if field == "color_space" else 1]
+            )
+            == values[field]
+        ]
+        if matching_colors:
+            color_candidates = matching_colors
+    values["color_output"] = color_candidates[0]
+    values["color_space"], values["gamma"] = OUTPUT_ENCODINGS[color_candidates[0]]
     ranges = (
         ["full"]
         if codec in IMAGES or variant.sampling == "RGB"
@@ -318,6 +363,39 @@ def delivery_options(
         if values["quality_mode"] == "bitrate"
         else None
     )
+    # Keep every requested family discoverable while disabling combinations
+    # which cannot be encoded honestly by the current format.
+    available_colors = _colors(codec, max(v.depth for v in variants), values["container"])
+    available_spaces = {OUTPUT_ENCODINGS[output][0] for output in available_colors}
+    space_options = []
+    for space, label in SPACE_LABELS.items():
+        reason = ""
+        if space not in available_spaces:
+            reason = "需使用浮点 EXR" if space in {"ACEScg", "ACES2065-1"} else "当前格式不可用"
+        space_options.append(
+            {
+                "value": space,
+                "label": label + (" · " + reason if reason else ""),
+                "disabled": bool(reason),
+                "reason": reason,
+            }
+        )
+    range_note = (
+        "浮点/RGB 图像使用 Full 范围。"
+        if ranges == ["full"]
+        else "此 YCbCr 格式采用 Limited 范围约定，不能可靠标记 Full。"
+        if ranges == ["limited"]
+        else ""
+    )
+    range_options = [
+        {
+            "value": value,
+            "label": label,
+            "disabled": value not in ranges,
+            "reason": range_note if value not in ranges else "",
+        }
+        for value, label in [("full", "Full（全范围）"), ("limited", "Limited（视频范围）")]
+    ]
     normalized = DeliveryConfiguration.model_validate(values)
     changes = [
         {"field": f, "label": LABELS.get(f, f), "previous": requested.model_dump()[f], "value": v}
@@ -331,6 +409,12 @@ def delivery_options(
     ]
     return {
         "configuration": normalized.model_dump(),
+        "color_encoding": output_metadata(normalized.color_output),
+        "color_space_note": "灰色选项当前格式不可用；ACEScg 浮点母版请使用 EXR。",
+        "data_range_note": range_note,
+        "color_note": "ACEScct 视频导入时请明确指定 ACES (AP1) / ACEScct；原生色彩标记为未指定，完整解释见交付报告。"
+        if normalized.color_output == "ACEScct" and codec != "exr"
+        else "",
         "options": {
             "container": _options(containers, CONTAINERS),
             "codec": _options(codecs, {k: v[0] for k, v in CODECS.items()}),
@@ -356,8 +440,19 @@ def delivery_options(
                 list(dict.fromkeys(a for v in variants for a in _alpha_modes(codec, v))),
                 ALPHA_LABELS,
             ),
-            "color_output": _options(_colors(codec, max(v.depth for v in variants)), COLOR_LABELS),
-            "data_range": _options(ranges, {"full": "完整范围", "limited": "视频范围"}),
+            "color_output": _options(
+                _colors(codec, max(v.depth for v in variants), values["container"]), COLOR_LABELS
+            ),
+            "color_space": space_options,
+            "gamma": _options(
+                [
+                    OUTPUT_ENCODINGS[c][1]
+                    for c in _colors(codec, max(v.depth for v in variants), values["container"])
+                    if OUTPUT_ENCODINGS[c][0] == normalized.color_space
+                ],
+                GAMMA_LABELS,
+            ),
+            "data_range": range_options,
             "compression": _options(
                 compression,
                 {None: "不适用", "zip": "ZIP 无损", "piz": "PIZ 无损", "none": "无压缩"},
@@ -404,7 +499,7 @@ def configured_output(configuration: DeliveryConfiguration) -> DeliveryPreset:
     # IDs identify immutable output files; nothing is saved to the user's preset library.
     return DeliveryPreset(
         id=f"delivery-{c.codec}-{c.profile or c.bit_depth}-{re.sub(r'[^a-z0-9-]', '', c.color_output.lower())}-{digest}",
-        name=f"{CONTAINERS[c.container]} · {CODECS[c.codec][0]} {PROFILE_LABELS.get(c.profile or '', '')} · {c.bit_depth}-bit · {c.color_output}",
+        name=f"{CONTAINERS[c.container]} · {CODECS[c.codec][0]} {PROFILE_LABELS.get(c.profile or '', '')} · {c.bit_depth}-bit · {SPACE_LABELS[c.color_space]} / {GAMMA_LABELS[c.gamma]}",
         family="自主交付",
         container=c.container,
         codec=CODECS[c.codec][1],

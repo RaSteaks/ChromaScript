@@ -31,7 +31,8 @@ def create_mcp(root: Path) -> MCPServer:
             async with httpx.AsyncClient(timeout=60) as client:
                 response = await client.post(
                     info["url"] + "/api/operations/" + name,
-                    json=request.model_dump(mode="json"),
+                    # Keep nested explicit-field intent identical to direct HTTP.
+                    json=request.model_dump(mode="json", exclude_unset=True),
                     headers={"Authorization": "Bearer " + info["token"]},
                 )
             data = response.json()

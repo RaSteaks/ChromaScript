@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import { ArrowDownToLine, Plus, RefreshCw, X } from "lucide-react";
 import { Button, Field, Notice } from "./components";
 import type { useDeliveryTargets } from "./delivery";
@@ -14,13 +15,20 @@ const FIELDS: [DeliverySelectField, string][] = [
   ["bit_depth", "位深"],
   ["sampling", "色度采样"],
   ["alpha_mode", "Alpha"],
-  ["color_output", "输出色彩"],
+  ["color_space", "输出色彩空间"],
+  ["gamma", "传递函数 / Gamma"],
   ["data_range", "数据范围"],
   ["compression", "图像压缩"],
   ["quality_mode", "质量控制"],
 ];
 
-/** Native dropdowns share the server's constraints; no preset IDs are selected or saved. */
+const GROUP_TITLES: Partial<Record<DeliverySelectField, string>> = {
+  container: "格式与编码",
+  color_space: "色彩与范围",
+  compression: "压缩与质量",
+};
+
+/** Gamut and gamma use the server's paired transforms and format constraints. */
 export function DeliveryEditor({ delivery, disabled }: Props) {
   return (
     <section className="delivery-editor" aria-label="目标交付格式">
@@ -38,9 +46,18 @@ export function DeliveryEditor({ delivery, disabled }: Props) {
           添加
         </Button>
       </div>
+      <p className="panel-description">
+        先选封装与编码，再检查色彩、精度和质量。可添加不同格式同时交付。
+      </p>
       {delivery.targets.map((target, index) => {
         const { configuration: config, resolved } = target;
         const prefix = `delivery-${target.id}`;
+        // Only the shared server's separated color contract is presented here.
+        // Updating the compatibility alias is bookkeeping, not another user choice.
+        const adjustments =
+          resolved?.adjustments.filter(
+            (item) => item.field !== "color_output",
+          ) ?? [];
         return (
           <fieldset
             key={target.id}
@@ -49,6 +66,18 @@ export function DeliveryEditor({ delivery, disabled }: Props) {
           >
             <legend>交付目标 {index + 1}</legend>
             <div className="target-actions">
+              <strong className="target-summary">
+                {["container", "codec", "bit_depth"]
+                  .map(
+                    (field) =>
+                      resolved?.options[field as DeliverySelectField].find(
+                        (item) =>
+                          item.value === config[field as DeliverySelectField],
+                      )?.label,
+                  )
+                  .filter(Boolean)
+                  .join(" · ") || "正在读取可选格式…"}
+              </strong>
               <Button
                 disabled={disabled || delivery.targets.length === 1}
                 aria-label={`移除交付目标 ${index + 1}`}
@@ -62,43 +91,104 @@ export function DeliveryEditor({ delivery, disabled }: Props) {
                 {FIELDS.map(([field, label]) => {
                   const options = resolved.options[field];
                   return (
-                    <Field key={field} label={label} id={`${prefix}-${field}`}>
-                      <select
+                    <Fragment key={field}>
+                      {/* Group titles explain decisions; option compatibility remains server-owned. */}
+                      {GROUP_TITLES[field] && (
+                        <h4 className="delivery-group-title">
+                          {GROUP_TITLES[field]}
+                        </h4>
+                      )}
+                      {field === "color_space" && (
+                        <p className="color-encoding-summary">
+                          {resolved.color_encoding.profile_label} ·{" "}
+                          {resolved.color_encoding.white_point}
+                        </p>
+                      )}
+                      <Field
+                        label={label}
                         id={`${prefix}-${field}`}
-                        value={config[field] ?? ""}
-                        disabled={
-                          disabled ||
-                          (target.pending && field !== "container") ||
-                          options.length < 2 ||
-                          (!!target.error && field !== "container")
+                        hint={
+                          field === "color_space"
+                            ? resolved.color_space_note
+                            : field === "data_range"
+                              ? resolved.data_range_note || undefined
+                              : undefined
                         }
-                        onChange={(event) => {
-                          const raw = event.target.value;
-                          const value =
-                            field === "bit_depth"
-                              ? Number(raw)
-                              : (field === "profile" ||
-                                    field === "compression") &&
-                                  raw === ""
-                                ? null
-                                : raw;
-                          delivery.change(
-                            target.id,
-                            field,
-                            value as DeliveryConfiguration[typeof field],
-                          );
-                        }}
                       >
-                        {options.map((option) => (
-                          <option
-                            key={String(option.value)}
-                            value={option.value ?? ""}
-                          >
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </Field>
+                        <select
+                          id={`${prefix}-${field}`}
+                          value={config[field] ?? ""}
+                          aria-describedby={
+                            (field === "color_space" &&
+                              resolved.color_space_note) ||
+                            (field === "data_range" && resolved.data_range_note)
+                              ? `${prefix}-${field}-help`
+                              : undefined
+                          }
+                          disabled={
+                            disabled ||
+                            (target.pending && field !== "container") ||
+                            options.length < 2 ||
+                            (!!target.error && field !== "container")
+                          }
+                          onChange={(event) => {
+                            const raw = event.target.value;
+                            const value =
+                              field === "bit_depth"
+                                ? Number(raw)
+                                : (field === "profile" ||
+                                      field === "compression") &&
+                                    raw === ""
+                                  ? null
+                                  : raw;
+                            delivery.change(
+                              target.id,
+                              field,
+                              value as DeliveryConfiguration[typeof field],
+                            );
+                          }}
+                        >
+                          {options.map((option) => (
+                            <option
+                              key={String(option.value)}
+                              value={option.value ?? ""}
+                              disabled={option.disabled}
+                            >
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                      {field === "gamma" && (
+                        <Field
+                          label="目标显示峰值亮度"
+                          id={`${prefix}-target-peak`}
+                          hint={
+                            resolved.color_encoding.dynamic_range.startsWith(
+                              "scene-",
+                            )
+                              ? "场景编码母版不烘焙显示输出变换。"
+                              : "由当前 ACES 输出变换固定；与色域、传递函数分别记录。"
+                          }
+                        >
+                          <input
+                            id={`${prefix}-target-peak`}
+                            type="text"
+                            readOnly
+                            value={
+                              resolved.color_encoding
+                                .target_display_peak_nits === null
+                                ? resolved.color_encoding.dynamic_range ===
+                                  "scene-log"
+                                  ? "不适用（ACEScct 对数）"
+                                  : "不适用（场景线性）"
+                                : `${resolved.color_encoding.target_display_peak_nits} cd/m²（nit）`
+                            }
+                            aria-describedby={`${prefix}-target-peak-help`}
+                          />
+                        </Field>
+                      )}
+                    </Fragment>
                   );
                 })}
                 {(["crf", "bitrate_kbps", "gop_seconds"] as const)
@@ -166,9 +256,9 @@ export function DeliveryEditor({ delivery, disabled }: Props) {
             <div className="delivery-state" role="status">
               {target.pending
                 ? "正在更新可选格式…"
-                : resolved && !target.error && resolved.adjustments.length > 0
+                : resolved && !target.error && adjustments.length > 0
                   ? "已联动调整：" +
-                    resolved.adjustments
+                    adjustments
                       .map((item) => {
                         const options =
                           resolved.options[item.field as DeliverySelectField] ||
@@ -196,6 +286,9 @@ export function DeliveryEditor({ delivery, disabled }: Props) {
                   重试联动选项
                 </Button>
               </div>
+            )}
+            {resolved?.color_note && (
+              <p className="technical-note">{resolved.color_note}</p>
             )}
             {resolved?.precision_note && (
               <p className="technical-note">{resolved.precision_note}</p>

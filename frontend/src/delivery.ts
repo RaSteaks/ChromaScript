@@ -10,6 +10,9 @@ export const DEFAULT_DELIVERY: DeliveryConfiguration = {
   bit_depth: 8,
   sampling: "420",
   alpha_mode: "none",
+  // The server resolves this gamut/transfer pair and its legacy combined alias.
+  color_space: "Rec.709",
+  gamma: "gamma2.4",
   color_output: "Rec.709",
   data_range: "limited",
   compression: null,
@@ -87,6 +90,16 @@ export function useDeliveryTargets() {
           controller.signal.aborted
         )
           return;
+        // A mixed legacy menu cannot represent the standardized color controls.
+        // Keep the draft and block submission until the daemon exposes this contract.
+        if (
+          !resolved.options.color_space ||
+          !resolved.options.gamma ||
+          !resolved.color_encoding
+        )
+          throw new Error(
+            "本地服务需要更新：请重新启动服务，再重试输出色彩设置。",
+          );
         publish(
           current.current.map((target) =>
             target.id === id

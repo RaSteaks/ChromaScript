@@ -103,6 +103,8 @@ def render(
     bit_depth: int | None = None,
     sampling: str | None = None,
     color_output: str | None = None,
+    color_space: str | None = None,
+    gamma: str | None = None,
     alpha_mode: str | None = None,
     data_range: str | None = None,
     compression: str | None = None,
@@ -136,11 +138,16 @@ def render(
         "bit_depth": bit_depth,
         "sampling": sampling,
         "color_output": color_output,
+        "color_space": color_space,
+        "gamma": gamma,
         "alpha_mode": alpha_mode,
         "data_range": data_range,
         "compression": compression,
     }
-    explicit = {k: v for k, v in fields.items() if v is not None}
+    from .models import normalize_delivery_field
+
+    # Human aliases compare against the same canonical values stored by the service.
+    explicit = {k: normalize_delivery_field(k, v) for k, v in fields.items() if v is not None}
     try:
         if preset:
             if (
@@ -153,6 +160,11 @@ def render(
                 raise ChromaError("delivery_arguments", "不能将旧预设与直接交付参数混用。")
             result = call(workspace, "submit_delivery", {**args, "preset_ids": preset})
         else:
+            # A legacy output alias is an alternative to the new gamut/gamma pair.
+            if color_output is not None and (color_space is not None or gamma is not None):
+                raise ChromaError(
+                    "delivery_arguments", "不能将 --color-output 与 --color-space / --gamma 混用。"
+                )
             if crf is not None and bitrate_kbps is not None:
                 raise ChromaError("delivery_arguments", "请选择 CRF 或目标码率。")
             initial = {"container": container, **({"codec": codec} if codec is not None else {})}
@@ -163,6 +175,19 @@ def render(
             )["configuration"]
             if codec is not None and base["codec"] != codec:
                 raise ChromaError("delivery_arguments", "该封装不支持指定编码，请修改封装或编码。")
+            if color_output is not None:
+                from .models import OUTPUT_ENCODINGS
+
+                if color_output in OUTPUT_ENCODINGS:
+                    base["color_space"], base["gamma"] = OUTPUT_ENCODINGS[color_output]
+            if color_space is not None or gamma is not None:
+                # Let the shared operation infer missing color components and
+                # report invalid values through the same structured error path.
+                base = {
+                    k: v
+                    for k, v in {**base, **explicit}.items()
+                    if k not in {"color_output", "color_space", "gamma"} or k in explicit
+                }
             if crf is not None:
                 explicit.update(quality_mode="crf", crf=crf)
             if bitrate_kbps is not None:

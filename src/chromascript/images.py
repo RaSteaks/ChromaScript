@@ -5,19 +5,40 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import struct
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import OpenImageIO as oiio
 from numpy.typing import NDArray
+from PIL import Image, ImageCms
 
+from .color import output_metadata
 from .errors import ChromaError
 
 CHROMATICITIES = {
     "ACEScg": (0.713, 0.293, 0.165, 0.830, 0.128, 0.044, 0.32168, 0.33767),
     "ACES2065-1": (0.7347, 0.2653, 0.0, 1.0, 0.0001, -0.077, 0.32168, 0.33767),
 }
+# ACEScct is AP1 with a log curve, not an AP0 ACES image container.
+CHROMATICITIES["ACEScct"] = CHROMATICITIES["ACEScg"]
+DPX_GAMMA_OFFSET = 1948  # SMPTE ST 268 television header, field 68 (R32).
+
+
+@lru_cache(maxsize=1)
+def srgb_profile() -> bytes:
+    """Embed a real RGB/TRC profile without applying a second pixel transform."""
+    return ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+
+
+def _dpx_byte_order(header: bytes) -> str:
+    if header[:4] == b"SDPX":
+        return ">"
+    if header[:4] == b"XPDS":
+        return "<"
+    raise ChromaError("image_metadata", "Invalid DPX header")
 
 
 def write_image(
@@ -62,7 +83,10 @@ def write_image(
     # rather than an equivalent human-readable OCIO alias.
     storage_space = {"ACEScg": "lin_ap1_scene", "ACES2065-1": "lin_ap0_scene"}.get(space, space)
     spec.attribute("oiio:ColorSpace", storage_space)
+    encoding = output_metadata(space)
     spec.attribute("chromascript:color_space", space)
+    spec.attribute("chromascript:output_color_space", encoding["color_space"])
+    spec.attribute("chromascript:gamma", encoding["gamma"])
     spec.attribute("chromascript:alpha_mode", alpha_mode)
     spec.attribute("chromascript:config_sha256", config_hash)
     spec.attribute("oiio:UnassociatedAlpha", int(alpha_mode == "straight"))
@@ -77,6 +101,16 @@ def write_image(
             spec.attribute("acesImageContainerFlag", 1)
     elif path.suffix.lower() == ".dpx":
         spec.attribute("oiio:BitsPerSample", depth)
+        # Rec.1886 is a display gamma, not the BT.709 camera OETF. DPX has
+        # no enum for gamma 2.4; use user-defined transfer plus its numeric gamma.
+        spec.attribute("dpx:Colorimetric", "ITU-R 709-4")
+        spec.attribute("dpx:Transfer", "User defined")
+        spec.attribute("ImageDescription", "Rec.709 / Gamma 2.4 (Rec.1886)")
+    elif path.suffix.lower() in {".tif", ".tiff"} and space == "sRGB":
+        # TIFF drops arbitrary attributes. ICC tag 34675 preserves its actual
+        # primaries and piecewise transfer in a standard, portable file field.
+        profile = srgb_profile()
+        spec.attribute("ICCProfile", oiio.TypeDesc(f"uint8[{len(profile)}]"), profile)
     if not is_exr:
         # Integer display formats are quantized only after their output transform.
         scale = 65535 if depth > 8 else 255
@@ -95,6 +129,16 @@ def write_image(
             raise ChromaError("image_write", output.geterror())
         if not output.close():
             raise ChromaError("image_write", output.geterror())
+        if path.suffix.lower() == ".dpx":
+            # OIIO 3.1 does not expose the television gamma field. Patch only
+            # that standard float in the private partial file, before publication.
+            with partial.open("r+b") as stream:
+                header = stream.read(DPX_GAMMA_OFFSET + 4)
+                if len(header) != DPX_GAMMA_OFFSET + 4:
+                    raise ChromaError("image_metadata", "DPX television header is missing")
+                order = _dpx_byte_order(header)
+                stream.seek(DPX_GAMMA_OFFSET)
+                stream.write(struct.pack(order + "f", 2.4))
         os.replace(partial, path)
     except Exception:
         output.close()
@@ -122,7 +166,38 @@ def read_image(path: Path, *, straight: bool = True) -> tuple[NDArray[np.float32
     try:
         spec = source.spec()
         pixels = np.asarray(source.read_image(format=oiio.FLOAT), dtype=np.float32)
-        metadata = {a.name: a.value for a in spec.extra_attribs}
+        metadata: dict[str, Any] = {a.name: a.value for a in spec.extra_attribs}
+        if "ICCProfile" in metadata:
+            profile = bytes(metadata["ICCProfile"])
+            expected_profile = srgb_profile()
+            # Creation time may vary between workers; compare every colorimetric
+            # byte, rather than trusting the profile's human-readable name.
+            metadata["ICCProfile"] = {
+                "size_bytes": len(profile),
+                "sha256": hashlib.sha256(profile).hexdigest(),
+                "matches_srgb": profile[:24] + profile[36:]
+                == expected_profile[:24] + expected_profile[36:],
+            }
+        if source.format_name() == "png":
+            # OIIO assumes sRGB for untagged PNGs. Read native chunks as evidence
+            # so that an absent tag cannot pass a delivery check by that default.
+            with Image.open(path) as png:
+                for key, name in [
+                    ("srgb", "png:sRGB"),
+                    ("gamma", "png:Gamma"),
+                    ("chromaticity", "png:Chromaticities"),
+                ]:
+                    if key in png.info:
+                        metadata[name] = png.info[key]
+        elif source.format_name() == "dpx":
+            with path.open("rb") as stream:
+                header = stream.read(DPX_GAMMA_OFFSET + 4)
+            if len(header) == DPX_GAMMA_OFFSET + 4:
+                gamma = struct.unpack_from(_dpx_byte_order(header) + "f", header, DPX_GAMMA_OFFSET)[
+                    0
+                ]
+                if np.isfinite(gamma):
+                    metadata["dpx:Gamma"] = gamma
         # TIFF stores association in its standard ExtraSamples flag, and does not
         # retain our custom EXR attribute. Infer it before returning straight RGB.
         if source.format_name() == "tiff" and spec.alpha_channel >= 0:

@@ -45,11 +45,12 @@ async def main(args):
                 "bit_depth",
             ),
             ({"container": "mov", "codec": "prores", "alpha_mode": "straight"}, "alpha_mode"),
-            ({"codec": "hevc", "color_output": "PQ"}, "color_output"),
+            ({"codec": "hevc", "color_space": "Rec.2020", "gamma": "st2084"}, "color_space"),
         ]:
             options = await call("get_delivery_options", configuration=value, changed_field=field)
             configurations.append(options["configuration"])
         assert configurations[2]["profile"] == "4444" and configurations[3]["bit_depth"] == 10
+        assert configurations[3]["color_output"] == "PQ"  # Legacy alias describes the same pair.
         checks["linked_choices"] = True
         project = (await call("create_project", name="直接交付 MCP 验收"))["project"]
         scene = await call("create_scene", project_id=project["id"], template_id="shapes")
@@ -94,6 +95,7 @@ async def main(args):
             raise TimeoutError(job["id"])
         report = await call("validate_delivery_output", job_id=job["id"])
         assert report["passed"] and len(report["outputs"]) == 4
+        assert all("color_encoding" in output for output in report["outputs"])
         preview = next(a for a in result["artifacts"] if a["kind"] == "preview-image")
         image = await client.call_tool(
             "chromascript.get_artifact",

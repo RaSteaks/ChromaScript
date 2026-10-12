@@ -104,7 +104,9 @@ def create_app(root: Path, port: int = 8765, export_roots: list[Path] | None = N
 
         def handler(request):
             try:
-                return execute(service, name, request.model_dump(mode="json"))
+                # Preserve omitted fields across revalidation so format defaults
+                # cannot override an explicit gamut/transfer request.
+                return execute(service, name, request.model_dump(mode="json", exclude_unset=True))
             except ChromaError as exc:
                 return JSONResponse({"error": exc.as_dict()}, status_code=400)
             except (ValidationError, ValueError) as exc:

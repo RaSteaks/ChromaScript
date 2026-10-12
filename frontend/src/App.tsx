@@ -17,6 +17,7 @@ import {
   Film,
   FolderPlus,
   Layers,
+  Pause,
   Play,
   Plus,
   RefreshCw,
@@ -27,7 +28,14 @@ import {
   Workflow,
 } from "lucide-react";
 import { artifactUrl, call, connect } from "./api";
+import { WorkflowNav, WORKFLOW, type WorkflowStep } from "./WorkflowNav";
 import { DeliveryEditor } from "./DeliveryEditor";
+import {
+  ColorField,
+  validColorChannels,
+  type ColorInputDraft,
+} from "./ColorField";
+import { LIVE_PLAYBACK_INTERVAL, useLivePreview } from "./livePreview";
 import { useDeliveryTargets } from "./delivery";
 import { Button, Field, Modal, Notice, Textarea } from "./components";
 import type {
@@ -52,6 +60,25 @@ const STATUS: Record<string, string> = {
   cancelled: "已取消",
   interrupted: "已中断",
 };
+const STEP_HELP: Record<WorkflowStep, string> = {
+  scene: "先选择项目，再打开已有场景或从模板创建画面。",
+  preview: "设置画面规格，调整参数或代码，即时查看草稿效果。",
+  delivery:
+    "沿用预览中的画面规格，选择一个或多个交付格式。下拉选项会自动联动。",
+  jobs: "查看后台任务进度，选择任务后下载文件或导出完整图像序列。",
+};
+function jobLabel(job: Job) {
+  if (job.kind === "frame")
+    return (job.frame_indices?.length || 1) > 1 ? "关键帧预览" : "单帧预览";
+  return (
+    {
+      preview: "动画预览",
+      sequence: "图像序列",
+      delivery: "交付渲染",
+      probe: "能力检查",
+    }[job.kind] || "渲染任务"
+  );
+}
 const fmt = (value: number) =>
   Number.isFinite(value)
     ? new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value)
@@ -69,6 +96,17 @@ function errorText(error: unknown) {
 
 export default function App() {
   const [tab, setTab] = useState("workspace");
+  // Steps are views over the same drafts, not destructive wizard transitions.
+  const [step, setStep] = useState<WorkflowStep>("scene");
+  const stepHeading = useRef<HTMLHeadingElement>(null);
+  const previousStep = useRef(step);
+  useEffect(() => {
+    document.title = `${tab === "mcp" ? "MCP 接口" : WORKFLOW.find((item) => item.id === step)?.label} · ChromaScript`;
+    if (tab === "workspace" && previousStep.current !== step) {
+      stepHeading.current?.focus();
+      previousStep.current = step;
+    }
+  }, [step, tab]);
   const [caps, setCaps] = useState<Capability | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState("");
@@ -76,21 +114,35 @@ export default function App() {
   const [sceneId, setSceneId] = useState("");
   const [saved, setSaved] = useState<SceneReply | null>(null);
   const [draft, setDraft] = useState<Scene | null>(null);
+  // Raw RGB belongs to the current scene's editing session, not a mounted step.
+  const [colorDrafts, setColorDrafts] = useState<
+    Record<string, ColorInputDraft | null>
+  >({});
   const [templates, setTemplates] = useState<Template[]>([]);
   const delivery = useDeliveryTargets();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [jobPage, setJobPage] = useState(0);
   const [jobTotal, setJobTotal] = useState(0);
   const [activeJobId, setActiveJobId] = useState("");
+  // Keep selected-job metadata when its row leaves the paginated queue.
+  const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [previewIndex, setPreviewIndex] = useState(0);
   const [showMotion, setShowMotion] = useState(false);
+  const [liveEnabled, setLiveEnabled] = useState(true);
+  const [livePlaying, setLivePlaying] = useState(false);
+  const [composing, setComposing] = useState(false);
+  const liveMode = useRef(liveEnabled);
+  useEffect(() => {
+    liveMode.current = liveEnabled;
+  }, [liveEnabled]);
   const [stats, setStats] = useState<{
     minimum: number[];
     maximum: number[];
     high_rgb_values: number;
     negative_rgb_values: number;
   } | null>(null);
+  const [inspectionError, setInspectionError] = useState("");
   const [pixel, setPixel] = useState<{
     x: number;
     y: number;
@@ -123,13 +175,26 @@ export default function App() {
   const [exportError, setExportError] = useState("");
   const [exportedPath, setExportedPath] = useState("");
   const [operations, setOperations] = useState<Operation[]>([]);
-  const [estimate, setEstimate] = useState<Record<string, number> | null>(null);
+  const [estimate, setEstimate] = useState<{
+    values: Record<string, number>;
+    recipe: string;
+  } | null>(null);
+  const incompleteColor = Object.values(colorDrafts).some(
+    (input) => input !== null && !validColorChannels(input.channels),
+  );
   const dirty =
-    !!draft && !!saved && JSON.stringify(draft) !== JSON.stringify(saved.scene);
+    !!draft &&
+    !!saved &&
+    (incompleteColor || JSON.stringify(draft) !== JSON.stringify(saved.scene));
   const activeProject = projects.find((p) => p.id === projectId);
-  const activeJob = jobs.find((j) => j.id === activeJobId);
+  const activeJob =
+    jobs.find((j) => j.id === activeJobId) ||
+    (selectedJob?.id === activeJobId ? selectedJob : undefined);
   const activeJobStatus = activeJob?.status;
-  const previewImages = artifacts.filter((a) => a.kind === "preview-image");
+  // A project queue may select another scene's job; never label its picture as this scene.
+  const previewImages = artifacts.filter(
+    (a) => a.kind === "preview-image" && activeJob?.scene_id === sceneId,
+  );
   const preview = previewImages[previewIndex] || previewImages[0];
   const master = artifacts.find(
     (a) =>
@@ -137,15 +202,22 @@ export default function App() {
   );
   const masterId = master?.id;
   const motion = artifacts.find((a) => {
-    const video = (
-      a.metadata.verification as
-        { video?: { codec_name?: string; pix_fmt?: string } } | undefined
-    )?.video;
-    // Professional 10-bit/4:4:4 deliverables need their own player; the browser proxy is 8-bit 4:2:0.
+    const verification = a.metadata.verification as
+      | {
+          video?: { codec_name?: string; pix_fmt?: string };
+          color_encoding?: { color_space?: string };
+        }
+      | undefined;
+    const video = verification?.video;
+    // A P3/log deliverable is not the sRGB review proxy shown by this viewer.
+    // Generate a separate preview so labels and display interpretation stay honest.
     return (
       a.kind === "video" &&
+      activeJob?.scene_id === sceneId &&
       (a.name === "h264-review.mp4" ||
-        (video?.codec_name === "h264" && video.pix_fmt === "yuv420p"))
+        (video?.codec_name === "h264" &&
+          video.pix_fmt === "yuv420p" &&
+          verification?.color_encoding?.color_space === "Rec.709"))
     );
   });
   const frameRate = Number(fps.split("/")[0]) / Number(fps.split("/")[1]);
@@ -238,6 +310,14 @@ export default function App() {
 
   useEffect(() => {
     if (!projectId) {
+      // An empty project selection must not retain another project's task/results context.
+      setJobs([]);
+      setJobTotal(0);
+      setJobPage(0);
+      setActiveJobId("");
+      setSelectedJob(null);
+      setArtifacts([]);
+      setExportedPath("");
       setScenes([]);
       setSceneId("");
       setSaved(null);
@@ -254,6 +334,7 @@ export default function App() {
         setScenes(v.scenes);
         setSceneId(v.scenes[0]?.id || "");
         setActiveJobId("");
+        setSelectedJob(null);
         setJobPage(0);
       })
       .catch((e) => {
@@ -263,6 +344,8 @@ export default function App() {
   }, [projectId]);
 
   useEffect(() => {
+    // Scene replacement is guarded; changing steps must not clear raw RGB input.
+    setColorDrafts({});
     if (!sceneId) {
       setSaved(null);
       setDraft(null);
@@ -309,8 +392,18 @@ export default function App() {
           { project_id: projectId, limit: 8, offset: jobPage * 8 },
           controller.signal,
         );
+        // An off-page selection still needs progress updates and scene ownership.
+        const details =
+          activeJobId && !value.items.some((j) => j.id === activeJobId)
+            ? await call<{ job: Job }>(
+                "get_job",
+                { job_id: activeJobId },
+                controller.signal,
+              )
+            : null;
         if (!controller.signal.aborted) {
           setJobs(value.items);
+          if (details) setSelectedJob(details.job);
           setJobTotal(value.total);
           setOffline(false);
         }
@@ -329,7 +422,7 @@ export default function App() {
       controller.abort();
       window.clearInterval(interval);
     };
-  }, [projectId, jobPage]);
+  }, [projectId, jobPage, activeJobId]);
 
   useEffect(() => {
     if (!activeJobId) {
@@ -344,17 +437,21 @@ export default function App() {
     if (!activeJobId) return;
     if (activeJobStatus && activeJobStatus !== "completed") return;
     const controller = new AbortController();
-    call<{ artifacts: Artifact[] }>(
+    call<{ job: Job; artifacts: Artifact[] }>(
       "get_job",
       { job_id: activeJobId },
       controller.signal,
     )
       .then((v) => {
+        if (controller.signal.aborted) return;
+        setSelectedJob(v.job);
         setArtifacts(v.artifacts);
         const firstPreview = v.artifacts.find(
           (a) => a.kind === "preview-image",
         );
-        if (firstPreview) setFrame(String(firstPreview.metadata.frame));
+        // A background job must not reset the unsaved draft's live timeline.
+        if (firstPreview && !liveMode.current)
+          setFrame(String(firstPreview.metadata.frame));
         setPreviewIndex(0);
         setShowMotion(false);
       })
@@ -367,8 +464,18 @@ export default function App() {
   useEffect(() => {
     sampleRequest.current++;
     setStats(null);
+    setInspectionError("");
     setPixel(null);
-    if (!masterId) return;
+    // Original-pixel inspection belongs to preview; deleted historical caches
+    // must not interrupt choosing a scene or configuring a new delivery.
+    if (
+      !masterId ||
+      step !== "preview" ||
+      tab !== "workspace" ||
+      liveEnabled ||
+      showMotion
+    )
+      return;
     const controller = new AbortController();
     call<typeof stats>(
       "inspect_frame",
@@ -377,10 +484,10 @@ export default function App() {
     )
       .then((v) => setStats(v))
       .catch((e) => {
-        if (!controller.signal.aborted) setError(errorText(e));
+        if (!controller.signal.aborted) setInspectionError(errorText(e));
       });
     return () => controller.abort();
-  }, [masterId]); // The stable artifact ID is the request identity.
+  }, [masterId, step, tab, liveEnabled, showMotion]); // Only the visible original-frame view owns inspection.
 
   function guard(action: () => void) {
     if (dirty) setDiscard(() => action);
@@ -412,6 +519,67 @@ export default function App() {
       timecode,
     };
   }
+  const settingsError = (() => {
+    try {
+      settings();
+      return "";
+    } catch (e) {
+      return errorText(e);
+    }
+  })();
+  const validLiveFrame =
+    frame.trim() !== "" &&
+    Number.isInteger(Number(frame)) &&
+    Number(frame) >= 0 &&
+    Number(frame) <= 10_000_000;
+  const [fpsNumerator, fpsDenominator] = fps.split("/").map(Number);
+  const live = useLivePreview(
+    sceneId,
+    draft && !settingsError && validLiveFrame
+      ? {
+          spec: draft,
+          width: Number(width),
+          height: Number(height),
+          fps: { numerator: fpsNumerator, denominator: fpsDenominator },
+          frame: Number(frame),
+        }
+      : null,
+    liveEnabled &&
+      step === "preview" &&
+      tab === "workspace" &&
+      !composing &&
+      !offline,
+    livePlaying,
+  );
+  useEffect(() => {
+    if (!live.active || live.error) setLivePlaying(false);
+  }, [live.active, live.error]);
+  useEffect(() => {
+    if (!livePlaying || !live.active || live.error) return;
+    let previous = performance.now();
+    let remainder = 0;
+    const timer = window.setInterval(() => {
+      const now = performance.now();
+      const elapsed = ((now - previous) * frameRate) / 1000 + remainder;
+      const advance = Math.floor(elapsed);
+      remainder = elapsed - advance;
+      previous = now;
+      // Playback chooses integer frames from the rational timeline, dropping
+      // display frames as needed instead of changing shader time or queueing work.
+      setFrame((old) => String((Number(old) + advance) % Number(frames)));
+    }, LIVE_PLAYBACK_INTERVAL);
+    return () => window.clearInterval(timer);
+  }, [livePlaying, live.active, live.error, frameRate, frames]);
+  // An estimate only describes the settings that produced it, never later dropdown edits.
+  const deliveryRecipe = JSON.stringify({
+    width,
+    height,
+    frames,
+    fps,
+    samples,
+    timecode,
+    configurations: delivery.configurations,
+  });
   async function refreshProjects(selectedId?: string) {
     const p = await call<{ items: Project[] }>("list_projects");
     setProjects(p.items);
@@ -449,12 +617,18 @@ export default function App() {
         setScenes((old) => [s.record, ...old]);
         setSceneId(s.record.id);
         setActiveJobId("");
+        setStep("preview");
         return s;
       });
     });
   }
   async function saveScene() {
     if (!draft || !saved) return;
+    // An unfinished raw channel is unsaved work even though numeric RGB is unchanged.
+    if (incompleteColor) {
+      setError("请先完成高级 RGB 输入，再保存场景。");
+      return;
+    }
     const value = await run("保存场景", () =>
       call<SceneReply>("update_scene", {
         scene_id: sceneId,
@@ -465,6 +639,7 @@ export default function App() {
     if (value) {
       setSaved(value);
       setDraft(structuredClone(value.scene));
+      setColorDrafts({});
       setScenes((old) => old.map((s) => (s.id === sceneId ? value.record : s)));
     }
   }
@@ -475,6 +650,13 @@ export default function App() {
     }
     await run(kind === "delivery" ? "提交交付" : "提交预览", async () => {
       const s = settings();
+      // Open the stored-frame view immediately so a retained draft proxy cannot
+      // be mistaken for the new render while its submission is still pending.
+      if (kind !== "delivery") {
+        setLiveEnabled(false);
+        setLivePlaying(false);
+        setShowMotion(false);
+      }
       const scale = Math.min(1, 960 / s.width, 720 / s.height);
       const small = {
         ...s,
@@ -544,7 +726,12 @@ export default function App() {
       submission.current = null;
       sampleRequest.current++;
       setArtifacts([]);
+      setExportedPath("");
       setActiveJobId(result.job.id);
+      setSelectedJob(result.job);
+      setJobPage(0);
+      // Delivery submission has a visible destination; previews stay beside the image.
+      if (kind === "delivery") setStep("jobs");
       setJobs((old) => [
         result.job,
         ...old.filter((j) => j.id !== result.job.id),
@@ -553,6 +740,7 @@ export default function App() {
     });
   }
   async function sample(e: MouseEvent<HTMLButtonElement>) {
+    if (liveEnabled || showMotion) return;
     if (!master || !preview || !activeJob || master.job_id !== activeJob.id)
       return;
     const img = e.currentTarget.querySelector("img");
@@ -715,732 +903,1186 @@ export default function App() {
         </div>
       )}
       {tab === "workspace" && (
-        <div className="workbench">
-          <aside className="scene-rail">
-            <div className="section-heading">
-              <span>项目与场景</span>
-              <Button
-                aria-label="新建项目"
-                onClick={() => setProjectModal(true)}
-              >
-                <FolderPlus size={17} />
-              </Button>
+        <main className="workbench">
+          <div className="workbench-context">
+            <div className="context-title">
+              <span className="tiny-label">
+                {activeProject?.name || "本地工作区"} / 场景
+              </span>
+              <h1>{draft?.name || "开始你的影像创作"}</h1>
             </div>
-            <Field label="当前项目" id="project-select">
-              <select
-                id="project-select"
-                value={projectId}
-                onChange={(e) => guard(() => setProjectId(e.target.value))}
-              >
-                <option value="">选择或新建项目</option>
-                {projects.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <div className="scene-list">
-              {scenes.map((s) => (
-                <Button
-                  key={s.id}
-                  className={
-                    "scene-item " + (sceneId === s.id ? "selected" : "")
-                  }
-                  onClick={() =>
-                    guard(() => {
-                      setSceneId(s.id);
-                      setActiveJobId("");
-                    })
-                  }
-                >
-                  <FileImage size={16} />
-                  <span>{s.name}</span>
-                  <ChevronRight size={13} />
-                </Button>
-              ))}
-              {!scenes.length && (
-                <p className="empty-small">从下方模板创建第一个场景。</p>
-              )}
-            </div>
-            <div className="section-heading">
-              <span>场景模板</span>
-              <span className="count">{templates.length}</span>
-            </div>
-            <div className="template-list">
-              {templates.map((t, i) => (
-                <Button
-                  key={t.id}
-                  className="template-item"
-                  onClick={() => void createScene(t.id)}
-                  disabled={!!pending}
-                >
-                  <span className="template-symbol">
-                    {
-                      [
-                        <Activity size={18} />,
-                        <Layers size={18} />,
-                        <Square size={18} />,
-                        <Workflow size={18} />,
-                        <Braces size={18} />,
-                        <Activity size={18} />,
-                      ][i]
-                    }
-                  </span>
-                  <span>
-                    <strong>{t.name}</strong>
-                    <small>{t.description}</small>
-                  </span>
-                  <Plus size={13} />
-                </Button>
-              ))}
-            </div>
-            <div className="rail-footer">
-              <span className="tiny-label">工作空间</span>
-              <strong>ACEScg / AP1</strong>
-              <small>
-                float32 · 线性光运算
-                <br />
-                ACES 2.0 · 固定配置
-              </small>
-            </div>
-          </aside>
-          <main className="canvas-column">
-            <div className="canvas-heading">
-              <div>
-                <span className="tiny-label">SCENE / 场景</span>
-                <h1>{draft?.name || "构建你的第一段画面"}</h1>
-              </div>
+            <div className="context-actions">
               <span className={"save-state " + (dirty ? "unsaved" : "")}>
                 {dirty
                   ? "未保存"
                   : saved
-                    ? "版本 " + saved.revision_id.slice(0, 8)
-                    : "等待场景"}
+                    ? "已保存 · " + saved.revision_id.slice(0, 8)
+                    : "尚未选择场景"}
               </span>
-            </div>
-            <div className="preview-toolbar">
-              <div className="segmented">
-                <Button
-                  className={!showMotion ? "selected" : ""}
-                  onClick={() => setShowMotion(false)}
-                >
+              {step !== "scene" && (
+                <Button onClick={() => setStep("scene")}>
                   <FileImage size={14} />
-                  关键帧
+                  切换场景
                 </Button>
-                <Button
-                  disabled={!motion}
-                  className={showMotion ? "selected" : ""}
-                  onClick={() => setShowMotion(true)}
-                >
-                  <Film size={14} />
-                  运动预览
-                </Button>
-              </div>
-              <span>
-                sRGB 显示预览{" "}
-                <span className="dim">
-                  {dirty
-                    ? " / 修改尚未渲染"
-                    : activeJob &&
-                        saved &&
-                        activeJob.revision_id !== saved.revision_id
-                      ? " / 上一版本"
-                      : " / 原始值见下方"}
-                </span>
-              </span>
-            </div>
-            <div
-              className="preview-stage"
-              aria-busy={activeJob?.status === "running"}
-            >
-              {showMotion && motion ? (
-                <video
-                  src={artifactUrl(motion.id)}
-                  controls
-                  preload="metadata"
-                  aria-label="SDR 运动预览"
-                />
-              ) : preview ? (
-                <button
-                  type="button"
-                  className="sample-surface"
-                  onClick={(e) => void sample(e)}
-                  aria-label="在预览中取样，按回车可取中心像素"
-                >
-                  <img
-                    src={artifactUrl(preview.id)}
-                    alt={draft?.name + "的 sRGB 显示预览"}
-                  />
-                </button>
-              ) : (
-                <div className="preview-empty">
-                  <div className="preview-mark">
-                    <Braces size={36} />
-                  </div>
-                  <strong>
-                    {draft ? "场景代码已就绪" : "画面从一段代码开始"}
-                  </strong>
-                  <p>
-                    {draft
-                      ? "渲染关键帧，查看经过 ACES 显示变换的结果。"
-                      : "创建项目，选择模板，然后调整颜色与运动。"}
-                  </p>
-                  <Button
-                    disabled={!draft || !!pending || dirty}
-                    onClick={() => void render("frame")}
-                  >
-                    <Play size={14} />
-                    渲染当前帧
-                  </Button>
-                </div>
               )}
-              {activeJob &&
-                ["queued", "running"].includes(activeJob.status) && (
-                  <div className="preview-progress">
-                    <span>
-                      {STATUS[activeJob.status]} · {activeJob.stage}
-                    </span>
-                    <progress
-                      max={1}
-                      value={activeJob.progress}
-                      aria-label="当前预览任务进度"
-                    />
-                  </div>
-                )}
+              <span className="working-space">ACEScg · 线性光</span>
             </div>
-            <div className="frame-strip">
-              <div className="frame-buttons">
-                {previewImages.map((a, i) => (
-                  <Button
-                    key={a.id}
-                    className={i === previewIndex ? "selected" : ""}
-                    onClick={() => {
-                      setPreviewIndex(i);
-                      setFrame(String(a.metadata.frame));
-                      setShowMotion(false);
-                    }}
-                  >
-                    帧 {String(a.metadata.frame)}
-                  </Button>
-                ))}
-              </div>
-              <label htmlFor="frame-index">当前帧</label>
-              <input
-                id="frame-index"
-                type="number"
-                min={0}
-                value={frame}
-                onChange={(e) => setFrame(e.target.value)}
-              />
-              <Button
-                disabled={!draft || !!pending || dirty}
-                onClick={() => void render("frame")}
-                aria-label="渲染所选帧"
-              >
-                <RefreshCw size={14} />
-              </Button>
-            </div>
-            <div className="pixel-readout">
+          </div>
+          <WorkflowNav
+            step={step}
+            onChange={setStep}
+            descriptions={[
+              projectId ? `${scenes.length} 个场景` : "创建或选择项目",
+              dirty
+                ? "有未保存修改"
+                : preview
+                  ? "已有画面预览"
+                  : "调整画面与运动",
+              `${delivery.targets.length} 个交付目标`,
+              `${jobTotal} 个任务`,
+            ]}
+          />
+          <section
+            className={"workflow-content step-" + step}
+            aria-labelledby="workflow-title"
+            onCompositionStart={() => setComposing(true)}
+            onCompositionEnd={() => setComposing(false)}
+          >
+            <div className="workflow-heading">
               <div>
-                <span className="tiny-label">原始 ACEScg 数值</span>
-                <strong>
-                  {pixel ? "像素 " + pixel.x + ", " + pixel.y : "点击预览取样"}
-                </strong>
+                <h2 id="workflow-title" tabIndex={-1} ref={stepHeading}>
+                  {WORKFLOW.find((item) => item.id === step)?.label}
+                </h2>
+                <p>{STEP_HELP[step]}</p>
               </div>
-              <div className="channels">
-                {["R", "G", "B", "A"].map((c, i) => (
-                  <span key={c}>
-                    <b>{c}</b>
-                    {pixel ? pixel.values[i]?.toFixed(6) : "—"}
-                  </span>
-                ))}
-              </div>
-              <div className="range-summary">
-                <span>最小 / 最大</span>
-                <strong>
-                  {stats
-                    ? fmt(Math.min(...stats.minimum.slice(0, 3))) +
-                      " / " +
-                      fmt(Math.max(...stats.maximum.slice(0, 3)))
-                    : "— / —"}
-                </strong>
-              </div>
-            </div>
-            <section className="code-section">
-              <div className="section-heading">
-                <span>
-                  <Code2 size={15} />
-                  场景代码 <small>WGSL</small>
-                </span>
-                <div>
-                  <Button
-                    disabled={!draft || !!pending}
-                    onClick={() =>
-                      void run("验证代码", () =>
-                        call("validate_scene", { scene_id: sceneId }),
-                      )
-                    }
-                  >
-                    <Check size={14} />
-                    验证已保存版本
-                  </Button>
-                  <Button
-                    disabled={!sceneId || !!pending}
-                    onClick={() =>
-                      guard(() => {
-                        void run("重新载入", async () => {
-                          const v = await call<SceneReply>("get_scene", {
-                            scene_id: sceneId,
-                          });
-                          setSaved(v);
-                          setDraft(structuredClone(v.scene));
-                          return v;
-                        });
-                      })
-                    }
-                  >
-                    <RefreshCw size={14} />
-                    重新载入
-                  </Button>
-                  <Button
-                    disabled={!draft || !dirty || !!pending}
-                    onClick={() => void saveScene()}
-                  >
-                    <Save size={14} />
-                    保存场景
-                  </Button>
-                </div>
-              </div>
-              {stale && (
-                <Notice
-                  error
-                  text="场景已有其他客户端更新。请复制当前代码或重新载入后再保存。"
-                />
-              )}
-              <label className="sr-only" htmlFor="scene-code">
-                WGSL 场景代码
-              </label>
-              <Textarea
-                id="scene-code"
-                className="resize-none code-editor"
-                spellCheck={false}
-                disabled={!draft || !!pending}
-                value={draft?.code || ""}
-                onChange={(e) =>
-                  setDraft((old) =>
-                    old ? { ...old, code: e.target.value } : old,
-                  )
-                }
-                aria-describedby="code-help"
-              />
-              <div className="code-footer">
-                <span id="code-help">
-                  shade(ctx) → 线性 ACEScg RGBA · 使用 ctx.time 与 ctx.seed
-                </span>
+              {step === "preview" && draft && (
                 <Button
-                  disabled={!draft}
-                  onClick={() => void copy(draft?.code || "")}
-                  aria-label="复制场景代码"
+                  className={dirty ? "primary" : "outline"}
+                  disabled={!dirty || !!pending}
+                  onClick={() => void saveScene()}
                 >
-                  <Copy size={13} />
+                  <Save size={14} />
+                  保存场景
+                </Button>
+              )}
+            </div>
+            {step === "scene" && (
+              <div className="scene-layout">
+                <aside className="scene-rail">
+                  <div className="section-heading">
+                    <h3>项目与场景</h3>
+                    <Button
+                      aria-label="新建项目"
+                      onClick={() => guard(() => setProjectModal(true))}
+                    >
+                      <FolderPlus size={17} />
+                      新建项目
+                    </Button>
+                  </div>
+                  <Field label="当前项目" id="project-select">
+                    <select
+                      id="project-select"
+                      value={projectId}
+                      onChange={(e) => {
+                        // Capture before the controlled select resets during the discard dialog.
+                        const nextProjectId = e.target.value;
+                        guard(() => setProjectId(nextProjectId));
+                      }}
+                    >
+                      <option value="">选择或新建项目</option>
+                      {projects.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <div className="scene-list">
+                    {scenes.map((s) => (
+                      <Button
+                        key={s.id}
+                        className={
+                          "scene-item " + (sceneId === s.id ? "selected" : "")
+                        }
+                        onClick={() =>
+                          guard(() => {
+                            setSceneId(s.id);
+                            setActiveJobId("");
+                          })
+                        }
+                      >
+                        <FileImage size={16} />
+                        <span>{s.name}</span>
+                        <ChevronRight size={13} />
+                      </Button>
+                    ))}
+                    {!scenes.length && (
+                      <p className="empty-small">
+                        选择右侧模板，创建第一个场景。
+                      </p>
+                    )}
+                  </div>
+
+                  {draft && (
+                    <div className="scene-continue">
+                      <span>已选择：{draft.name}</span>
+                      <Button
+                        className="primary"
+                        onClick={() => setStep("preview")}
+                      >
+                        继续编辑与预览
+                        <ChevronRight size={15} />
+                      </Button>
+                    </div>
+                  )}
+                </aside>
+                <section className="template-panel" aria-label="场景模板">
+                  <div className="section-heading">
+                    <h3>从模板开始</h3>
+                    <small>{templates.length} 种画面</small>
+                  </div>
+                  <p className="panel-description">
+                    {projectId
+                      ? "点击模板会在当前项目中创建新场景，并进入编辑与预览。"
+                      : "先新建项目，再选择一个模板作为画面起点。"}
+                  </p>
+                  <div className="template-list">
+                    {templates.map((t, i) => (
+                      <Button
+                        key={t.id}
+                        className="template-item"
+                        onClick={() => void createScene(t.id)}
+                        disabled={!!pending}
+                      >
+                        <span className="template-symbol">
+                          {
+                            [
+                              <Activity size={18} />,
+                              <Layers size={18} />,
+                              <Square size={18} />,
+                              <Workflow size={18} />,
+                              <Braces size={18} />,
+                              <Activity size={18} />,
+                            ][i]
+                          }
+                        </span>
+                        <span>
+                          <strong>{t.name}</strong>
+                          <small>{t.description}</small>
+                        </span>
+                        <Plus size={13} />
+                      </Button>
+                    ))}
+                  </div>
+                </section>
+              </div>
+            )}
+            {(step === "preview" || step === "delivery") && !draft && (
+              <div className="workflow-empty">
+                <FileImage size={28} />
+                <h3>{sceneId ? "正在载入场景…" : "先选择一个场景"}</h3>
+                <p>创建项目并选择模板，或打开已有场景。</p>
+                <Button className="primary" onClick={() => setStep("scene")}>
+                  前往选择场景
+                  <ChevronRight size={15} />
                 </Button>
               </div>
-            </section>
-          </main>
-          <aside className="output-panel">
-            <div className="section-heading">
-              <span>
-                <Settings2 size={16} />
-                场景参数
-              </span>
-            </div>
-            <div className="parameter-fields">
-              {draft?.parameters.map((p) => (
-                <Field
-                  key={p.name}
-                  label={p.label || p.name}
-                  id={"param-" + p.name}
-                  hint={
-                    p.kind === "color"
-                      ? p.color_space + " RGB"
-                      : p.minimum !== null || p.maximum !== null
-                        ? [p.minimum ?? "−∞", p.maximum ?? "∞"].join(" … ")
-                        : undefined
-                  }
-                >
-                  {p.kind === "boolean" ? (
-                    <input
-                      id={"param-" + p.name}
-                      type="checkbox"
-                      checked={Boolean(parameterValue(p))}
-                      disabled={!!pending}
-                      onChange={(e) =>
-                        changeParameter(p.name, e.target.checked)
+            )}
+            {step === "preview" && draft && (
+              <>
+                <div className="editor-layout">
+                  <div className="canvas-column">
+                    <div className="preview-commandbar">
+                      <div className="preview-actions">
+                        <Button
+                          className="primary"
+                          disabled={!!pending || dirty || !!settingsError}
+                          onClick={() => void render("frame")}
+                        >
+                          <Play size={14} />
+                          渲染当前帧
+                        </Button>
+                        <Button
+                          disabled={!!pending || dirty || !!settingsError}
+                          onClick={() => void render("keyframes")}
+                        >
+                          预览三帧
+                        </Button>
+                        <Button
+                          disabled={!!pending || dirty || !!settingsError}
+                          onClick={() => void render("preview")}
+                        >
+                          前 2 秒动画
+                        </Button>
+                      </div>
+                      <p
+                        className={
+                          "preview-guidance " + (dirty ? "warning-text" : "")
+                        }
+                      >
+                        {dirty
+                          ? "修改无需保存即可实时预览；保存后可渲染关键帧与动画。"
+                          : "实时预览使用低分辨率与单次采样，交付按完整规格渲染。"}
+                      </p>
+                    </div>
+                    <div className="preview-toolbar">
+                      <div className="segmented">
+                        <Button
+                          className={liveEnabled ? "selected" : ""}
+                          aria-pressed={liveEnabled}
+                          onClick={() => {
+                            setLiveEnabled(true);
+                            setShowMotion(false);
+                          }}
+                        >
+                          <Activity size={14} />
+                          实时预览
+                        </Button>
+                        <Button
+                          className={
+                            !liveEnabled && !showMotion ? "selected" : ""
+                          }
+                          aria-pressed={!liveEnabled && !showMotion}
+                          onClick={() => {
+                            setLiveEnabled(false);
+                            setShowMotion(false);
+                          }}
+                        >
+                          <FileImage size={14} />
+                          关键帧
+                        </Button>
+                        <Button
+                          disabled={!motion}
+                          className={showMotion ? "selected" : ""}
+                          aria-pressed={showMotion}
+                          onClick={() => {
+                            setLiveEnabled(false);
+                            setShowMotion(true);
+                          }}
+                        >
+                          <Film size={14} />
+                          运动预览
+                        </Button>
+                      </div>
+                      <span>
+                        sRGB 显示预览{" "}
+                        <span className="dim">
+                          {liveEnabled
+                            ? " / 草稿 · 低精度"
+                            : dirty
+                              ? " / 修改尚未渲染"
+                              : activeJob &&
+                                  saved &&
+                                  activeJob.revision_id !== saved.revision_id
+                                ? " / 上一版本"
+                                : " / 原始值见下方"}
+                        </span>
+                      </span>
+                    </div>
+                    <div
+                      className="preview-stage"
+                      aria-busy={
+                        liveEnabled
+                          ? live.loading
+                          : activeJob?.status === "running"
                       }
-                    />
-                  ) : p.kind === "color" ? (
-                    <div className="rgb-inputs">
-                      {["R", "G", "B"].map((c, i) => (
-                        <label key={c}>
-                          <span>{c}</span>
+                    >
+                      {liveEnabled && live.reply ? (
+                        <img
+                          className="live-preview-image"
+                          src={`data:image/png;base64,${live.reply.images[0].data}`}
+                          alt={draft.name + "的低精度实时 sRGB 预览"}
+                        />
+                      ) : liveEnabled ? (
+                        <div className="preview-empty">
+                          <div className="preview-mark">
+                            <Activity size={36} />
+                          </div>
+                          <strong>
+                            {live.error ? "实时预览未完成" : "正在准备实时预览"}
+                          </strong>
+                          <p>直接显示当前草稿，无需先保存场景。</p>
+                        </div>
+                      ) : showMotion && motion ? (
+                        <video
+                          src={artifactUrl(motion.id)}
+                          controls
+                          preload="metadata"
+                          aria-label="SDR 运动预览"
+                        />
+                      ) : preview ? (
+                        <button
+                          type="button"
+                          className="sample-surface"
+                          onClick={(e) => void sample(e)}
+                          aria-label="在预览中取样，按回车可取中心像素"
+                        >
+                          <img
+                            src={artifactUrl(preview.id)}
+                            alt={draft?.name + "的 sRGB 显示预览"}
+                          />
+                        </button>
+                      ) : (
+                        <div className="preview-empty">
+                          <div className="preview-mark">
+                            <Braces size={36} />
+                          </div>
+                          <strong>
+                            {draft ? "场景代码已就绪" : "画面从一段代码开始"}
+                          </strong>
+                          <p>
+                            {draft
+                              ? "渲染关键帧，查看经过 ACES 显示变换的结果。"
+                              : "创建项目，选择模板，然后调整颜色与运动。"}
+                          </p>
+                        </div>
+                      )}
+                      {!liveEnabled &&
+                        activeJob &&
+                        ["queued", "running"].includes(activeJob.status) && (
+                          <div className="preview-progress">
+                            <span>
+                              {STATUS[activeJob.status]} · {activeJob.stage}
+                            </span>
+                            <progress
+                              max={1}
+                              value={activeJob.progress}
+                              aria-label="当前预览任务进度"
+                            />
+                          </div>
+                        )}
+                    </div>
+                    {liveEnabled && (
+                      <div className="live-preview-status">
+                        <span role="status">
+                          {live.error
+                            ? live.reply
+                              ? "更新失败 · 保留上一画面"
+                              : "实时预览失败"
+                            : !validLiveFrame || settingsError
+                              ? "请填写有效的画面规格与当前帧"
+                              : composing
+                                ? "输入完成后更新画面"
+                                : offline
+                                  ? "服务未连接 · 保留草稿"
+                                  : livePlaying
+                                    ? "实时播放中 · 低精度"
+                                    : live.loading
+                                      ? live.reply
+                                        ? "更新中 · 保留上一画面"
+                                        : "正在生成实时预览…"
+                                      : live.stale
+                                        ? "上一画面"
+                                        : "实时预览已更新"}
+                        </span>
+                        <span className="mono">
+                          {live.reply
+                            ? `${live.reply.images[0].width} × ${live.reply.images[0].height} · 1 样本 · 帧 ${live.reply.frame}`
+                            : "长边 ≤ 480 px · 1 样本"}
+                        </span>
+                      </div>
+                    )}
+                    {liveEnabled && live.error && (
+                      <>
+                        <Notice error text={live.error} />
+                        <Button onClick={live.retry}>重试实时预览</Button>
+                      </>
+                    )}
+                    <div className="frame-strip">
+                      {liveEnabled ? (
+                        <>
+                          <Button
+                            aria-label={
+                              livePlaying ? "暂停实时预览" : "播放实时预览"
+                            }
+                            aria-pressed={livePlaying}
+                            disabled={
+                              !live.active || !!live.error || Number(frames) < 2
+                            }
+                            onClick={() => setLivePlaying((value) => !value)}
+                          >
+                            {livePlaying ? (
+                              <Pause size={14} />
+                            ) : (
+                              <Play size={14} />
+                            )}
+                          </Button>
+                          <label className="sr-only" htmlFor="live-timeline">
+                            实时预览播放位置
+                          </label>
                           <input
-                            id={i === 0 ? "param-" + p.name : undefined}
-                            aria-label={(p.label || p.name) + " " + c}
-                            type="number"
-                            step="0.01"
-                            value={String((parameterValue(p) as number[])[i])}
-                            disabled={!!pending}
+                            id="live-timeline"
+                            className="live-timeline"
+                            type="range"
+                            min={0}
+                            max={Math.max(0, Number(frames) - 1)}
+                            step={1}
+                            value={
+                              validLiveFrame
+                                ? Math.min(Number(frame), Number(frames) - 1)
+                                : 0
+                            }
+                            disabled={!!settingsError}
                             onChange={(e) => {
-                              const value = [
-                                ...(parameterValue(p) as number[]),
-                              ];
-                              value[i] = Number(e.target.value);
-                              changeParameter(p.name, value);
+                              setLivePlaying(false);
+                              setFrame(e.target.value);
                             }}
                           />
-                        </label>
-                      ))}
-                    </div>
-                  ) : (
-                    <input
-                      id={"param-" + p.name}
-                      type="number"
-                      step="0.1"
-                      min={p.minimum ?? undefined}
-                      max={p.maximum ?? undefined}
-                      value={String(parameterValue(p))}
-                      disabled={!!pending}
-                      onChange={(e) =>
-                        changeParameter(
-                          p.name,
-                          e.target.value === "" ? "" : Number(e.target.value),
-                        )
-                      }
-                    />
-                  )}
-                </Field>
-              ))}
-              {!draft && (
-                <p className="empty-small">选择场景后显示可调参数。</p>
-              )}
-            </div>
-            <div className="section-heading divider">
-              <span>输出规格</span>
-              <span className="tiny-label">离线渲染</span>
-            </div>
-            <Field label="画面尺寸" id="resolution">
-              <select
-                id="resolution"
-                value={
-                  Object.entries(caps?.resolutions || {}).find(
-                    ([, v]) =>
-                      String(v[0]) === width && String(v[1]) === height,
-                  )?.[0] || "custom"
-                }
-                onChange={(e) => {
-                  const v = caps?.resolutions[e.target.value];
-                  if (v) {
-                    setWidth(String(v[0]));
-                    setHeight(String(v[1]));
-                  }
-                }}
-              >
-                <option value="custom">自定义</option>
-                {Object.entries(caps?.resolutions || {}).map(([label, v]) => (
-                  <option key={label} value={label}>
-                    {label} · {v[0]} × {v[1]}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <div className="two-fields">
-              <Field label="宽度" id="out-width">
-                <input
-                  id="out-width"
-                  type="number"
-                  min={16}
-                  max={8192}
-                  value={width}
-                  onChange={(e) => setWidth(e.target.value)}
-                />
-              </Field>
-              <Field label="高度" id="out-height">
-                <input
-                  id="out-height"
-                  type="number"
-                  min={16}
-                  max={8192}
-                  value={height}
-                  onChange={(e) => setHeight(e.target.value)}
-                />
-              </Field>
-            </div>
-            <div className="two-fields">
-              <Field label="帧率" id="out-fps">
-                <select
-                  id="out-fps"
-                  value={fps}
-                  onChange={(e) => setFps(e.target.value)}
-                >
-                  {validFrameRates.map((f) => (
-                    <option
-                      key={f.numerator + "/" + f.denominator}
-                      value={f.numerator + "/" + f.denominator}
-                    >
-                      {fmt(f.numerator / f.denominator)} fps
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="总帧数" id="out-frames">
-                <input
-                  id="out-frames"
-                  type="number"
-                  min={1}
-                  max={216000}
-                  value={frames}
-                  onChange={(e) => setFrames(e.target.value)}
-                />
-              </Field>
-            </div>
-            <div className="two-fields">
-              <Field label="空间采样" id="out-samples">
-                <select
-                  id="out-samples"
-                  value={samples}
-                  onChange={(e) => setSamples(e.target.value)}
-                >
-                  {[1, 4, 16].map((n) => (
-                    <option key={n} value={n}>
-                      {n} 样本 / 像素
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="起始时间码" id="out-timecode">
-                <input
-                  id="out-timecode"
-                  value={timecode}
-                  onChange={(e) => setTimecode(e.target.value)}
-                />
-              </Field>
-            </div>
-            <div className="output-duration">
-              <span>{fmt(Number(frames) / frameRate)} 秒</span>
-              <span>
-                {width} × {height} · {fmt(frameRate)} fps
-              </span>
-            </div>
-            <DeliveryEditor delivery={delivery} disabled={!!pending} />
-            <p className="technical-note">
-              HDR 文件使用独立输出变换。当前网页提供 sRGB 预览，不替代校准监看。
-            </p>
-            {estimate && (
-              <div className="estimate">
-                <span>未压缩缓存上限</span>
-                <strong>{bytes(estimate.cache_upper_bound_bytes)}</strong>
-              </div>
-            )}
-            <div className="output-actions">
-              <Button
-                disabled={!draft || !!pending || !delivery.ready}
-                onClick={() =>
-                  void run("估算资源", async () => {
-                    const v = await call<Record<string, number>>(
-                      "estimate_delivery",
-                      {
-                        settings: settings(),
-                        configurations: delivery.configurations,
-                      },
-                    );
-                    setEstimate(v);
-                    return v;
-                  })
-                }
-              >
-                估算资源
-              </Button>
-              <Button
-                className="primary"
-                disabled={!draft || dirty || !!pending || !delivery.ready}
-                onClick={() => void render("delivery")}
-              >
-                <Play size={15} />
-                提交交付 · {delivery.targets.length}
-              </Button>
-            </div>
-            <div className="preview-actions">
-              <Button
-                disabled={!draft || dirty || !!pending}
-                onClick={() => void render("keyframes")}
-              >
-                预览三帧
-              </Button>
-              <Button
-                disabled={!draft || dirty || !!pending}
-                onClick={() => void render("preview")}
-              >
-                前 2 秒动画
-              </Button>
-            </div>
-          </aside>
-          <section className="job-panel">
-            <div className="section-heading">
-              <span>
-                <Activity size={16} />
-                渲染队列 <small>{jobTotal} 个任务</small>
-              </span>
-              <div>
-                <Button
-                  disabled={jobPage === 0}
-                  onClick={() => setJobPage((p) => p - 1)}
-                >
-                  上一页
-                </Button>
-                <span className="page-label">{jobPage + 1}</span>
-                <Button
-                  disabled={(jobPage + 1) * 8 >= jobTotal}
-                  onClick={() => setJobPage((p) => p + 1)}
-                >
-                  下一页
-                </Button>
-              </div>
-            </div>
-            {!jobs.length ? (
-              <p className="empty-small">
-                提交预览或交付后，可在这里查看进度、成果和恢复任务。
-              </p>
-            ) : (
-              <div className="jobs">
-                {jobs.map((j) => (
-                  <div
-                    className={
-                      "job-row " + (j.id === activeJobId ? "active" : "")
-                    }
-                    key={j.id}
-                  >
-                    <Button
-                      className="job-identity"
-                      onClick={() => {
-                        sampleRequest.current++;
-                        setArtifacts([]);
-                        setActiveJobId(j.id);
-                      }}
-                    >
-                      <Film size={16} />
-                      <span>
-                        {j.id.slice(0, 8)}
-                        <small>
-                          {j.settings.width} × {j.settings.height} ·{" "}
-                          {j.frame_indices
-                            ? `${j.frame_indices.length} 个关键帧`
-                            : `${j.settings.frames} 帧`}
-                        </small>
-                      </span>
-                    </Button>
-                    <div className="job-progress">
-                      <span>
-                        {STATUS[j.status]} · {j.stage}
-                      </span>
-                      <progress
-                        max={1}
-                        value={j.progress}
-                        aria-label={"任务 " + j.id.slice(0, 8) + " 进度"}
-                      />
-                    </div>
-                    <span className="mono">{fmt(j.elapsed_seconds)} s</span>
-                    <div className="job-controls">
-                      {["queued", "running"].includes(j.status) ? (
-                        <Button
-                          disabled={!!pending}
-                          onClick={() =>
-                            void run("取消任务", () =>
-                              call("cancel_job", { job_id: j.id }),
-                            )
-                          }
-                        >
-                          取消
-                        </Button>
-                      ) : ["failed", "interrupted", "cancelled"].includes(
-                          j.status,
-                        ) ? (
-                        <Button
-                          disabled={!!pending}
-                          onClick={() =>
-                            void run("继续任务", () =>
-                              call("resume_job", { job_id: j.id }),
-                            )
-                          }
-                        >
-                          继续
-                        </Button>
+                        </>
                       ) : (
-                        <Check size={16} />
+                        <div className="frame-buttons">
+                          {previewImages.map((a, i) => (
+                            <Button
+                              key={a.id}
+                              className={i === previewIndex ? "selected" : ""}
+                              onClick={() => {
+                                setPreviewIndex(i);
+                                setFrame(String(a.metadata.frame));
+                                setShowMotion(false);
+                              }}
+                            >
+                              帧 {String(a.metadata.frame)}
+                            </Button>
+                          ))}
+                        </div>
+                      )}
+                      <label htmlFor="frame-index">当前帧</label>
+                      <input
+                        id="frame-index"
+                        type="number"
+                        min={0}
+                        max={10_000_000}
+                        value={frame}
+                        aria-invalid={!validLiveFrame}
+                        aria-describedby={
+                          !validLiveFrame ? "live-frame-error" : undefined
+                        }
+                        onChange={(e) => {
+                          setLivePlaying(false);
+                          setFrame(e.target.value);
+                        }}
+                      />
+                      <Button
+                        disabled={!draft || !!pending || dirty}
+                        onClick={() => void render("frame")}
+                        aria-label="渲染所选帧"
+                      >
+                        <RefreshCw size={14} />
+                      </Button>
+                    </div>
+                    {!validLiveFrame && (
+                      <Notice error text="当前帧需为 0–10000000 的整数。" />
+                    )}
+                    {!validLiveFrame && (
+                      <span id="live-frame-error" className="sr-only">
+                        当前帧需为 0–10000000 的整数。
+                      </span>
+                    )}
+                    <Notice error text={inspectionError} />
+                    <div className="pixel-readout">
+                      <div>
+                        <span className="tiny-label">原始 ACEScg 数值</span>
+                        <strong>
+                          {liveEnabled
+                            ? "渲染当前帧后可取样"
+                            : pixel
+                              ? "像素 " + pixel.x + ", " + pixel.y
+                              : "点击预览取样"}
+                        </strong>
+                      </div>
+                      <div className="channels">
+                        {["R", "G", "B", "A"].map((c, i) => (
+                          <span key={c}>
+                            <b>{c}</b>
+                            {!liveEnabled && pixel
+                              ? pixel.values[i]?.toFixed(6)
+                              : "—"}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="range-summary">
+                        <span>最小 / 最大</span>
+                        <strong>
+                          {!liveEnabled && stats
+                            ? fmt(Math.min(...stats.minimum.slice(0, 3))) +
+                              " / " +
+                              fmt(Math.max(...stats.maximum.slice(0, 3)))
+                            : "— / —"}
+                        </strong>
+                      </div>
+                    </div>
+                  </div>
+                  <aside className="parameter-panel">
+                    {/* Keep logical canvas/time settings next to live feedback, separate from its proxy budget. */}
+                    <section className="frame-settings" aria-label="画面规格">
+                      <div className="section-heading">
+                        <h3>画面规格</h3>
+                        <small>预览与交付共用</small>
+                      </div>
+                      <Field label="画面尺寸" id="resolution">
+                        <select
+                          id="resolution"
+                          value={
+                            Object.entries(caps?.resolutions || {}).find(
+                              ([, v]) =>
+                                String(v[0]) === width &&
+                                String(v[1]) === height,
+                            )?.[0] || "custom"
+                          }
+                          onChange={(e) => {
+                            const v = caps?.resolutions[e.target.value];
+                            if (v) {
+                              setWidth(String(v[0]));
+                              setHeight(String(v[1]));
+                            }
+                          }}
+                        >
+                          <option value="custom">自定义</option>
+                          {Object.entries(caps?.resolutions || {}).map(
+                            ([label, v]) => (
+                              <option key={label} value={label}>
+                                {label} · {v[0]} × {v[1]}
+                              </option>
+                            ),
+                          )}
+                        </select>
+                      </Field>
+                      <div className="two-fields">
+                        <Field label="宽度" id="out-width">
+                          <input
+                            id="out-width"
+                            type="number"
+                            min={16}
+                            max={8192}
+                            value={width}
+                            onChange={(e) => setWidth(e.target.value)}
+                          />
+                        </Field>
+                        <Field label="高度" id="out-height">
+                          <input
+                            id="out-height"
+                            type="number"
+                            min={16}
+                            max={8192}
+                            value={height}
+                            onChange={(e) => setHeight(e.target.value)}
+                          />
+                        </Field>
+                      </div>
+                      <div className="two-fields">
+                        <Field label="帧率" id="out-fps">
+                          <select
+                            id="out-fps"
+                            value={fps}
+                            onChange={(e) => setFps(e.target.value)}
+                          >
+                            {validFrameRates.map((f) => (
+                              <option
+                                key={f.numerator + "/" + f.denominator}
+                                value={f.numerator + "/" + f.denominator}
+                              >
+                                {fmt(f.numerator / f.denominator)} fps
+                              </option>
+                            ))}
+                          </select>
+                        </Field>
+                        <Field label="总帧数" id="out-frames">
+                          <input
+                            id="out-frames"
+                            type="number"
+                            min={1}
+                            max={216000}
+                            value={frames}
+                            onChange={(e) => setFrames(e.target.value)}
+                          />
+                        </Field>
+                      </div>
+                      <div className="two-fields">
+                        <Field
+                          label="空间采样"
+                          id="out-samples"
+                          hint="正式渲染使用；实时预览固定 1 样本。"
+                        >
+                          <select
+                            id="out-samples"
+                            value={samples}
+                            onChange={(e) => setSamples(e.target.value)}
+                          >
+                            {[1, 4, 16].map((n) => (
+                              <option key={n} value={n}>
+                                {n} 样本 / 像素
+                              </option>
+                            ))}
+                          </select>
+                        </Field>
+                        <Field label="起始时间码" id="out-timecode">
+                          <input
+                            id="out-timecode"
+                            value={timecode}
+                            onChange={(e) => setTimecode(e.target.value)}
+                          />
+                        </Field>
+                      </div>
+                      <div className="output-duration">
+                        <span>{fmt(Number(frames) / frameRate)} 秒</span>
+                        <span>
+                          {width} × {height} · {fmt(frameRate)} fps
+                        </span>
+                      </div>
+
+                      {settingsError && <Notice error text={settingsError} />}
+                    </section>
+                    <div className="section-heading">
+                      <h3>
+                        <Settings2 size={16} />
+                        场景参数
+                      </h3>
+                    </div>
+                    <p className="panel-description">
+                      调整参数即可实时查看；保存场景后用于正式渲染。
+                    </p>
+                    <div className="parameter-fields">
+                      {/* Visual colors keep display appearance separate from scene float RGB. */}
+                      {draft?.parameters.map((p) =>
+                        p.kind === "color" ? (
+                          <ColorField
+                            key={sceneId + "-" + p.name}
+                            id={"param-" + p.name}
+                            label={p.label || p.name}
+                            value={parameterValue(p) as number[]}
+                            colorSpace={p.color_space}
+                            disabled={!!pending}
+                            rawDraft={colorDrafts[p.name] ?? null}
+                            onRawDraftChange={(input) =>
+                              setColorDrafts((old) => ({
+                                ...old,
+                                [p.name]: input,
+                              }))
+                            }
+                            onChange={(rgb) => changeParameter(p.name, rgb)}
+                          />
+                        ) : (
+                          <Field
+                            key={p.name}
+                            label={p.label || p.name}
+                            id={"param-" + p.name}
+                            hint={
+                              p.minimum !== null || p.maximum !== null
+                                ? [p.minimum ?? "−∞", p.maximum ?? "∞"].join(
+                                    " … ",
+                                  )
+                                : undefined
+                            }
+                          >
+                            {p.kind === "boolean" ? (
+                              <input
+                                id={"param-" + p.name}
+                                type="checkbox"
+                                checked={Boolean(parameterValue(p))}
+                                disabled={!!pending}
+                                onChange={(e) =>
+                                  changeParameter(p.name, e.target.checked)
+                                }
+                              />
+                            ) : (
+                              <input
+                                id={"param-" + p.name}
+                                type="number"
+                                step="0.1"
+                                min={p.minimum ?? undefined}
+                                max={p.maximum ?? undefined}
+                                value={String(parameterValue(p))}
+                                disabled={!!pending}
+                                onChange={(e) =>
+                                  changeParameter(
+                                    p.name,
+                                    e.target.value === ""
+                                      ? ""
+                                      : Number(e.target.value),
+                                  )
+                                }
+                              />
+                            )}
+                          </Field>
+                        ),
+                      )}
+                      {!draft && (
+                        <p className="empty-small">选择场景后显示可调参数。</p>
                       )}
                     </div>
-                    {j.error && <p className="job-error">{j.error.message}</p>}
-                  </div>
-                ))}
-              </div>
+                  </aside>
+                </div>
+                <details className="code-disclosure">
+                  <summary>
+                    <Code2 size={16} />
+                    <strong>代码编辑</strong>
+                    <span>WGSL · 展开修改画面逻辑</span>
+                    <ChevronRight size={15} />
+                  </summary>
+                  <section className="code-section">
+                    <div className="section-heading">
+                      <span>
+                        <Code2 size={15} />
+                        场景代码 <small>WGSL</small>
+                      </span>
+                      <div>
+                        <Button
+                          disabled={!draft || !!pending}
+                          onClick={() =>
+                            void run("验证代码", () =>
+                              call("validate_scene", { scene_id: sceneId }),
+                            )
+                          }
+                        >
+                          <Check size={14} />
+                          验证已保存版本
+                        </Button>
+                        <Button
+                          disabled={!sceneId || !!pending}
+                          onClick={() =>
+                            guard(() => {
+                              void run("重新载入", async () => {
+                                const v = await call<SceneReply>("get_scene", {
+                                  scene_id: sceneId,
+                                });
+                                setSaved(v);
+                                setDraft(structuredClone(v.scene));
+                                setColorDrafts({});
+                                return v;
+                              });
+                            })
+                          }
+                        >
+                          <RefreshCw size={14} />
+                          重新载入
+                        </Button>
+                      </div>
+                    </div>
+                    {stale && (
+                      <Notice
+                        error
+                        text="场景已有其他客户端更新。请复制当前代码或重新载入后再保存。"
+                      />
+                    )}
+                    <label className="sr-only" htmlFor="scene-code">
+                      WGSL 场景代码
+                    </label>
+                    <Textarea
+                      id="scene-code"
+                      className="resize-none code-editor"
+                      spellCheck={false}
+                      disabled={!draft || !!pending}
+                      value={draft?.code || ""}
+                      onChange={(e) =>
+                        setDraft((old) =>
+                          old ? { ...old, code: e.target.value } : old,
+                        )
+                      }
+                      aria-describedby="code-help"
+                    />
+                    <div className="code-footer">
+                      <span id="code-help">
+                        shade(ctx) → 线性 ACEScg RGBA · 使用 ctx.time 与
+                        ctx.seed
+                      </span>
+                      <Button
+                        disabled={!draft}
+                        onClick={() => void copy(draft?.code || "")}
+                        aria-label="复制场景代码"
+                      >
+                        <Copy size={13} />
+                      </Button>
+                    </div>
+                  </section>
+                </details>
+                <div className="step-actions">
+                  <Button onClick={() => setStep("scene")}>返回选择场景</Button>
+                  <Button
+                    className="outline"
+                    onClick={() => setStep("delivery")}
+                  >
+                    下一步：设置交付
+                    <ChevronRight size={15} />
+                  </Button>
+                </div>
+              </>
             )}
-            {!!artifacts.length && (
-              <div className="artifact-strip">
-                {artifacts
-                  .filter((a) =>
-                    [
-                      "video",
-                      "report",
-                      "source",
-                      "master-frame",
-                      "delivered-frame",
-                      "sequence-manifest",
-                    ].includes(a.kind),
-                  )
-                  .map((a) => (
-                    <a key={a.id} href={artifactUrl(a.id, true)} download>
-                      <ArrowDownToLine size={13} />
-                      {a.name}
-                      <small>{bytes(a.size_bytes)}</small>
-                    </a>
-                  ))}
-                {artifacts
-                  .filter((a) => a.kind === "image-sequence")
-                  .map((a) => (
+            {step === "delivery" && draft && (
+              <>
+                <div className="delivery-layout">
+                  <section
+                    className="render-settings"
+                    aria-label="交付画面规格"
+                  >
+                    <div className="section-heading">
+                      <h3>画面规格</h3>
+                      <small>所有目标共用</small>
+                    </div>
+                    {/* The preview owns editing; delivery reads the same controlled settings. */}
+                    <dl className="specification-summary">
+                      <div>
+                        <dt>画面尺寸</dt>
+                        <dd>
+                          {width} × {height}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>帧率</dt>
+                        <dd>{fmt(frameRate)} fps</dd>
+                      </div>
+                      <div>
+                        <dt>总帧数</dt>
+                        <dd>{frames} 帧</dd>
+                      </div>
+                      <div>
+                        <dt>时长</dt>
+                        <dd>{fmt(Number(frames) / frameRate)} 秒</dd>
+                      </div>
+                      <div>
+                        <dt>空间采样</dt>
+                        <dd>{samples} 样本 / 像素</dd>
+                      </div>
+                      <div>
+                        <dt>起始时间码</dt>
+                        <dd>{timecode}</dd>
+                      </div>
+                    </dl>
                     <Button
-                      key={a.id}
-                      disabled={!!pending}
-                      onClick={() => {
-                        // Copy the complete sequence through the shared managed-export operation.
-                        setExportArtifact(a);
-                        setExportDestination(
-                          `${caps?.workspace}/exports/${a.job_id.slice(0, 8)}-${a.name}`,
-                        );
-                        setExportError("");
-                        setError("");
-                      }}
+                      className="outline"
+                      onClick={() => setStep("preview")}
                     >
-                      <ArrowDownToLine size={13} />
-                      导出序列 {a.name}
+                      在预览中修改规格
+                      <ChevronRight size={14} />
                     </Button>
-                  ))}
-              </div>
+                    {settingsError && <Notice error text={settingsError} />}
+                  </section>
+                  <div className="delivery-panel">
+                    <DeliveryEditor delivery={delivery} disabled={!!pending} />
+                    <p className="technical-note">
+                      HDR 文件使用独立输出变换。当前网页提供 sRGB
+                      预览，不替代校准监看。
+                    </p>
+                  </div>
+                </div>
+                <div className="delivery-review">
+                  <div className="review-summary">
+                    <strong>本次交付</strong>
+                    <span>
+                      {width} × {height} · {fmt(frameRate)} fps ·{" "}
+                      {fmt(Number(frames) / frameRate)} 秒 ·{" "}
+                      {delivery.targets.length} 个目标
+                    </span>
+                    <small>
+                      {delivery.targets
+                        .map(
+                          (target) =>
+                            `${target.configuration.container.toUpperCase()} / ${target.configuration.codec.toUpperCase()}`,
+                        )
+                        .join("、")}
+                    </small>
+                  </div>
+                  <div className="review-actions">
+                    <Button
+                      className="outline"
+                      disabled={!!pending || !delivery.ready || !!settingsError}
+                      onClick={() =>
+                        void run("估算资源", async () => {
+                          const v = await call<Record<string, number>>(
+                            "estimate_delivery",
+                            {
+                              settings: settings(),
+                              configurations: delivery.configurations,
+                            },
+                          );
+                          setEstimate({ values: v, recipe: deliveryRecipe });
+                          return v;
+                        })
+                      }
+                    >
+                      估算资源
+                    </Button>
+                    <Button
+                      className="primary"
+                      disabled={
+                        dirty || !!pending || !delivery.ready || !!settingsError
+                      }
+                      onClick={() => void render("delivery")}
+                    >
+                      <Play size={15} />
+                      提交交付 · {delivery.targets.length}
+                    </Button>
+                  </div>
+                  {estimate?.recipe === deliveryRecipe && (
+                    <p className="estimate">
+                      未压缩缓存上限{" "}
+                      <strong>
+                        {bytes(estimate.values.cache_upper_bound_bytes)}
+                      </strong>
+                    </p>
+                  )}
+                  {(dirty || !delivery.ready) && (
+                    <div className="delivery-blocker">
+                      <span>
+                        {dirty
+                          ? "当前场景有未保存修改，请返回编辑并保存。"
+                          : "请完成有效且不重复的交付格式设置，再提交任务。"}
+                      </span>
+                      {dirty && (
+                        <Button onClick={() => setStep("preview")}>
+                          返回保存场景
+                          <ChevronRight size={14} />
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="step-actions">
+                  <Button onClick={() => setStep("preview")}>
+                    返回编辑与预览
+                  </Button>
+                  <Button onClick={() => setStep("jobs")}>
+                    查看已有任务
+                    <ChevronRight size={15} />
+                  </Button>
+                </div>
+              </>
             )}
-            {exportedPath && (
-              <div className="export-result" role="status">
-                <span>
-                  已导出至 <code>{exportedPath}</code>
-                </span>
-                <Button
-                  aria-label="复制导出路径"
-                  onClick={() => void copy(exportedPath)}
-                >
-                  <Copy size={14} />
-                </Button>
-              </div>
+            {step === "jobs" && (
+              <>
+                <div className="jobs-layout">
+                  <section className="job-panel">
+                    <div className="section-heading">
+                      <span>
+                        <Activity size={16} />
+                        任务队列 <small>{jobTotal} 个任务 · 每页 8 个</small>
+                      </span>
+                      <div>
+                        <Button
+                          disabled={jobPage === 0}
+                          onClick={() => setJobPage((p) => p - 1)}
+                        >
+                          上一页
+                        </Button>
+                        <span className="page-label">{jobPage + 1}</span>
+                        <Button
+                          disabled={(jobPage + 1) * 8 >= jobTotal}
+                          onClick={() => setJobPage((p) => p + 1)}
+                        >
+                          下一页
+                        </Button>
+                      </div>
+                    </div>
+                    {!jobs.length ? (
+                      <p className="empty-small">
+                        提交预览或交付后，可在这里查看进度、成果和恢复任务。
+                      </p>
+                    ) : (
+                      <div className="jobs">
+                        {jobs.map((j) => (
+                          <div
+                            className={
+                              "job-row " +
+                              (j.id === activeJobId ? "active" : "")
+                            }
+                            key={j.id}
+                          >
+                            <Button
+                              className="job-identity"
+                              aria-pressed={j.id === activeJobId}
+                              onClick={() => {
+                                sampleRequest.current++;
+                                setArtifacts([]);
+                                setExportedPath("");
+                                setActiveJobId(j.id);
+                                setSelectedJob(j);
+                              }}
+                            >
+                              <Film size={16} />
+                              <span>
+                                {jobLabel(j)} · {j.id.slice(0, 8)}
+                                <small>
+                                  {j.settings.width} × {j.settings.height} ·{" "}
+                                  {j.frame_indices
+                                    ? `${j.frame_indices.length} 个关键帧`
+                                    : `${j.settings.frames} 帧`}
+                                </small>
+                              </span>
+                            </Button>
+                            <div className="job-progress">
+                              <span>
+                                {STATUS[j.status]} · {j.stage}
+                              </span>
+                              <progress
+                                max={1}
+                                value={j.progress}
+                                aria-label={
+                                  "任务 " + j.id.slice(0, 8) + " 进度"
+                                }
+                              />
+                            </div>
+                            <span className="mono">
+                              {fmt(j.elapsed_seconds)} s
+                            </span>
+                            <div className="job-controls">
+                              {["queued", "running"].includes(j.status) ? (
+                                <Button
+                                  disabled={!!pending}
+                                  onClick={() =>
+                                    void run("取消任务", () =>
+                                      call("cancel_job", { job_id: j.id }),
+                                    )
+                                  }
+                                >
+                                  取消
+                                </Button>
+                              ) : [
+                                  "failed",
+                                  "interrupted",
+                                  "cancelled",
+                                ].includes(j.status) ? (
+                                <Button
+                                  disabled={!!pending}
+                                  onClick={() =>
+                                    void run("继续任务", () =>
+                                      call("resume_job", { job_id: j.id }),
+                                    )
+                                  }
+                                >
+                                  继续
+                                </Button>
+                              ) : (
+                                <Check size={16} />
+                              )}
+                            </div>
+                            {j.error && (
+                              <p className="job-error">{j.error.message}</p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+                  <section className="results-panel" aria-label="任务成果">
+                    <div className="section-heading">
+                      <h3>
+                        <ArrowDownToLine size={16} />
+                        任务成果
+                      </h3>
+                      {activeJobId && (
+                        <span className="tiny-label">
+                          {activeJobId.slice(0, 8)}
+                        </span>
+                      )}
+                    </div>
+                    {activeJob && (
+                      <p className="panel-description">
+                        {jobLabel(activeJob)} · {STATUS[activeJob.status]} ·{" "}
+                        {activeJob.settings.width} × {activeJob.settings.height}
+                      </p>
+                    )}
+                    {!artifacts.length && (
+                      <div className="results-empty">
+                        <ArrowDownToLine size={26} />
+                        <strong>
+                          {activeJob &&
+                          ["queued", "running"].includes(activeJob.status)
+                            ? "任务正在执行"
+                            : "选择任务，查看生成成果"}
+                        </strong>
+                        <p>
+                          {activeJob &&
+                          ["queued", "running"].includes(activeJob.status)
+                            ? "完成后可在这里下载文件或导出完整图像序列。"
+                            : "点击左侧任务可查看文件、检查报告和场景快照。"}
+                        </p>
+                      </div>
+                    )}
+                    {!!artifacts.length && (
+                      <p className="panel-description">
+                        单个文件可直接下载；图像序列使用“导出序列”复制全部帧。
+                      </p>
+                    )}
+                    {!!artifacts.length && (
+                      <div className="artifact-strip">
+                        {artifacts
+                          .filter((a) =>
+                            [
+                              "video",
+                              "report",
+                              "source",
+                              "master-frame",
+                              "delivered-frame",
+                              "sequence-manifest",
+                            ].includes(a.kind),
+                          )
+                          .map((a) => (
+                            <a
+                              key={a.id}
+                              href={artifactUrl(a.id, true)}
+                              download
+                            >
+                              <ArrowDownToLine size={13} />
+                              {a.name}
+                              <small>{bytes(a.size_bytes)}</small>
+                            </a>
+                          ))}
+                        {artifacts
+                          .filter((a) => a.kind === "image-sequence")
+                          .map((a) => (
+                            <Button
+                              key={a.id}
+                              disabled={!!pending}
+                              onClick={() => {
+                                // Copy the complete sequence through the shared managed-export operation.
+                                setExportArtifact(a);
+                                setExportDestination(
+                                  `${caps?.workspace}/exports/${a.job_id.slice(0, 8)}-${a.name}`,
+                                );
+                                setExportError("");
+                                setError("");
+                              }}
+                            >
+                              <ArrowDownToLine size={13} />
+                              导出序列 {a.name}
+                            </Button>
+                          ))}
+                      </div>
+                    )}
+                    {exportedPath && (
+                      <div className="export-result" role="status">
+                        <span>
+                          已导出至 <code>{exportedPath}</code>
+                        </span>
+                        <Button
+                          aria-label="复制导出路径"
+                          onClick={() => void copy(exportedPath)}
+                        >
+                          <Copy size={14} />
+                        </Button>
+                      </div>
+                    )}
+
+                    {(preview || motion) && (
+                      <Button
+                        className="outline"
+                        onClick={() => setStep("preview")}
+                      >
+                        查看画面预览
+                        <ChevronRight size={14} />
+                      </Button>
+                    )}
+                  </section>
+                </div>
+                <div className="step-actions">
+                  <Button onClick={() => setStep("delivery")}>
+                    返回设置交付
+                  </Button>
+                  <span>任务在后台执行，切换步骤不会中止渲染。</span>
+                </div>
+              </>
             )}
           </section>
-        </div>
+        </main>
       )}
       {tab === "mcp" && (
         <main className="page-content">

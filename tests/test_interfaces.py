@@ -40,6 +40,38 @@ def test_http_shared_contract_and_access(tmp_path: Path):
         )
         assert invalid.status_code == 422
         assert len(client.get("/api/operations").json()["operations"]) == len(REGISTRY)
+        color_options = client.post(
+            "/api/operations/get_delivery_options",
+            json={
+                "configuration": {"codec": "hevc", "color_space": "Rec.2020", "gamma": "hlg"},
+                "changed_field": "gamma",
+            },
+            headers=headers,
+        )
+        assert color_options.status_code == 200
+        # Partial requests retain their intent through HTTP revalidation; the
+        # implicit 8-bit default must not turn scene-log grading data into SDR.
+        partial = client.post(
+            "/api/operations/get_delivery_options",
+            json={
+                "configuration": {"codec": "hevc", "color_space": "acescct", "data_range": "limit"}
+            },
+            headers=headers,
+        )
+        assert partial.status_code == 200
+        assert partial.json()["configuration"]["color_output"] == "ACEScct"
+        assert partial.json()["configuration"]["bit_depth"] == 10
+        assert partial.json()["configuration"]["data_range"] == "limited"
+        description = color_options.json()["color_encoding"]
+        assert description["transfer_function_label"] == "HLG（ARIB STD-B67）"
+        assert description["target_display_peak_nits"] == 1000
+        config = color_options.json()["configuration"]
+        assert (
+            config["color_space"],
+            config["gamma"],
+            config["color_output"],
+            config["bit_depth"],
+        ) == ("Rec.2020", "hlg", "HLG", 10)
 
 
 def test_mcp_schema_resources_prompts(tmp_path: Path):
@@ -48,6 +80,15 @@ def test_mcp_schema_resources_prompts(tmp_path: Path):
             tools = await client.list_tools()
             assert {t.name for t in tools.tools} == {"chromascript." + name for name in REGISTRY}
             assert all(t.input_schema and t.output_schema for t in tools.tools)
+            # Both controls are exposed to model callers, with strict enum values.
+            schema = next(
+                t.input_schema for t in tools.tools if t.name == "chromascript.get_delivery_options"
+            )
+            properties = schema["$defs"]["DeliveryConfiguration"]["properties"]
+            assert "Rec.2020" in properties["color_space"]["enum"]
+            assert {"linear", "acescct", "gamma2.4", "srgb", "st2084", "hlg"} == set(
+                properties["gamma"]["enum"]
+            )
             resources = await client.list_resource_templates()
             assert len(resources.resource_templates) == 5
             result = await client.read_resource("chromascript://docs/scene")

@@ -10,6 +10,8 @@ A worker owns one native wgpu device. It compiles a generated uniform/context wr
 
 OCIO owns input transforms, ACES view rendering and display encoding. RGB is processed independently from Alpha. HLG adds an official OCIO display encoding to the fixed CG config. Integer display quantization happens after output rendering; FFmpeg changes matrix/range/sampling without another tone map.
 
+`render_live_preview` accepts a complete unsaved draft and renders one transient frame through the daemon's reusable device. Raster dimensions are capped at 480 pixels per side with single sampling, while shader coordinates retain the requested logical canvas and rational frame time. The display copy becomes an in-memory, straight-alpha 8-bit sRGB PNG; it never enters durable jobs or the EXR cache. Compiled pipelines use a 16-entry LRU bound to limit memory across code edits. The browser debounces edits, serializes requests and discards obsolete drafts; explicit playback drops display frames and stops in hidden views.
+
 ## Durability
 
 The daemon owns a single dispatcher lock per workspace. Workers are independent process groups and continue after MCP or HTTP clients disconnect. Snapshot identity includes code, values, seed, settings, color config, package versions and numerical source fingerprint. Shared cached frames are checksummed before reuse.

@@ -6,6 +6,7 @@ import hashlib
 import math
 import struct
 import threading
+from collections import OrderedDict
 from typing import Any, Callable
 
 import numpy as np
@@ -38,8 +39,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var sy = 0u; sy < side; sy++) {
         for (var sx = 0u; sx < side; sx++) {
             let offset = (vec2<f32>(f32(sx), f32(sy)) + 0.5) / f32(side);
-            let pixel = vec2<f32>(settings.tile_origin + gid.xy) + offset;
             let dims = vec2<f32>(settings.resolution);
+            // Preview pixels sample the original logical resolution. Pixel-sized
+            // effects therefore keep their scale while the raster does less work.
+            let pixel = (vec2<f32>(settings.tile_origin + gid.xy) + offset)
+                        * (dims / settings.time_data.zw);
             let uv = vec2<f32>(pixel.x / dims.x, 1.0 - pixel.y / dims.y);
             let ctx = SceneContext(pixel, uv, dims, settings.time_data.x,
                                    u32(settings.time_data.y), settings.seed, make_parameters());
@@ -113,7 +117,7 @@ class Renderer:
                 raise RuntimeError("No GPU adapter")
             self.device = adapter.request_device_sync()
             self.info = dict(adapter.info)
-            self.cache: dict[str, Any] = {}
+            self.cache: OrderedDict[str, Any] = OrderedDict()
             self.lock = threading.Lock()
             self.uniform = self.device.create_buffer(
                 size=432, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
@@ -135,6 +139,10 @@ class Renderer:
                 )
             except Exception as exc:
                 raise ChromaError("shader_compile", str(exc), generated_source=source) from exc
+            # Interactive code edits must not retain an unbounded number of GPU pipelines.
+            if len(self.cache) > 16:
+                self.cache.popitem(last=False)
+        self.cache.move_to_end(key)
         return self.cache[key]
 
     def validate(self, scene: SceneSpec) -> dict[str, Any]:
@@ -153,9 +161,11 @@ class Renderer:
         settings: RenderSettings,
         frame: int,
         on_tile: Callable[[], None] | None = None,
+        *,
+        resolution: tuple[int, int] | None = None,
     ) -> NDArray[np.float32]:
         with self.lock:
-            return self._render(scene, settings, frame, on_tile)
+            return self._render(scene, settings, frame, on_tile, resolution)
 
     def _render(
         self,
@@ -163,6 +173,7 @@ class Renderer:
         settings: RenderSettings,
         frame: int,
         on_tile: Callable[[], None] | None,
+        resolution: tuple[int, int] | None,
     ) -> NDArray[np.float32]:
         pipeline = self.pipeline(scene)
         params = np.zeros((24, 4), dtype=np.float32)
@@ -187,8 +198,7 @@ class Renderer:
                 # Frame time comes from the exact rational timebase, not elapsed wall time.
                 header = struct.pack(
                     "<8I4f",
-                    settings.width,
-                    settings.height,
+                    *(resolution or (settings.width, settings.height)),
                     x,
                     y,
                     width,
@@ -197,8 +207,8 @@ class Renderer:
                     settings.samples,
                     frame * settings.fps.denominator / settings.fps.numerator,
                     float(frame),
-                    settings.fps.value,
-                    0.0,
+                    float(settings.width),
+                    float(settings.height),
                 )
                 self.device.queue.write_buffer(self.uniform, 0, header + params.tobytes())
                 encoder = self.device.create_command_encoder()

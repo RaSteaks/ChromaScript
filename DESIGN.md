@@ -13,7 +13,11 @@
     "danger": "#F1A3A3",
     "focus": "#B3DDE8",
     "scrollbar": "#66717F",
-    "primary": "#88BBC8"
+    "primary": "#88BBC8",
+    "pickerLight": "#FFFFFF",
+    "pickerDark": "#000000",
+    "previewBackground": "#343434",
+    "previewChecker": "#353535"
   },
   "typography": {
     "sans": {
@@ -77,8 +81,15 @@
       "backgroundColor": "{colors.scrollbar}"
     },
     "preview": {
-      "backgroundColor": "#343434",
+      "backgroundColor": "{colors.previewBackground}",
       "rounded": "{rounded.panel}"
+    },
+    "previewCheckerboard": {
+      "backgroundColor": "{colors.previewChecker}"
+    },
+    "colorPickerMarker": {
+      "backgroundColor": "{colors.pickerDark}",
+      "textColor": "{colors.pickerLight}"
     }
   }
 }
@@ -95,7 +106,9 @@ The JSON-compatible YAML frontmatter is the token source of truth. scripts/desig
 Use local Chinese system fonts and fixed-width numerals/code; no remote font requests. Body 14px and utility 12px. Keep technical units visible.
 
 ## Layout
-Desktop: project/scene rail, central preview and shader editor, output inspector. Jobs remain visible below. At 1100px condense the rail; at 800px stack panels with document scrolling. Preview media reserves its aspect ratio. Long forms scroll naturally; tables own only their horizontal overflow.
+A four-stage strip is the workflow signature: choose a scene → edit and preview → configure delivery → jobs and artifacts. The selected project, scene and save state stay above it. Stage numbers express real order; stages are freely revisitable views, not a locked wizard.
+
+Desktop: scene library uses a project column and a two-column template gallery. Editing pairs a large preview with a 300px inspector that starts with editable canvas/time settings, followed by scene parameters; code is an explicit disclosure below. Delivery pairs a 320px read-only shared-specification column with a wide format editor and a review/action bar. Jobs pair a paginated queue with a separate results panel. The workbench is bounded at 1600px for legibility. At 900px stack panels; at 560px the workflow strip reflows into two columns. The preview reserves a 16:9 media surface, caps its height on short laptop windows and contains the original image without cropping. Document scrolling owns all long forms; no viewport clipping or nested form scroller. The preview reserves a 16:9 media surface, caps its height on short laptop windows and contains the original image without cropping. Actions and errors wrap without widening the page.
 
 ## Elevation & Depth
 Flat panels with fine borders. Modal dialogs alone use a restrained shadow and an inert backdrop.
@@ -104,7 +117,15 @@ Flat panels with fine borders. Modal dialogs alone use a restrained shadow and a
 6px controls and 8px preview frames. No ornamental pill cards.
 
 ## Components
-Shared Button, Field, Textarea, Modal, Notice and Search own their states. DeliveryEditor owns each user-defined output target and reuses native selects through Field. The core delivery capability matrix owns dropdown options, compatibility and normalization; no preset is selected in the workbench. Native selects intentionally retain OS popup ownership. Buttons preserve dimensions while pending. Code editing remains available without a GPU preview. Scrollbar tokens apply globally. Visible keyboard focus and reduced-motion support are required.
+The preview opens in live draft mode. The top of its inspector owns the full canvas specification form: size preset, width, height, rational frame rate, frame count, final-render sampling and start timecode. Delivery reuses those controlled values in a read-only summary with a return-to-preview action. Both sections reuse Field, Button and the generated spacing, border and typography tokens; only one canvas form exists. Its segmented control shares Button states with stored keyframes and motion review. Play/pause, a native keyboard-operable timeline and the current-frame input sit below the existing fixed media surface. Low-resolution dimensions, single sampling and stale/error feedback remain visible in a reserved status row. Live images share the same contained geometry and alpha checkerboard as stored previews; `colors.previewBackground` and `colors.previewChecker` generate the shared media tokens. Original pixel readouts remain unavailable for transient proxies. No animation starts without Play, and hidden views stop preview work.
+
+ColorField owns scene color selection through the shared Modal, Field, Button and Notice. Its primary control is an ACES-rendered color swatch opening an OKLCH lightness/chroma plane and native hue/lightness/chroma sliders. Hatched areas mark colors beyond sRGB; text explains chroma reduction at fixed lightness and hue. Original/new swatches are separate from stored RGB, and the RGB editor is a native advanced disclosure. The palette is the only expressive color surface. `colorPickerMarker` adapts its light foreground and dark background roles to a ring and outer outline, leaving the selected color visible through the center. `colors.pickerLight` / `colors.pickerDark` generate `--color-pickerLight` / `--color-pickerDark` for these roles; all other picker chrome reuses existing semantic and spacing tokens.
+
+Shared Button, Field, Textarea, Modal, Notice and Search own their states. WorkflowNav owns the named stage strip; active stage uses an underline and explicit aria-current. Each stage has one heading, concise instruction, and a clear next action. Delivery review shows actual values; only a successful submission navigates to jobs. Code disclosure keeps expert controls available without competing with the first preview. DeliveryEditor owns each user-defined output target and reuses native selects through Field. The core delivery capability matrix owns dropdown options, compatibility and normalization; no preset is selected in the workbench. Native selects intentionally retain OS popup ownership. Buttons preserve dimensions while pending. Code editing remains available without a GPU preview. Scrollbar tokens apply globally. Visible keyboard focus and reduced-motion support are required.
 
 ## Do's and Don'ts
+Output color space and transfer function / Gamma use separate full-width native selects in DeliveryEditor. Use ACEScct (AP1 log), Linear, Gamma 2.4 (BT.1886), sRGB (IEC 61966-2-1), PQ (SMPTE ST 2084), and HLG (ARIB STD-B67). A separate read-only target-display-peak field describes the fixed ACES view (100 cd/m² SDR, 1000 cd/m² HDR, not applicable to scene-linear masters). Never put luminance in the transfer name. The shared capability matrix owns valid pairs, labels, view metadata and depth adjustments. An old daemon produces a recoverable update message, never a fallback mixed color menu. These controls reuse Field and the generated control/spacing tokens.
+
 Show actual values, verified format combinations, and persistent errors. Distinguish original ACEScg data from sRGB preview. Preserve drafts on errors and detect revision conflicts. Do not fabricate timing estimates or output verification. Display HDR viewing limitations beside controls where relevant.
+
+Gamut and range lists retain visible disabled options with explicit reasons. Use P3-D65 and BT.2020 / Rec.2020 names; distinguish AP1 log ACEScct from linear ACEScg. Full and Limited lead the range labels. Scene-log and scene-linear encodings both show no display peak luminance.

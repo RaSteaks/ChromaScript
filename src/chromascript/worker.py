@@ -16,12 +16,12 @@ import numpy as np
 import psutil
 from PIL import Image
 
-from .color import color_info, render_output, transform
+from .color import color_info, output_metadata, render_output, transform
 from .encoding import check_image_metadata, check_probe, encode
 from .environment import runtime_identity
 from .errors import ChromaError
 from .gpu import Renderer
-from .images import file_hash, read_image, write_image
+from .images import file_hash, read_image, srgb_profile, write_image
 from .models import Artifact, DeliveryPreset, RenderSettings, SceneSpec
 from .store import Store, canonical, now
 
@@ -175,13 +175,14 @@ def run(root: Path, job_id: str) -> None:
             )
             pixels, _ = read_image(path)
             preview = transform(pixels, "sRGB")
-            # Model previews are bounded display images; original values stay in EXR.
+            # Model previews are bounded sRGB images with native color metadata;
+            # attaching an ICC profile does not transform samples or alpha again.
             png = directory / f"preview-{frame_index:08d}.png"
             if max(settings.width, settings.height) > 1280:
                 values = np.rint(np.clip(preview, 0, 1) * 255).astype(np.uint8)
                 image = Image.fromarray(values)
                 image.thumbnail((1280, 1280))
-                image.save(png)
+                image.save(png, icc_profile=srgb_profile())
             else:
                 write_image(png, preview, space="sRGB", depth=8)
             artifact(
@@ -249,6 +250,7 @@ def run(root: Path, job_id: str) -> None:
                         "settings": settings.model_dump(),
                         "frames": hashes,
                         "color_configuration": snapshot["color_configuration"],
+                        "color_encoding": output_metadata(preset.color.output),
                         "first_image_metadata": metadata,
                     },
                 )
@@ -278,9 +280,8 @@ def run(root: Path, job_id: str) -> None:
                     "preset_id": preset.id,
                     "passed": bool(passed),
                     "issues": storage_issues,
-                    "color_signaling": "image header and sequence sidecar"
-                    if preset.container == "exr"
-                    else "sequence sidecar",
+                    "color_signaling": "image header and sequence sidecar",
+                    "color_encoding": output_metadata(preset.color.output),
                     "storage": metadata,
                     "frame_count": len(frame_indices),
                 }

@@ -17,6 +17,7 @@ from typing import Any, Literal
 import numpy as np
 import psutil
 
+from .appearance import ColorAppearanceRequest, resolve_color
 from .color import color_info, transform
 from .encoding import available_encoders, pixel_format_info, probe
 from .environment import runtime_identity
@@ -36,6 +37,7 @@ from .models import (
 )
 from .operations import catalogue, operation
 from .presets import FRAME_RATES, RESOLUTIONS, builtins
+from .preview import LivePreviewRequest, preview_image
 from .store import Store, canonical, identifier, now
 from .templates import TEMPLATES, template_list
 
@@ -336,6 +338,25 @@ class Service:
         _, spec, rid = self.scene(scene_id, revision_id)
         return {**self.renderer.validate(spec), "revision_id": rid}
 
+    @operation("Render an unsaved draft as a bounded, single-sample sRGB PNG without creating a job.")
+    def render_live_preview(self, request: LivePreviewRequest) -> dict[str, Any]:
+        settings = request.settings()
+        # Use the draft's logical coordinates and rational time at reduced raster
+        # resolution; scene storage and full-quality delivery settings stay untouched.
+        image = self.renderer.render(
+            request.spec,
+            settings,
+            request.frame,
+            resolution=(request.width, request.height),
+        )
+        return {
+            "images": [preview_image(image)],
+            "frame": request.frame,
+            "fps": request.fps.model_dump(),
+            "samples": settings.samples,
+            "transient": True,
+        }
+
     @operation("List fixed ACES configuration, spaces, displays, and checksum.")
     def list_color_spaces(self) -> dict[str, Any]:
         return color_info()
@@ -354,6 +375,12 @@ class Service:
             "pipeline": self.store.put("pipeline", project_id, pipeline.model_dump()),
             "configuration": color_info(),
         }
+
+    @operation("Inspect a color or pick OKLCH appearance through the inverse ACES sRGB preview.")
+    def resolve_color(self, request: ColorAppearanceRequest) -> dict[str, Any]:
+        # Read-only conversion is shared by the picker, CLI and MCP; saving remains
+        # an explicit revision-checked scene update through the existing operations.
+        return resolve_color(request)
 
     @operation("Convert 1..4096 RGB samples using the fixed OCIO configuration.")
     def convert_colors(

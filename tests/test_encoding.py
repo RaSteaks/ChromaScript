@@ -1,19 +1,33 @@
 """Actual bitstreams and legal/full range ramps verify the encoding contract."""
 
 import subprocess
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from chromascript.encoding import check_probe, encode
+from chromascript.encoding import check_image_metadata, check_probe, encode
+from chromascript.images import read_image, write_image
 from chromascript.models import RenderSettings
 from chromascript.presets import builtins
 
 
 @pytest.mark.integration
 @pytest.mark.parametrize(
-    "id", ["h264-review", "hdr-pq", "hdr-hlg", "prores-4", "dnxhr-hqx-mov", "dnxhr-lb-mxf"]
+    "id",
+    [
+        "h264-review",
+        "h264-mov",
+        "hevc-mov",
+        "hdr-pq",
+        "hdr-hlg",
+        "prores-4",
+        "dnxhr-hqx-mov",
+        "dnxhr-lb-mxf",
+        "uncompressed-rgb10",
+        "uncompressed-yuv10",
+    ],
 )
 def test_streams_and_precision(tmp_path: Path, id):
     p = builtins()[id]
@@ -25,6 +39,19 @@ def test_streams_and_precision(tmp_path: Path, id):
     result = check_probe(info, p, s)
     assert result["passed"], result["issues"]
     assert result["codec_input_precision"] == f"{p.bit_depth}-bit"
+    assert result["color_encoding"]["resolve_import_verified"] is False
+    if p.container in {"mp4", "mov"}:
+        assert len(info["container_color"]) == 1
+        # Codec VUI must not mask stripped or wrong QuickTime/MP4 tags.
+        stripped = deepcopy(info)
+        stripped["container_color"] = []
+        assert "QuickTime/MP4 colr mismatch or missing" in check_probe(stripped, p, s)["issues"]
+        wrong = deepcopy(info)
+        wrong["container_color"][0]["primaries"] = 12
+        assert not check_probe(wrong, p, s)["passed"]
+        if p.container == "mov":
+            assert info["container_color"][0]["gamma"] == pytest.approx(2.4, abs=1 / 65536)
+            assert info["container_color"][0]["transfer"] == 2
 
 
 @pytest.mark.integration
@@ -135,13 +162,109 @@ def test_codec_transparency_survives_decode(tmp_path, id):
     np.testing.assert_allclose(alpha, pixels[..., 3], atol=0.002)
 
 
-def test_image_storage_check_rejects_incorrect_native_depth():
-    from chromascript.encoding import check_image_metadata
+def test_image_storage_check_rejects_incorrect_native_depth(tmp_path):
+    p = builtins()["png-16"]
+    path = tmp_path / "native.png"
+    write_image(path, np.ones((16, 16, 4), dtype=np.float32), space="sRGB", depth=16)
+    _, metadata = read_image(path)
+    assert not check_image_metadata(metadata, p)
+    assert check_image_metadata({**metadata, "storage": "uint8"}, p)
 
-    assert check_image_metadata({"storage": "uint8", "channels": 4}, builtins()["png-16"])
-    assert not check_image_metadata(
-        {"storage": "uint16", "channels": 4, "oiio:UnassociatedAlpha": 1}, builtins()["png-16"]
+
+@pytest.mark.parametrize(
+    "id",
+    [
+        "exr-16-zip",
+        "exr-32-piz",
+        "aces2065-archive",
+        "png-8",
+        "png-16",
+        "tiff-8",
+        "tiff-16",
+        "dpx-10",
+        "dpx-12",
+        "dpx-16",
+    ],
+)
+def test_native_sequence_color_metadata_survives_without_sidecar(tmp_path, id):
+    import json
+
+    p = builtins()[id]
+    path = tmp_path / f"frame.{p.container}"
+    # Non-opaque coverage and unequal RGB catch unwanted color/alpha processing.
+    pixels = np.broadcast_to(np.array([0.125, 0.5, 0.75, 0.5], dtype=np.float32), (16, 16, 4))
+    if not p.alpha:
+        pixels = pixels[..., :3]
+    write_image(path, pixels, space=p.color.output, depth=p.bit_depth, compression=p.compression)
+    actual, metadata = read_image(path)
+    assert not check_image_metadata(metadata, p)
+    json.dumps(metadata, allow_nan=False)  # ICC evidence must remain usable by MCP/reports.
+    tolerance = 2 / (2**p.bit_depth - 1)
+    np.testing.assert_allclose(actual, pixels, atol=tolerance, rtol=0)
+    if p.container == "tiff":
+        from PIL import Image
+
+        # Confirm tag 34675 through an independent reader, not an OIIO space guess.
+        with Image.open(path) as native:
+            profile = native.tag_v2[34675]
+            assert profile[36:40] == b"acsp"
+        assert metadata["ICCProfile"]["matches_srgb"]
+        metadata.pop("ICCProfile")
+    elif p.container == "png":
+        metadata.pop("png:sRGB")
+    elif p.container == "dpx":
+        import struct
+
+        header = path.read_bytes()[:2048]
+        order = ">" if header[:4] == b"SDPX" else "<"
+        assert header[801:803] == bytes([0, 6])  # User-defined TRC, BT.709 primaries.
+        assert struct.unpack_from(order + "f", header, 1948)[0] == pytest.approx(2.4)
+        metadata["dpx:Gamma"] = 2.2
+    else:
+        metadata.pop("colorInteropID")
+    assert check_image_metadata(metadata, p)
+
+
+def test_untagged_png_is_not_certified_from_reader_default(tmp_path):
+    from PIL import Image
+
+    path = tmp_path / "untagged.png"
+    Image.new("RGB", (16, 16)).save(path)
+    _, metadata = read_image(path)
+    # OIIO reports assumed sRGB; a physical sRGB/gAMA/cHRM header is still required.
+    assert metadata["oiio:ColorSpace"] == "srgb_rec709_scene"
+    p = builtins()["png-8"].model_copy(update={"alpha": False})
+    assert "missing PNG sRGB chunk" in check_image_metadata(metadata, p)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "container,output,expected",
+    [
+        ("mov", "sRGB", (1, 13, 1)),
+        ("mov", "PQ", (9, 16, 9)),
+        ("mov", "HLG", (9, 18, 9)),
+        ("mp4", "sRGB", (1, 13, 1)),
+    ],
+)
+def test_gamma_choices_write_standard_container_tags(tmp_path, container, output, expected):
+    from chromascript.models import ColorPipeline
+
+    p = builtins()["hevc-mov"].model_copy(
+        update={
+            "container": container,
+            "color": ColorPipeline(output=output),
+        }
     )
+    settings = RenderSettings(width=64, height=64, frames=1)
+    pixels = np.ones((64, 64, 4), dtype=np.float32) * 0.5
+    pixels[..., 3] = 1
+    info = encode(p, settings, tmp_path / f"gamma.{container}", iter([pixels]), lambda n: None)
+    checked = check_probe(info, p, settings)
+    assert checked["passed"], checked["issues"]
+    native = info["container_color"][0]
+    assert tuple(native[k] for k in ("primaries", "transfer", "matrix")) == expected
+    assert "gamma" not in native  # No power-law gamma tag on sRGB/PQ/HLG.
 
 
 @pytest.mark.integration

@@ -147,10 +147,55 @@ class RenderSettings(Model):
         return self.frames * self.fps.denominator / self.fps.numerator
 
 
+# Display encodings and scene-referred ACES encodings remain distinct. ACEScct
+# shares AP1 with ACEScg, but its log curve must never receive a display tone map.
+OutputColorSpace = Literal["P3-D65", "Rec.709", "Rec.2020", "ACEScct", "ACEScg", "ACES2065-1"]
+OutputGamma = Literal["linear", "acescct", "gamma2.4", "srgb", "st2084", "hlg"]
+OutputTransform = Literal[
+    "ACEScg", "ACES2065-1", "ACEScct", "sRGB", "Rec.709", "Display-P3", "P3-PQ", "PQ", "HLG"
+]
+OUTPUT_ENCODINGS: dict[str, tuple[OutputColorSpace, OutputGamma]] = {
+    "ACEScg": ("ACEScg", "linear"),
+    "ACES2065-1": ("ACES2065-1", "linear"),
+    "ACEScct": ("ACEScct", "acescct"),
+    "Rec.709": ("Rec.709", "gamma2.4"),
+    "sRGB": ("Rec.709", "srgb"),
+    "Display-P3": ("P3-D65", "srgb"),
+    "P3-PQ": ("P3-D65", "st2084"),
+    "PQ": ("Rec.2020", "st2084"),
+    "HLG": ("Rec.2020", "hlg"),
+}
+
+
+def normalize_delivery_field(field: str, value: Any) -> Any:
+    """Normalize human aliases once for HTTP, MCP and explicit CLI comparisons."""
+    if not isinstance(value, str):
+        return value
+    key = re.sub(r"[\s._-]", "", value).lower()
+    if field == "color_space":
+        return {
+            "p3": "P3-D65",
+            "p3d65": "P3-D65",
+            "displayp3": "P3-D65",
+            "709": "Rec.709",
+            "bt709": "Rec.709",
+            "rec709": "Rec.709",
+            "2020": "Rec.2020",
+            "bt2020": "Rec.2020",
+            "rec2020": "Rec.2020",
+            "acescct": "ACEScct",
+            "acescg": "ACEScg",
+            "aces20651": "ACES2065-1",
+        }.get(key, value)
+    if field == "data_range":
+        return {"full": "full", "limit": "limited", "limited": "limited"}.get(key, value)
+    return value
+
+
 class ColorPipeline(Model):
     working_space: Literal["ACEScg"] = "ACEScg"
     config: Literal["cg-config-v4.0.0_aces-v2.0_ocio-v2.5"] = "cg-config-v4.0.0_aces-v2.0_ocio-v2.5"
-    output: Literal["ACEScg", "ACES2065-1", "sRGB", "Rec.709", "PQ", "HLG"] = "Rec.709"
+    output: OutputTransform = "Rec.709"
     peak_nits: Literal[1000] = 1000
 
 
@@ -201,7 +246,18 @@ class DeliveryPreset(Model):
             and self.bit_depth not in legal_integer_depths[self.container]
         ):
             raise ValueError(f"Illegal {self.container} bit depth: {self.bit_depth}")
-        if self.color.output in {"PQ", "HLG"} and self.bit_depth < 10:
+        # Match the sequence capability matrix: unsupported encodings must never
+        # fall through to a writer's default sRGB/undefined metadata.
+        if self.container in {"png", "tiff"} and self.color.output != "sRGB":
+            raise ValueError("PNG/TIFF delivery requires sRGB encoding")
+        if self.container == "dpx" and self.color.output != "Rec.709":
+            raise ValueError("DPX delivery requires Rec.709 / Gamma 2.4")
+        if self.color.output == "ACEScct":
+            if self.bit_depth < 10:
+                raise ValueError("ACEScct delivery requires at least 10-bit precision")
+            if self.container not in {"exr", "mov", "mp4", "mkv"}:
+                raise ValueError("ACEScct delivery needs EXR or a declared video encoding")
+        if self.color.output in {"PQ", "HLG", "P3-PQ"} and self.bit_depth < 10:
             raise ValueError("HDR output requires at least 10-bit precision")
         if self.container == "png" and self.alpha_mode != "straight":
             raise ValueError("PNG stores straight alpha; choose straight association")
@@ -234,13 +290,50 @@ class DeliveryConfiguration(Model):
     bit_depth: Literal[8, 10, 12, 16, 32] = 8
     sampling: Literal["RGB", "420", "422", "444"] = "420"
     alpha_mode: Literal["none", "straight", "premultiplied"] = "none"
-    color_output: Literal["ACEScg", "ACES2065-1", "sRGB", "Rec.709", "PQ", "HLG"] = "Rec.709"
+    color_space: OutputColorSpace = Field(
+        default="Rec.709",
+        description="Output RGB primaries/gamut; linked with gamma by get_delivery_options.",
+    )
+    gamma: OutputGamma = Field(
+        default="gamma2.4",
+        description="Output transfer encoding; linear, acescct (AP1 log), gamma2.4 (BT.1886), srgb, st2084 (PQ), or hlg.",
+    )
+    # Keep the combined output alias for existing scripts and frozen presets.
+    color_output: OutputTransform = Field(
+        default="Rec.709",
+        description="Legacy combined alias; new callers select color_space and gamma. The resolved alias must agree with the pair.",
+    )
     data_range: Literal["full", "limited"] = "limited"
     compression: Literal["zip", "piz", "none"] | None = None
     quality_mode: Literal["crf", "bitrate", "fixed"] = "crf"
     crf: int | None = Field(default=18, ge=0, le=51)
     bitrate_kbps: int | None = Field(default=None, ge=100, le=1_000_000)
     gop_seconds: float = Field(default=2.0, gt=0, le=30)
+
+    @model_validator(mode="before")
+    @classmethod
+    def expand_color_encoding(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        fields = {field: normalize_delivery_field(field, item) for field, item in value.items()}
+        legacy = fields.get("color_output", "Rec.709")
+        if not isinstance(legacy, str) or legacy not in OUTPUT_ENCODINGS:
+            return fields  # Let the strict literal field report an unknown legacy value.
+        if "color_space" not in fields and "gamma" not in fields:
+            fields["color_space"], fields["gamma"] = OUTPUT_ENCODINGS[legacy]
+        elif "color_output" not in fields:
+            # New clients can specify a pair without knowing the internal OCIO alias.
+            matches = [
+                output
+                for output, (space, gamma) in OUTPUT_ENCODINGS.items()
+                if space == fields.get("color_space", space) and gamma == fields.get("gamma", gamma)
+            ]
+            if matches:
+                fields["color_output"] = matches[0]
+                space, gamma = OUTPUT_ENCODINGS[matches[0]]
+                fields.setdefault("color_space", space)
+                fields.setdefault("gamma", gamma)
+        return fields
 
 
 class Project(Model):

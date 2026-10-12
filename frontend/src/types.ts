@@ -5,7 +5,27 @@ export type Parameter = {
   default: unknown;
   minimum: number | null;
   maximum: number | null;
-  color_space: string;
+  color_space: "ACEScg" | "sRGB";
+};
+// Display appearance is separate from the unrestricted RGB stored in a scene.
+export type OklchColor = {
+  lightness: number;
+  chroma: number;
+  hue: number;
+};
+export type ColorAppearance = {
+  model: "OKLCH";
+  color_space: Parameter["color_space"];
+  rgb: number[];
+  oklch: OklchColor;
+  display_rgb: number[];
+  gamut_mapped: boolean;
+  preview_clipped: boolean;
+  extended_range: boolean;
+  round_trip_error: number | null;
+  display: "sRGB";
+  view: string;
+  config: string;
 };
 export type Scene = {
   schema_version: number;
@@ -63,7 +83,20 @@ export type DeliveryConfiguration = {
   bit_depth: 8 | 10 | 12 | 16 | 32;
   sampling: "RGB" | "420" | "422" | "444";
   alpha_mode: "none" | "straight" | "premultiplied";
-  color_output: "ACEScg" | "ACES2065-1" | "sRGB" | "Rec.709" | "PQ" | "HLG";
+  color_space:
+    "P3-D65" | "Rec.709" | "Rec.2020" | "ACEScct" | "ACEScg" | "ACES2065-1";
+  gamma: "linear" | "acescct" | "gamma2.4" | "srgb" | "st2084" | "hlg";
+  // Combined alias is retained for older API clients; the editor uses the pair.
+  color_output:
+    | "ACEScg"
+    | "ACES2065-1"
+    | "ACEScct"
+    | "sRGB"
+    | "Rec.709"
+    | "Display-P3"
+    | "P3-PQ"
+    | "PQ"
+    | "HLG";
   data_range: "full" | "limited";
   compression: "zip" | "piz" | "none" | null;
   quality_mode: "crf" | "bitrate" | "fixed";
@@ -75,11 +108,33 @@ export type DeliverySelectField = Exclude<
   keyof DeliveryConfiguration,
   "schema_version" | "crf" | "bitrate_kbps" | "gop_seconds"
 >;
+// Fixed-view metadata is descriptive; changing it cannot request a different tone map.
+export type ColorEncoding = {
+  color_space_label: string;
+  transfer_function_label: string;
+  profile_label: string;
+  white_point: "D60" | "D65";
+  dynamic_range: "scene-linear" | "scene-log" | "SDR" | "HDR";
+  signal_standard: string;
+  target_display_peak_nits: number | null;
+  target_display_peak_editable: false;
+  limiting_gamut: string | null;
+  output_view: string | null;
+};
 export type DeliveryOptions = {
+  color_encoding: ColorEncoding;
+  color_space_note: string;
+  data_range_note: string;
+  color_note: string;
   configuration: DeliveryConfiguration;
   options: Record<
     DeliverySelectField,
-    { value: string | number | null; label: string }[]
+    {
+      value: string | number | null;
+      label: string;
+      disabled?: boolean;
+      reason?: string;
+    }[]
   >;
   adjustments: {
     field: string;
@@ -101,6 +156,8 @@ export type DeliveryOptions = {
   precision_note: string;
 };
 export type Job = {
+  // Display the server's actual job purpose instead of an opaque identifier alone.
+  kind: "frame" | "preview" | "sequence" | "delivery" | "probe";
   id: string;
   scene_id: string;
   project_id: string;

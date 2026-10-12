@@ -91,8 +91,19 @@ export function Modal({
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const node = ref.current;
-    if (open && !node?.open) node?.showModal();
-    if (!open && node?.open) node.close();
+    if (!open) {
+      if (node?.open) node.close();
+      return;
+    }
+    const trigger = document.activeElement;
+    if (!node?.open) node?.showModal();
+    return () => {
+      // A conditional editor may unmount its dialog on cancel. Close it first
+      // so focus returns to the trigger even when the native node is removed.
+      if (node?.open) node.close();
+      if (trigger instanceof HTMLElement && trigger.isConnected)
+        trigger.focus();
+    };
   }, [open]);
   return (
     <dialog

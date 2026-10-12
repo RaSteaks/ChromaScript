@@ -23,6 +23,15 @@
 
 CLI 的 --workspace 在子命令之前。所有产品操作均可通过 call 使用 JSON，参数以 @file.json 读取也可。守护服务由 doctor / MCP 自动启动时可能使用空闲端口，实际地址记录在 workspace/server.json；该文件含本地访问令牌，不应分享或提交。
 
+## 网页工作流
+
+1. **选择场景**：新建或选择项目，再从模板创建场景；已有场景可继续编辑。
+2. **编辑与预览**：在预览旁的“画面规格”中设置尺寸、宽高、帧率、总帧数、采样与时间码。修改参数、颜色或 WGSL 后自动显示当前草稿，无需先保存。实时预览长边最多 480 像素、每像素一次采样；可播放、暂停或拖动时间轴查看运动。保存后仍可渲染当前帧、三帧或前 2 秒动画，并检查原始像素。
+3. **设置交付**：沿用预览中的共用画面规格，分别选择封装、编码、色彩和质量。需要改规格时可返回预览；检查汇总后提交交付。
+4. **任务与成果**：查看进度，选择任务下载文件，或通过“导出序列”复制全部图像帧。
+
+可随时通过顶部步骤返回修改；切换步骤保留本次页面中的草稿。交付成功提交后自动进入任务页，后台渲染不受步骤切换影响。
+
 ## 模型通过 MCP 使用
 
 本地客户端配置示例：
@@ -52,6 +61,8 @@ CLI 的 --workspace 在子命令之前。所有产品操作均可通过 call 使
 
 长任务立即返回 job_id。使用 get_job 查看进度，get_artifact(include_image=true) 取得原生 PNG 图像，inspect_frame / sample_pixels 检查 EXR 数值。MCP 连接断开不会停止后台任务。get_artifact 同时返回本地绝对路径与受本地会话保护的媒体 URL。图像序列可通过 export_artifact 整体复制；网页任务面板提供序列导出、EXR 和说明文件下载。
 
+`render_live_preview` 通过同一 HTTP / MCP / CLI 操作接收 `request.spec`（完整草稿）、`width`、`height`、有理数 `fps` 和整数 `frame`，直接返回低分辨率 sRGB PNG（MCP 原生图像），不保存场景或创建任务。CLI 可使用 `.venv/bin/chromascript call render_live_preview --arguments @draft-preview.json`。实时预览只降低空间分辨率和采样数；ACES 显示变换与 Alpha 规则一致，正式交付精度不受影响。
+
 文档资源包括 chromascript://docs/workflow、scene、color、delivery；提示词 create_procedural_video 可向模型提供创作流程。完整操作 Schema 可通过 operations 命令或网页 MCP 接口页查询。
 
 
@@ -63,7 +74,19 @@ CLI 的 --workspace 在子命令之前。所有产品操作均可通过 call 使
 将返回的 `configuration` 对象放入 `configurations` 数组提交；下面示例为直通 Alpha 的 ACEScg EXR：
 
     chromascript.submit_configured_delivery
-    {"request": {"scene_id": "<场景 ID>", "settings": {"width": 1920, "height": 1080, "frames": 60, "fps": {"numerator": 30, "denominator": 1}}, "configurations": [{"container": "exr", "codec": "exr", "profile": null, "bit_depth": 16, "sampling": "RGB", "alpha_mode": "straight", "color_output": "ACEScg", "data_range": "full", "compression": "zip", "quality_mode": "fixed", "crf": null}], "idempotency_key": "my-delivery-1"}}
+    {"request": {"scene_id": "<场景 ID>", "settings": {"width": 1920, "height": 1080, "frames": 60, "fps": {"numerator": 30, "denominator": 1}}, "configurations": [{"container": "exr", "codec": "exr", "profile": null, "bit_depth": 16, "sampling": "RGB", "alpha_mode": "straight", "color_space": "ACEScg", "gamma": "linear", "data_range": "full", "compression": "zip", "quality_mode": "fixed", "crf": null}], "idempotency_key": "my-delivery-1"}}
+
+## 输出色彩设置
+
+输出设置分别记录色彩空间 / 色域、传递函数 / Gamma、目标显示峰值亮度和数据范围。传递函数名称为 Linear、Gamma 2.4（BT.1886）、sRGB（IEC 61966-2-1）、PQ（SMPTE ST 2084）及 HLG（ARIB STD-B67）。
+
+P3 采用 **P3-D65**，提供 sRGB 和 PQ 编码；BT.2020 与 Rec.2020 为同一色域。ACEScct 使用 AP1 对数编码，可导出 10-bit 及以上视频或浮点 EXR；ACEScg/AP0 线性母版使用 EXR。所有色域均可在列表中查看，不适用项会变灰并注明原因。
+
+数据范围显示 **Full / Limited**；RGB/浮点图像采用 Full，ProRes/DNxHR/v210 的 YCbCr 输出采用 Limited。不可用范围仍显示为禁用项。接口接受 `limit` 别名并规范为 `limited`。ACEScct 视频没有可准确表达 AP1/ACEScct 的 H.273 标记，采用未指定原色/传递函数并写入原生 comment 声明；调色软件中需显式指定解释。超出整数编码范围的对数值会报错，使用 float EXR 可以保留。
+
+当前 ACES 显示输出固定使用 SDR 100 cd/m² 或 HDR 1000 cd/m²；亮度独立显示并写入 `color_encoding.target_display_peak_nits`。这是所选输出变换的目标显示参数，不能解读为 PQ 或 HLG 标准本身的亮度上限。ACEScg / ACES2065-1 线性母版的该字段为 null，不烘焙显示变换。选项定义参考 [ACES 输出变换参数](https://docs.acescentral.com/system-components/output-transforms/parameters/)；HLG 显示依赖见 [ITU-R BT.2100](https://www.itu.int/rec/R-REC-BT.2100)。
+
+网页要求当前服务提供规范色彩能力；旧服务显示更新提示，不再回退到混合菜单。旧 `color_output` 接口仍兼容现有脚本。
 
 ## 场景约定
 
@@ -76,6 +99,14 @@ CLI 的 --workspace 在子命令之前。所有产品操作均可通过 call 使
 
 返回直通 Alpha 的线性 ACEScg RGBA。Alpha 必须为 0..1；RGB 可为负数或大于 1。工具验证每个采样值，禁止 NaN / infinity。参数由 SceneSpec.parameters 定义，使用 ctx.params.NAME 访问。
 
+颜色参数默认通过 OKLCH 明度 / 彩度选色板和色相滑块选取，显示原颜色与新颜色。OKLCH 是适合当前 SDR 选色的 D65 感知空间，不模拟 HDR 观看条件。色样通过实际 ACES 2.0 sRGB 预览生成；选取颜色经同一视图的 OCIO 逆变换换算为参数声明空间，再正向渲染核对。超出 sRGB 色域时，保持明度与色相并降低彩度，界面用斜线和文字说明。打开、取消或 Escape 不会改写原值；“应用颜色”只更新本地草稿，仍需保存场景。高级 RGB 输入保留负值和大于 1 的浮点值。转换失败可重试并保留候选颜色。
+
+同一选色能力通过 `chromascript.resolve_color` MCP 工具和 CLI 提供；`request.rgb` 用于只读检查原值，`request.oklch` 用于换算选色，两者只能提供一个。示例：
+
+    .venv/bin/chromascript call resolve_color --arguments '{"request":{"color_space":"ACEScg","oklch":{"lightness":0.65,"chroma":0.15,"hue":270}}}'
+
+返回 `rgb` 为可写入场景的浮点值，`display_rgb` 为独立显示色样，另含实际 OKLCH、色域调整、往返误差及 OCIO 配置校验值。模型与矩阵依据 [Oklab 原始说明](https://bottosson.github.io/posts/oklab/)；坐标和 D65 语义见 [CSS Color 4](https://www.w3.org/TR/css-color-4/#ok-lab)。
+
 ctx.pixel 为左上原点的全局像素坐标；ctx.uv 为左下原点的归一化坐标。ctx.time 来自精确有理数帧率，送入 GPU 的时间为 float32；ctx.frame、ctx.seed 为整数。场景不能依赖真实时钟或上一帧。
 
 采样在线性空间累积预乘颜色，最后恢复直通 Alpha。无 Alpha 输出在线性空间合成到黑色后执行输出变换。PNG 使用直通 Alpha；EXR/TIFF/支持的专业视频提供明确的关联方式。
@@ -83,6 +114,7 @@ ctx.pixel 为左上原点的全局像素坐标；ctx.uv 为左下原点的归一
     .venv/bin/chromascript preview <scene-id> --frame 60
     .venv/bin/chromascript render <scene-id> --container exr --bit-depth 32 --compression zip --alpha-mode straight --width 3840 --height 2160 --frames 300
     .venv/bin/chromascript render <scene-id> --container mp4 --codec hevc --color-output PQ --width 3840 --height 2160 --frames 300
+    .venv/bin/chromascript render <scene-id> --container mov --codec hevc --color-space Rec.2020 --gamma st2084 --width 3840 --height 2160 --frames 300
     .venv/bin/chromascript resume <job-id>
     .venv/bin/chromascript inspect <artifact-id>
 
@@ -97,13 +129,19 @@ ctx.pixel 为左上原点的全局像素坐标；ctx.uv 为左下原点的归一
 - sRGB 预览与原始 ACES 浮点数值分别提供；Alpha 不进入颜色处理器。
 - 工具空间转换和显示输出变换不同：ACEScct 等工作空间转换不应用显示呈现；sRGB / Rec.709 / PQ / HLG 别名使用明确的 ACES 输出视图。
 
-交付面板由用户通过联动下拉列表选择封装、编码、档位、位深、色度采样、输出色彩、Alpha、范围、压缩和质量控制，覆盖 MP4/MOV H.264、HEVC、全部六档 ProRes、DNxHR MOV/MXF、EXR、PNG/TIFF/DPX、FFV1、无压缩 RGB/YUV 及平台构图。可添加多个独立交付目标。更改选项会更新其他可选项，并提示兼容性调整；任务提交前会再次校验。旧预设接口仅为已有脚本及历史任务保留，网页不再使用预设。
+交付面板由用户通过联动下拉列表选择封装、编码、档位、位深、色度采样、输出色彩空间、Gamma、Alpha、范围、压缩和质量控制，覆盖 MP4/MOV H.264、HEVC、全部六档 ProRes、DNxHR MOV/MXF、EXR、PNG/TIFF/DPX、FFV1、无压缩 RGB/YUV 及平台构图。可添加多个独立交付目标。更改选项会更新其他可选项，并提示兼容性调整；任务提交前会再次校验。旧预设接口仅为已有脚本及历史任务保留，网页不再使用预设。
+
+色彩空间与 Gamma 分开指定：`Rec.709` 搭配 `gamma2.4`（Rec.1886）或 `srgb`；`Rec.2020` 搭配 `st2084`（PQ）或 `hlg`；`ACEScg` / `ACES2065-1` 搭配 `linear`。选择 Rec.2020 HDR 会联动到兼容的位深。MCP / HTTP 的 `DeliveryConfiguration` 与 CLI 的 `--color-space`、`--gamma` 使用同一约束；旧 `color_output` / `--color-output` 仍兼容，不能与矛盾的新字段一起提交。
 
 每项能力记录实际已验证组合；编码器存在不等于整个规格已验证。ProRes / DNxHR 软件编码输入最高 10-bit，解码器显示 12-bit 存储不代表端到端 12-bit。自定义预设也会检查输入像素格式精度。
 
 submit_configured_delivery 直接接受 configurations 数组，无需保存预设。get_delivery_options 返回合法选项、联动调整和允许帧率；validate_delivery_configuration 与 estimate_delivery 分别校验和估算当前配置。项目默认色彩和旧批量接口保留兼容，显式交付配置决定本次输出。
 
-图像序列附带 sequence.json，记录精确帧率、帧索引、时间码起点和色彩配置；EXR 也写入标准有理数 FramesPerSecond 元数据。不同后期软件对整数序列元数据的支持不同，应根据 sidecar 明确指定输入色彩和时间码。
+文件本身包含标准色彩元数据：EXR 写入 AP1/AP0 `chromaticities` 与 `colorInteropID`；PNG 写入 `sRGB` / `gAMA` / `cHRM`；TIFF 嵌入真实 sRGB ICC 配置；DPX 写入 Rec.709 色度定义、用户定义传递函数和数值 Gamma 2.4。PNG/TIFF 交付限定 sRGB，DPX 限定 Rec.709 / Gamma 2.4，避免原生写入器静默采用错误默认值。检查会回读实际字段，缺失或不匹配时交付失败。
+
+MOV/MP4 写入 Resolve 可读取的标准 `colr`（NCLC/NCLX）标记，并与编码器的色彩标记一起检查。MOV 的 Rec.709 / Gamma 2.4 使用 `1-2-1`（RGB 矩阵为 0）与数值 `gama=2.4`，因为 NCLC 没有 Gamma 2.4 枚举；MP4 等格式沿用 BT.709 信号约定，不能仅由该标记证明 Rec.1886 Gamma，应在 Resolve 中核对 Gamma 2.4。PQ / HLG / sRGB 则分别有明确的传递函数代码 16 / 18 / 13。
+
+图像序列附带 sequence.json，记录精确帧率、帧索引、时间码起点及独立的 `color_encoding.color_space` / `gamma`；EXR 也写入标准有理数 FramesPerSecond 元数据。报告记录 Resolve 输入空间/Gamma 建议和实际原生检查结果；应用内导入没有自动认证，`resolve_import_verified` 为 false。不同 Resolve 版本和项目色彩管理对图像元数据的自动解释不同，导入后按[说明](docs/RESOLVE_IMPORT.md)核对输入设置和时间码。
 
 ProRes / DNxHR 的部分容器不单独暴露范围标记，报告区分显式信号与编码约定；测试使用实际黑白阶梯验证合法范围。HDR 不写未经测量的 mastering / MaxCLL / MaxFALL，文件检查不等同于显示器校准。
 

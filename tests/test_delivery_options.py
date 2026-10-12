@@ -43,6 +43,50 @@ def test_hdr_depth_and_profile_update_in_both_directions():
     assert config.profile == "main10"
 
 
+def test_separate_gamut_gamma_choices_and_legacy_mapping():
+    # Gamut selection promotes HDR precision; changing gamma keeps the same gamut.
+    config = change(DeliveryConfiguration(), "codec", "hevc")
+    config = change(config, "color_space", "Rec.2020")
+    assert (config.bit_depth, config.gamma, config.color_output) == (10, "st2084", "PQ")
+    choices = delivery_options(config)["options"]
+    assert [v["value"] for v in choices["gamma"]] == ["st2084", "hlg"]
+    config = change(config, "gamma", "hlg")
+    assert config.color_space == "Rec.2020" and configured_output(config).color.output == "HLG"
+    config = change(config, "color_space", "Rec.709")
+    assert config.gamma == "gamma2.4"
+    config = change(config, "gamma", "srgb")
+    assert config.color_space == "Rec.709" and configured_output(config).color.output == "sRGB"
+    config = change(config, "container", "exr")
+    assert (config.color_space, config.gamma) == ("ACEScg", "linear")
+    assert [v["value"] for v in delivery_options(config)["options"]["gamma"]] == ["linear"]
+    config = change(config, "color_space", "ACES2065-1")
+    assert configured_output(config).color.output == "ACES2065-1"
+    for output, pair in [
+        ("PQ", ("Rec.2020", "st2084")),
+        ("HLG", ("Rec.2020", "hlg")),
+        ("Rec.709", ("Rec.709", "gamma2.4")),
+        ("sRGB", ("Rec.709", "srgb")),
+    ]:
+        legacy = DeliveryConfiguration(color_output=output)
+        assert (legacy.color_space, legacy.gamma) == pair
+
+
+def test_split_fields_work_without_alias_and_reject_conflicting_submission():
+    from pydantic import ValidationError
+
+    config = DeliveryConfiguration(gamma="srgb")
+    assert config.color_output == "sRGB"
+    assert configured_output(config).color.output == "sRGB"
+    conflict = config.model_copy(update={"gamma": "hlg"})
+    with pytest.raises(ChromaError, match="不兼容"):
+        configured_output(conflict)
+    with pytest.raises(ValidationError):
+        DeliveryConfiguration(gamma="arbitrary-gamma")
+    # New requests cannot silently contradict the compatibility alias.
+    with pytest.raises(ChromaError, match="不兼容"):
+        configured_output(DeliveryConfiguration(color_output="Rec.709", gamma="srgb"))
+
+
 def test_image_storage_and_alpha_choices():
     config = change(DeliveryConfiguration(), "container", "exr")
     assert (
@@ -146,6 +190,50 @@ def test_native_unavailable_format_is_not_silently_replaced(monkeypatch):
         delivery_options(DeliveryConfiguration())
 
 
+@pytest.mark.gpu
+@pytest.mark.integration
+def test_worker_exports_verified_native_image_color_headers_and_sidecars(tmp_path):
+    import json
+
+    from chromascript.worker import run
+
+    service = Service(tmp_path / "workspace")
+    project = service.create_project("color metadata")["project"]
+    scene = service.create_scene(project["id"], template_id="shapes")
+    configs = [
+        change(DeliveryConfiguration(), "container", container)
+        for container in ("exr", "png", "tiff", "dpx")
+    ]
+    settings = RenderSettings(width=32, height=32, frames=2)
+    job = service.submit_configured_delivery(
+        scene_id=scene["record"]["id"],
+        settings=settings,
+        configurations=configs,
+        idempotency_key="native-color-headers",
+    )["job"]
+    # Run the actual worker path, including JSON evidence and export copying.
+    run(service.store.root, job["id"])
+    result = service.get_job(job["id"])
+    assert result["job"]["status"] == "completed", result["job"].get("error")
+    report = service.validate_delivery_output(job["id"])
+    assert report["passed"] and len(report["outputs"]) == 4
+    assert all(
+        output["color_signaling"] == "image header and sequence sidecar"
+        for output in report["outputs"]
+    )
+    for index, sequence in enumerate(
+        a for a in result["artifacts"] if a["kind"] == "image-sequence"
+    ):
+        destination = service.store.root / "exports" / str(index)
+        service.export_artifact(sequence["id"], str(destination))
+        manifest = json.loads((destination / "sequence.json").read_text())
+        preset = next(p for p in job["outputs"] if p["id"] == sequence["metadata"]["preset_id"])
+        encoding = manifest["color_encoding"]
+        assert encoding["output_transform"] == preset["color"]["output"]
+        assert encoding["resolve_import_verified"] is False
+        assert len(list(destination.glob("*." + preset["container"]))) == 2
+
+
 def test_cli_direct_fields_and_explicit_conflicts(tmp_path, monkeypatch):
     from typer.testing import CliRunner
 
@@ -185,7 +273,20 @@ def test_cli_direct_fields_and_explicit_conflicts(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     output = service.store.list("job")[0]["outputs"][0]
     assert output["codec"] == "libx265" and output["bit_depth"] == 10
+    result = runner.invoke(
+        app, [*common, "--codec", "hevc", "--color-space", "Rec.2020", "--gamma", "hlg"]
+    )
+    assert result.exit_code == 0, result.output
+    assert service.store.list("job")[0]["outputs"][0]["color"]["output"] == "HLG"
+    result = runner.invoke(app, [*common, "--gamma", "srgb"])
+    assert result.exit_code == 0, result.output
+    assert service.store.list("job")[0]["outputs"][0]["color"]["output"] == "sRGB"
+    result = runner.invoke(app, [*common, "--color-output", "PQ", "--gamma", "hlg"])
+    assert result.exit_code == 1 and "混用" in result.output
     before = len(service.store.list("job"))
+    result = runner.invoke(app, [*common, "--gamma", "invalid-gamma"])
+    assert result.exit_code == 1 and '"error"' in result.output
+    assert len(service.store.list("job")) == before
     result = runner.invoke(
         app,
         [
@@ -202,3 +303,38 @@ def test_cli_direct_fields_and_explicit_conflicts(tmp_path, monkeypatch):
     )
     assert result.exit_code == 1 and "互不兼容" in result.output
     assert len(service.store.list("job")) == before
+
+
+@pytest.mark.parametrize(
+    "output,peak,dynamic_range",
+    [
+        ("ACEScg", None, "scene-linear"),
+        ("ACES2065-1", None, "scene-linear"),
+        ("Rec.709", 100, "SDR"),
+        ("sRGB", 100, "SDR"),
+        ("PQ", 1000, "HDR"),
+        ("HLG", 1000, "HDR"),
+    ],
+)
+def test_standard_color_description_separates_transfer_and_target(output, peak, dynamic_range):
+    from chromascript.color import GAMMA_LABELS, output_metadata
+
+    config = DeliveryConfiguration(color_output=output)
+    if output in {"PQ", "HLG"}:
+        config = config.model_copy(update={"codec": "hevc"})
+    elif output in {"ACEScg", "ACES2065-1"}:
+        config = config.model_copy(update={"container": "exr"})
+    result = delivery_options(config, "color_output")
+    description = result["color_encoding"]
+    assert description == output_metadata(output)
+    assert description["target_display_peak_nits"] == peak
+    assert description["dynamic_range"] == dynamic_range
+    assert description["target_display_peak_editable"] is False
+    assert description["white_point"] == ("D60" if peak is None else "D65")
+    assert all("nit" not in option["label"] for option in result["options"]["gamma"])
+    assert all("nit" not in label for label in GAMMA_LABELS.values())
+    assert (
+        description["output_view"] is None
+        if peak is None
+        else str(peak) in description["output_view"]
+    )
