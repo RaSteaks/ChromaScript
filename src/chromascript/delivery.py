@@ -11,10 +11,16 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from .color import GAMMA_LABELS, SPACE_LABELS, output_metadata
+from .color import GAMMA_LABELS, NUMERIC_GAMMAS, SPACE_LABELS, output_metadata, tags
 from .encoding import available_encoders
 from .errors import ChromaError
-from .models import OUTPUT_ENCODINGS, ColorPipeline, DeliveryConfiguration, DeliveryPreset
+from .models import (
+    EXR_OUTPUTS,
+    OUTPUT_ENCODINGS,
+    ColorPipeline,
+    DeliveryConfiguration,
+    DeliveryPreset,
+)
 from .presets import FRAME_RATES
 from .store import canonical
 
@@ -51,7 +57,7 @@ LABELS = {
     "color_space": "输出色彩空间",
     "gamma": "传递函数 / Gamma",
     "color_output": "色彩编码（兼容）",
-    "data_range": "数据范围",
+    "data_range": "数据级别",
     "compression": "图像压缩",
     "quality_mode": "质量控制",
     "crf": "CRF",
@@ -76,6 +82,8 @@ PROFILE_LABELS = {
     "hqx": "HQX",
     "444": "444",
 }
+# ProRes HQ/LT/Proxy are 422 variants; DNxHR uses its own HQ/LB/SQ labels.
+PRORES_PROFILE_LABELS = {**PROFILE_LABELS, "proxy": "422 Proxy", "lt": "422 LT", "hq": "422 HQ"}
 # Keep API aliases compatible while reporting the same complete color encoding.
 COLOR_LABELS = {
     output: f"{SPACE_LABELS[space]} / {GAMMA_LABELS[gamma]}"
@@ -84,6 +92,14 @@ COLOR_LABELS = {
 ALPHA_LABELS = {"none": "无 Alpha", "straight": "直通 Alpha", "premultiplied": "预乘 Alpha"}
 MXF_RATES = {"24/1", "25/1", "30/1", "50/1", "60/1", "24000/1001", "30000/1001", "60000/1001"}
 IMAGES = {"exr", "png", "tiff", "dpx"}
+DATA_LEVEL_LABELS = {
+    "auto": "Auto（自动）",
+    "full": "Full（全范围）",
+    "limited": "Video（Limited，视频范围）",
+}
+# Resolve 21's Deliver controls distinguish output processing from metadata tags.
+# Our implemented subset is bounded by the local encoder and native file verification.
+DELIVERY_SPECIFICATION = "resolve-21-delivery-v1"
 
 
 @dataclass(frozen=True)
@@ -208,12 +224,16 @@ def _alpha_modes(codec: str, variant: Variant) -> list[str]:
 
 def _colors(codec: str, depth: int = 32, container: str | None = None) -> list[str]:
     if codec == "exr":
-        return ["ACEScg", "ACES2065-1", "ACEScct"]
+        return list(EXR_OUTPUTS)
     if codec in {"png", "tiff"}:
         return ["sRGB"]
     if codec == "dpx":
         return ["Rec.709"]
-    outputs = ["Rec.709", "sRGB", "Display-P3"]
+    outputs = ["Rec.709", "sRGB", "Display-P3", "Rec.709-Gamma2.2", "P3-Gamma2.2"]
+    if container == "mov":
+        # MOV can carry exact numeric gamma. Do not misuse ST428/BT.709 enums
+        # for P3 power curves in containers without an implemented equivalent.
+        outputs += ["P3-Gamma2.4", "P3-Gamma2.6", "Rec.709-Gamma2.6"]
     # Integer log exports need useful precision and a container with explicit
     # user metadata. Float EXR remains available for values outside [0, 1].
     if depth >= 10 and container != "mxf":
@@ -342,7 +362,11 @@ def delivery_options(
         if codec in {"prores", "dnxhr", "yuv"}
         else ["limited", "full"]
     )
-    values["data_range"] = _pick(values["data_range"], ranges)
+    # Preserve Auto as user intent; the immutable DeliveryPreset resolves it to
+    # a concrete range before encoding, so frozen jobs never depend on a UI default.
+    if values["data_range"] != "auto":
+        values["data_range"] = _pick(values["data_range"], ranges)
+    resolved_range = ranges[0] if values["data_range"] == "auto" else values["data_range"]
     compression = (
         ["zip", "piz", "none"]
         if codec == "exr"
@@ -387,16 +411,82 @@ def delivery_options(
         if ranges == ["limited"]
         else ""
     )
+    if values["data_range"] == "auto":
+        range_note = f"Auto 按当前格式使用 {DATA_LEVEL_LABELS[resolved_range]}。" + range_note
     range_options = [
         {
             "value": value,
             "label": label,
-            "disabled": value not in ranges,
-            "reason": range_note if value not in ranges else "",
+            "disabled": value != "auto" and value not in ranges,
+            "reason": range_note if value != "auto" and value not in ranges else "",
         }
-        for value, label in [("full", "Full（全范围）"), ("limited", "Limited（视频范围）")]
+        for value, label in DATA_LEVEL_LABELS.items()
     ]
     normalized = DeliveryConfiguration.model_validate(values)
+    encoding = output_metadata(normalized.color_output)
+    available_gammas = {
+        OUTPUT_ENCODINGS[output][1]
+        for output in available_colors
+        if OUTPUT_ENCODINGS[output][0] == normalized.color_space
+    }
+    gamma_values = (
+        (
+            ["gamma2.2", "gamma2.4", "gamma2.6", "srgb", "st2084"]
+            if normalized.color_space == "P3-D65"
+            else ["gamma2.2", "gamma2.4", "gamma2.6", "srgb"]
+            if normalized.color_space == "Rec.709"
+            else list(
+                dict.fromkeys(
+                    OUTPUT_ENCODINGS[output][1]
+                    for output in available_colors
+                    if OUTPUT_ENCODINGS[output][0] == normalized.color_space
+                )
+            )
+        )
+        if codec not in IMAGES
+        else [normalized.gamma]
+    )
+    gamma_options = []
+    for gamma in gamma_values:
+        reason = ""
+        if gamma not in available_gammas:
+            reason = (
+                "需 QuickTime MOV 记录数值 Gamma"
+                if gamma in {"gamma2.4", "gamma2.6"}
+                else "当前格式不可用"
+            )
+        gamma_options.append(
+            {
+                "value": gamma,
+                "label": GAMMA_LABELS[gamma] + (" · " + reason if reason else ""),
+                "disabled": bool(reason),
+                "reason": reason,
+            }
+        )
+    # Expected file tags are derived from rendered pixels, never independent
+    # controls which could relabel one encoding as another without transforming it.
+    file_space = encoding["resolve_input_color_space"]
+    file_gamma = encoding["resolve_input_gamma"]
+    if codec not in IMAGES:
+        native = tags(normalized.color_output)
+        if native["primaries"] == "unknown":
+            file_space = "未指定（AP1 见交付说明）"
+        file_gamma = (
+            f"Gamma {NUMERIC_GAMMAS[normalized.gamma]}（MOV 数值标签）"
+            if normalized.container == "mov" and normalized.gamma in NUMERIC_GAMMAS
+            else "Rec.709（按 Gamma 2.4 解读）"
+            if normalized.color_output == "Rec.709"
+            else "未指定（ACEScct 见交付说明）"
+            if normalized.gamma == "acescct"
+            else encoding["resolve_input_gamma"]
+        )
+    gamma_note = (
+        "P3-D65 + sRGB 为 Display P3。色域与 Gamma 分别选择；ProRes 本身不限定 Gamma。"
+        if normalized.color_space == "P3-D65" and normalized.gamma == "srgb"
+        else "色域与 Gamma 分别选择；切换色域会保留兼容的 Gamma。文件标签随实际输出生成。"
+        if codec not in IMAGES
+        else "图像格式使用当前支持的固定编码；文件色彩标记与像素编码一致。"
+    )
     changes = [
         {"field": f, "label": LABELS.get(f, f), "previous": requested.model_dump()[f], "value": v}
         for f, v in normalized.model_dump().items()
@@ -409,16 +499,25 @@ def delivery_options(
     ]
     return {
         "configuration": normalized.model_dump(),
-        "color_encoding": output_metadata(normalized.color_output),
+        "specification": DELIVERY_SPECIFICATION,
+        "color_encoding": encoding,
+        "file_tags": {"color_space": file_space, "gamma": file_gamma},
+        "resolved_data_range": resolved_range,
+        "gamma_note": gamma_note,
         "color_space_note": "灰色选项当前格式不可用；ACEScg 浮点母版请使用 EXR。",
         "data_range_note": range_note,
         "color_note": "ACEScct 视频导入时请明确指定 ACES (AP1) / ACEScct；原生色彩标记为未指定，完整解释见交付报告。"
         if normalized.color_output == "ACEScct" and codec != "exr"
+        else f"导入时请核对 {encoding['resolve_input_color_space']} / {encoding['resolve_input_gamma']}；MOV 记录数值 Gamma，不能把未指定的 TRC 当作 sRGB。"
+        if encoding["requires_manual_video_interpretation"] and codec not in IMAGES
         else "",
         "options": {
             "container": _options(containers, CONTAINERS),
             "codec": _options(codecs, {k: v[0] for k, v in CODECS.items()}),
-            "profile": _options([v.profile for v in variants], PROFILE_LABELS),
+            "profile": _options(
+                [v.profile for v in variants],
+                PRORES_PROFILE_LABELS if codec == "prores" else PROFILE_LABELS,
+            ),
             "bit_depth": _options(
                 [v.depth for v in variants],
                 {
@@ -444,14 +543,7 @@ def delivery_options(
                 _colors(codec, max(v.depth for v in variants), values["container"]), COLOR_LABELS
             ),
             "color_space": space_options,
-            "gamma": _options(
-                [
-                    OUTPUT_ENCODINGS[c][1]
-                    for c in _colors(codec, max(v.depth for v in variants), values["container"])
-                    if OUTPUT_ENCODINGS[c][0] == normalized.color_space
-                ],
-                GAMMA_LABELS,
-            ),
+            "gamma": gamma_options,
             "data_range": range_options,
             "compression": _options(
                 compression,
@@ -495,11 +587,14 @@ def configured_output(configuration: DeliveryConfiguration) -> DeliveryPreset:
         for v in supported_variants()[c.codec]
         if v.profile == c.profile and v.depth == c.bit_depth and v.sampling == c.sampling
     )
-    digest = hashlib.sha256(canonical(c.model_dump()).encode()).hexdigest()[:12]
+    # Auto and its explicit codec range describe the same frozen output. Canonical
+    # IDs must agree so equivalent targets cannot bypass duplicate-delivery checks.
+    frozen_configuration = {**c.model_dump(), "data_range": result["resolved_data_range"]}
+    digest = hashlib.sha256(canonical(frozen_configuration).encode()).hexdigest()[:12]
     # IDs identify immutable output files; nothing is saved to the user's preset library.
     return DeliveryPreset(
         id=f"delivery-{c.codec}-{c.profile or c.bit_depth}-{re.sub(r'[^a-z0-9-]', '', c.color_output.lower())}-{digest}",
-        name=f"{CONTAINERS[c.container]} · {CODECS[c.codec][0]} {PROFILE_LABELS.get(c.profile or '', '')} · {c.bit_depth}-bit · {SPACE_LABELS[c.color_space]} / {GAMMA_LABELS[c.gamma]}",
+        name=f"{CONTAINERS[c.container]} · {CODECS[c.codec][0]} {(PRORES_PROFILE_LABELS if c.codec == 'prores' else PROFILE_LABELS).get(c.profile or '', '')} · {c.bit_depth}-bit · {SPACE_LABELS[c.color_space]} / {GAMMA_LABELS[c.gamma]}",
         family="自主交付",
         container=c.container,
         codec=CODECS[c.codec][1],

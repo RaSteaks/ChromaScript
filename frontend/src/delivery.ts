@@ -14,7 +14,7 @@ export const DEFAULT_DELIVERY: DeliveryConfiguration = {
   color_space: "Rec.709",
   gamma: "gamma2.4",
   color_output: "Rec.709",
-  data_range: "limited",
+  data_range: "auto",
   compression: null,
   quality_mode: "crf",
   crf: 18,
@@ -90,9 +90,11 @@ export function useDeliveryTargets() {
           controller.signal.aborted
         )
           return;
-        // A mixed legacy menu cannot represent the standardized color controls.
-        // Keep the draft and block submission until the daemon exposes this contract.
+        // Older daemons cannot retain independent P3 gamma or freeze Auto levels.
+        // Preserve the draft and require the shared Resolve-style contract before delivery.
         if (
+          resolved.specification !== "resolve-21-delivery-v1" ||
+          !resolved.file_tags ||
           !resolved.options.color_space ||
           !resolved.options.gamma ||
           !resolved.color_encoding
@@ -215,9 +217,20 @@ export function useDeliveryTargets() {
     );
   }
   const configurations = targets.map((target) => target.configuration);
+  // Auto and explicit Video/Full may freeze to the same output; compare the
+  // resolved range without replacing the user's editable Auto selection.
   const duplicate =
-    new Set(configurations.map((value) => JSON.stringify(value))).size !==
-    configurations.length;
+    new Set(
+      targets.map((target) =>
+        JSON.stringify({
+          ...target.configuration,
+          data_range:
+            target.configuration.data_range === "auto"
+              ? (target.resolved?.resolved_data_range ?? "auto")
+              : target.configuration.data_range,
+        }),
+      ),
+    ).size !== configurations.length;
   const ready =
     targets.every(
       (target) =>

@@ -278,7 +278,9 @@ test("linked format choices preserve compatible values and repair conflicts", as
   await expect(field("输出色彩空间")).toHaveValue("ACEScg");
   await expect(field("传递函数 / Gamma")).toHaveValue("linear");
   await expect(field("传递函数 / Gamma")).toBeDisabled();
-  await expect(field("数据范围")).toHaveValue("full");
+  // Auto remains selected while the server resolves EXR to Full in the frozen output.
+  await expect(field("数据级别")).toHaveValue("auto");
+  await expect(target).toContainText("Auto 按当前格式使用 Full（全范围）");
   await field("位深").selectOption("32");
   await expect(field("位深")).toHaveValue("32");
   await field("图像压缩").selectOption("piz");

@@ -3,6 +3,7 @@
 import asyncio
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from mcp import Client
 
@@ -72,6 +73,24 @@ def test_http_shared_contract_and_access(tmp_path: Path):
             config["color_output"],
             config["bit_depth"],
         ) == ("Rec.2020", "hlg", "HLG", 10)
+        # The HTTP and MCP schema share independent P3 gamma and Auto data levels.
+        p3 = client.post(
+            "/api/operations/get_delivery_options",
+            headers=headers,
+            json={
+                "configuration": {
+                    "container": "mov",
+                    "codec": "prores",
+                    "color_space": "P3-D65",
+                    "gamma": "Gamma 2.4",
+                    "data_range": "Auto",
+                }
+            },
+        )
+        assert p3.status_code == 200
+        assert p3.json()["configuration"]["gamma"] == "gamma2.4"
+        assert p3.json()["configuration"]["data_range"] == "auto"
+        assert p3.json()["resolved_data_range"] == "limited"
 
 
 def test_mcp_schema_resources_prompts(tmp_path: Path):
@@ -86,19 +105,59 @@ def test_mcp_schema_resources_prompts(tmp_path: Path):
             )
             properties = schema["$defs"]["DeliveryConfiguration"]["properties"]
             assert "Rec.2020" in properties["color_space"]["enum"]
-            assert {"linear", "acescct", "gamma2.4", "srgb", "st2084", "hlg"} == set(
-                properties["gamma"]["enum"]
-            )
+            assert {
+                "linear",
+                "acescct",
+                "gamma2.2",
+                "gamma2.4",
+                "gamma2.6",
+                "srgb",
+                "st2084",
+                "hlg",
+            } == set(properties["gamma"]["enum"])
+            assert set(properties["data_range"]["enum"]) == {"auto", "full", "limited"}
             resources = await client.list_resource_templates()
             assert len(resources.resource_templates) == 5
             result = await client.read_resource("chromascript://docs/scene")
             assert "shade" in result.contents[0].text
+            # Resource guidance must describe the same new contract as tool schemas.
+            delivery_doc = await client.read_resource("chromascript://docs/delivery")
+            assert "resolve-21-delivery-v1" in delivery_doc.contents[0].text
+            assert "gamma2.6" in delivery_doc.contents[0].text
+            assert "resolved_data_range" in delivery_doc.contents[0].text
             prompt = await client.get_prompt(
                 "create_procedural_video", {"description": "gold particles"}
             )
             assert prompt.messages
 
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("operation", ["save_delivery_preset", "import_delivery_preset"])
+def test_http_legacy_presets_reject_unmarked_exr_display_encoding(tmp_path: Path, operation):
+    app = create_app(tmp_path / "workspace")
+    with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+        session = client.get("/api/session").json()
+        response = client.post(
+            "/api/operations/" + operation,
+            headers={"Authorization": "Bearer " + session["token"]},
+            json={
+                "preset": {
+                    "id": "bad-exr",
+                    "name": "unsupported",
+                    "family": "test",
+                    "container": "exr",
+                    "codec": "exr",
+                    "bit_depth": 32,
+                    "color": {"output": "P3-Gamma2.2"},
+                }
+            },
+        )
+        # Reject before persistence or queueing; the generic CLI/MCP use this same model.
+        assert response.status_code == 422
+        assert "EXR delivery requires" in response.text
+        assert app.state.service.store.list("preset") == []
+        assert app.state.service.store.list("job") == []
 
 
 def test_media_cookies_do_not_collide_between_local_ports(tmp_path):

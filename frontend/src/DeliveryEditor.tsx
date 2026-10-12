@@ -17,18 +17,18 @@ const FIELDS: [DeliverySelectField, string][] = [
   ["alpha_mode", "Alpha"],
   ["color_space", "输出色彩空间"],
   ["gamma", "传递函数 / Gamma"],
-  ["data_range", "数据范围"],
+  ["data_range", "数据级别"],
   ["compression", "图像压缩"],
   ["quality_mode", "质量控制"],
 ];
 
 const GROUP_TITLES: Partial<Record<DeliverySelectField, string>> = {
   container: "格式与编码",
-  color_space: "色彩与范围",
+  color_space: "色彩管理与数据级别",
   compression: "压缩与质量",
 };
 
-/** Gamut and gamma use the server's paired transforms and format constraints. */
+/** Resolve-style output controls transform pixels; file tags describe that same encoding. */
 export function DeliveryEditor({ delivery, disabled }: Props) {
   return (
     <section className="delivery-editor" aria-label="目标交付格式">
@@ -110,17 +110,21 @@ export function DeliveryEditor({ delivery, disabled }: Props) {
                         hint={
                           field === "color_space"
                             ? resolved.color_space_note
-                            : field === "data_range"
-                              ? resolved.data_range_note || undefined
-                              : undefined
+                            : field === "gamma"
+                              ? resolved.gamma_note
+                              : field === "data_range"
+                                ? resolved.data_range_note || undefined
+                                : undefined
                         }
                       >
+                        {/* Disabled choices explain format limits; keep multi-entry menus inspectable. */}
                         <select
                           id={`${prefix}-${field}`}
                           value={config[field] ?? ""}
                           aria-describedby={
                             (field === "color_space" &&
                               resolved.color_space_note) ||
+                            (field === "gamma" && resolved.gamma_note) ||
                             (field === "data_range" && resolved.data_range_note)
                               ? `${prefix}-${field}-help`
                               : undefined
@@ -160,33 +164,53 @@ export function DeliveryEditor({ delivery, disabled }: Props) {
                         </select>
                       </Field>
                       {field === "gamma" && (
-                        <Field
-                          label="目标显示峰值亮度"
-                          id={`${prefix}-target-peak`}
-                          hint={
-                            resolved.color_encoding.dynamic_range.startsWith(
-                              "scene-",
-                            )
-                              ? "场景编码母版不烘焙显示输出变换。"
-                              : "由当前 ACES 输出变换固定；与色域、传递函数分别记录。"
-                          }
-                        >
-                          <input
+                        <>
+                          <Field
+                            label="目标显示峰值亮度"
                             id={`${prefix}-target-peak`}
-                            type="text"
-                            readOnly
-                            value={
-                              resolved.color_encoding
-                                .target_display_peak_nits === null
-                                ? resolved.color_encoding.dynamic_range ===
-                                  "scene-log"
-                                  ? "不适用（ACEScct 对数）"
-                                  : "不适用（场景线性）"
-                                : `${resolved.color_encoding.target_display_peak_nits} cd/m²（nit）`
+                            hint={
+                              resolved.color_encoding.dynamic_range.startsWith(
+                                "scene-",
+                              )
+                                ? "场景编码母版不烘焙显示输出变换。"
+                                : "由当前 ACES 输出变换固定；与色域、传递函数分别记录。"
                             }
-                            aria-describedby={`${prefix}-target-peak-help`}
-                          />
-                        </Field>
+                          >
+                            <input
+                              id={`${prefix}-target-peak`}
+                              type="text"
+                              readOnly
+                              value={
+                                resolved.color_encoding
+                                  .target_display_peak_nits === null
+                                  ? resolved.color_encoding.dynamic_range ===
+                                    "scene-log"
+                                    ? "不适用（ACEScct 对数）"
+                                    : "不适用（场景线性）"
+                                  : `${resolved.color_encoding.target_display_peak_nits} cd/m²（nit）`
+                              }
+                              aria-describedby={`${prefix}-target-peak-help`}
+                            />
+                          </Field>
+                          {/* Tags follow the actual output, rather than offering a second color conversion. */}
+                          <Field
+                            label="色彩空间标签"
+                            id={`${prefix}-space-tag`}
+                          >
+                            <input
+                              id={`${prefix}-space-tag`}
+                              readOnly
+                              value={resolved.file_tags.color_space}
+                            />
+                          </Field>
+                          <Field label="Gamma 标签" id={`${prefix}-gamma-tag`}>
+                            <input
+                              id={`${prefix}-gamma-tag`}
+                              readOnly
+                              value={resolved.file_tags.gamma}
+                            />
+                          </Field>
+                        </>
                       )}
                     </Fragment>
                   );

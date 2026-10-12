@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 import numpy as np
 import psutil
+from pydantic import ValidationError
 
 from .appearance import ColorAppearanceRequest, resolve_color
 from .color import color_info, transform
@@ -71,11 +72,13 @@ class Service:
         return record, SceneSpec.model_validate(rev["scene"]), rev["id"]
 
     def preset(self, id: str) -> DeliveryPreset:
-        return (
-            builtins()[id]
-            if id in builtins()
-            else DeliveryPreset.model_validate(self.store.get("preset", id))
-        )
+        # Executable presets always pass current validation, including legacy records.
+        return DeliveryPreset.model_validate(self._preset_payload(id))
+
+    def _preset_payload(self, id: str) -> dict[str, Any]:
+        # Read/export must remain available when a historical preset no longer
+        # satisfies current output constraints; never silently rewrite saved data.
+        return builtins()[id].model_dump() if id in builtins() else self.store.get("preset", id)
 
     def page(self, values: list[dict[str, Any]], limit: int, offset: int) -> dict[str, Any]:
         if not 1 <= limit <= 200 or offset < 0:
@@ -338,7 +341,9 @@ class Service:
         _, spec, rid = self.scene(scene_id, revision_id)
         return {**self.renderer.validate(spec), "revision_id": rid}
 
-    @operation("Render an unsaved draft as a bounded, single-sample sRGB PNG without creating a job.")
+    @operation(
+        "Render an unsaved draft as a bounded, single-sample sRGB PNG without creating a job."
+    )
     def render_live_preview(self, request: LivePreviewRequest) -> dict[str, Any]:
         settings = request.settings()
         # Use the draft's logical coordinates and rational time at reduced raster
@@ -412,13 +417,29 @@ class Service:
     @operation("List standardized/custom presets and exact-combination verification evidence.")
     def list_delivery_presets(self) -> dict[str, Any]:
         presets = {
-            **builtins(),
-            **{p["id"]: DeliveryPreset.model_validate(p) for p in self.store.list("preset")},
+            **{id: preset.model_dump() for id, preset in builtins().items()},
+            **{p["id"]: p for p in self.store.list("preset")},
         }
         encoders = available_encoders()
         evidence = self.store.list("evidence")
-        return {
-            "presets": [
+        items: list[dict[str, Any]] = []
+        for record in presets.values():
+            try:
+                p = DeliveryPreset.model_validate(record)
+            except ValidationError as error:
+                # One unsupported historical output must not hide all other presets.
+                # Keep its parameters/evidence readable, but never certify it as usable.
+                items.append(
+                    {
+                        **record,
+                        "availability": "unavailable",
+                        "validation_error": error.errors()[0]["msg"],
+                        "evidence": [e for e in evidence if e["preset_id"] == record["id"]],
+                        "precision_note": "",
+                    }
+                )
+                continue
+            items.append(
                 {
                     **p.model_dump(),
                     "availability": "experimental"
@@ -429,13 +450,12 @@ class Service:
                     if p.codec in {"prores_ks", "dnxhd"}
                     else "",
                 }
-                for p in presets.values()
-            ]
-        }
+            )
+        return {"presets": items}
 
     @operation("Read complete preset parameters.")
     def get_delivery_preset(self, preset_id: str) -> dict[str, Any]:
-        return {"preset": self.preset(preset_id).model_dump()}
+        return {"preset": self._preset_payload(preset_id)}
 
     @operation("Save a custom preset under a new ID; built-ins cannot be overwritten.")
     def save_delivery_preset(self, preset: DeliveryPreset) -> dict[str, Any]:
@@ -450,7 +470,7 @@ class Service:
 
     @operation("Export complete preset JSON.")
     def export_delivery_preset(self, preset_id: str) -> dict[str, Any]:
-        return {"filename": preset_id + ".json", "json": self.preset(preset_id).model_dump()}
+        return {"filename": preset_id + ".json", "json": self._preset_payload(preset_id)}
 
     @operation("Validate exact output geometry, codec precision, alpha, and standard timebase.")
     def validate_delivery(self, preset_id: str, settings: RenderSettings) -> dict[str, Any]:
@@ -733,12 +753,15 @@ class Service:
 
         if not 1 <= len(configurations) <= 20:
             raise ChromaError("delivery_count", "请选择 1–20 个交付目标。")
-        if len({canonical(c.model_dump()) for c in configurations}) != len(configurations):
+        # Compare frozen outputs: Auto and explicit Video/Full can be identical
+        # even when the user's editable configuration objects differ.
+        outputs = [configured_output(c) for c in configurations]
+        if len({canonical(output.model_dump()) for output in outputs}) != len(outputs):
             raise ChromaError("duplicate_deliveries", "交付设置重复，请调整或移除重复目标。")
         return self.submit(
             scene_id,
             settings,
-            [configured_output(c) for c in configurations],
+            outputs,
             "delivery",
             idempotency_key,
             revision_id,

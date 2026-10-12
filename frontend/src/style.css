@@ -490,6 +490,7 @@ select {
   color: var(--color-muted);
   font-size: 13px;
 }
+/* The left column owns preview and code; the inspector's height never separates them. */
 .editor-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 300px;
@@ -567,12 +568,12 @@ select {
   font-size: 12px;
   color: var(--color-muted);
 }
-/* The disclosure leaves the picture and parameter loop prominent without hiding code capability. */
+/* Code aligns with the picture above and stays beside the inspector until the single-column breakpoint. */
 .code-disclosure {
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
   background: var(--color-surface);
-  margin-top: 20px;
+  margin-top: var(--space-lg);
 }
 .code-disclosure summary {
   display: flex;
@@ -1070,8 +1071,13 @@ progress::-moz-progress-bar {
   overflow: hidden;
 }
 .code-section > .section-heading {
-  padding: 0 12px;
+  /* The toolbar now shares the narrower preview column, so its actions can wrap. */
+  flex-wrap: wrap;
+  padding: var(--space-xs) var(--space-md);
   background: var(--color-surface);
+}
+.code-section > .section-heading > div {
+  flex-wrap: wrap;
 }
 .code-editor {
   display: block;
@@ -1916,8 +1922,11 @@ form .modal-actions {
   .delivery-target {
     padding: 12px;
   }
+  /* Derived file tags need a full row so numeric gamma remains readable on phones. */
   .delivery-fields > .field:has(select[id$="-container"]),
-  .delivery-fields > .field:has(select[id$="-codec"]) {
+  .delivery-fields > .field:has(select[id$="-codec"]),
+  .delivery-fields > .field:has(input[id$="-space-tag"]),
+  .delivery-fields > .field:has(input[id$="-gamma-tag"]) {
     grid-column: 1/-1;
   }
   .job-panel > .section-heading {

@@ -78,11 +78,11 @@ CLI 的 --workspace 在子命令之前。所有产品操作均可通过 call 使
 
 ## 输出色彩设置
 
-输出设置分别记录色彩空间 / 色域、传递函数 / Gamma、目标显示峰值亮度和数据范围。传递函数名称为 Linear、Gamma 2.4（BT.1886）、sRGB（IEC 61966-2-1）、PQ（SMPTE ST 2084）及 HLG（ARIB STD-B67）。
+输出设置分别记录色彩空间 / 色域、传递函数 / Gamma、目标显示峰值亮度和数据级别。传递函数名称为 Linear、Gamma 2.2、Gamma 2.4、Gamma 2.6、sRGB（IEC 61966-2-1）、PQ（SMPTE ST 2084）及 HLG（ARIB STD-B67）；具体组合由本机能力矩阵约束。
 
-P3 采用 **P3-D65**，提供 sRGB 和 PQ 编码；BT.2020 与 Rec.2020 为同一色域。ACEScct 使用 AP1 对数编码，可导出 10-bit 及以上视频或浮点 EXR；ACEScg/AP0 线性母版使用 EXR。所有色域均可在列表中查看，不适用项会变灰并注明原因。
+P3 采用 **P3-D65**，色域与 Gamma 分别选择，支持本机已实现的 Gamma 2.2 / 2.4 / 2.6、sRGB 和 PQ 组合；P3-D65 + sRGB 对应 Display P3。ProRes 不固定 Gamma，切换到 P3-D65 会保留兼容的 Gamma 2.4。P3 Gamma 2.4/2.6 和 Rec.709 Gamma 2.6 当前使用 MOV 数值 Gamma 标签；其他容器中的不可用项变灰并注明原因。只读色彩空间标签和 Gamma 标签随实际像素输出生成。规格与本机 Resolve 21 手册的对应关系见[交付和导入说明](docs/RESOLVE_IMPORT.md)。BT.2020 与 Rec.2020 为同一色域。ACEScct 使用 AP1 对数编码，可导出 10-bit 及以上视频或浮点 EXR；ACEScg/AP0 线性母版使用 EXR。
 
-数据范围显示 **Full / Limited**；RGB/浮点图像采用 Full，ProRes/DNxHR/v210 的 YCbCr 输出采用 Limited。不可用范围仍显示为禁用项。接口接受 `limit` 别名并规范为 `limited`。ACEScct 视频没有可准确表达 AP1/ACEScct 的 H.273 标记，采用未指定原色/传递函数并写入原生 comment 声明；调色软件中需显式指定解释。超出整数编码范围的对数值会报错，使用 float EXR 可以保留。
+数据级别按 Resolve 显示 **Auto / Video（Limited）/ Full**，默认 Auto 并说明实际范围；提交时冻结具体范围。RGB/浮点图像采用 Full，ProRes/DNxHR/v210 的当前 YCbCr 输出采用 Video（Limited）。不可用范围仍显示为禁用项。接口兼容 `full` / `limited` / `limit`，并接受 `auto` / `video`。ACEScct 视频没有可准确表达 AP1/ACEScct 的 H.273 标记，采用未指定原色/传递函数并写入原生 comment 声明；调色软件中需显式指定解释。超出整数编码范围的对数值会报错，使用 float EXR 可以保留。
 
 当前 ACES 显示输出固定使用 SDR 100 cd/m² 或 HDR 1000 cd/m²；亮度独立显示并写入 `color_encoding.target_display_peak_nits`。这是所选输出变换的目标显示参数，不能解读为 PQ 或 HLG 标准本身的亮度上限。ACEScg / ACES2065-1 线性母版的该字段为 null，不烘焙显示变换。选项定义参考 [ACES 输出变换参数](https://docs.acescentral.com/system-components/output-transforms/parameters/)；HLG 显示依赖见 [ITU-R BT.2100](https://www.itu.int/rec/R-REC-BT.2100)。
 

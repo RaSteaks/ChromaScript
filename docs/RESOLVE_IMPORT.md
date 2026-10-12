@@ -4,7 +4,11 @@
 
 ## 文件中的色彩空间与 Gamma
 
-交付面板现在分别设置“输出色彩空间”和“Gamma”。这两个设置选择同一个已支持的 OCIO 输出变换，并决定文件内的色彩标记；它们不会对已经呈现的像素再套一次 Gamma。
+交付规格对照本机 DaVinci Resolve 21.0.3 附带的《DaVinci Resolve 21 Reference Manual》（July 2026）：第 4197–4199 页的 Format / Codec / Type，第 4201 页的 Auto / Video / Full 数据级别，以及第 4202 页的 Color Space Tag / Gamma Tag。官方[编码表（Resolve 21.1，September 2026）](https://documents.blackmagicdesign.com/SupportNotes/DaVinci_Resolve_21_Supported_Codec_List.pdf)用于对照格式名称、ProRes 类型和精度语义；可用组合仍取本机 FFmpeg、OCIO 和写入器实际支持且能回读验证的子集，不能把 Resolve 的 12-bit 编码能力套在本机 10-bit 软件输入上。
+
+交付面板分别设置“输出色彩空间”和“Gamma”，选择实际像素变换。“色彩空间标签”和“Gamma 标签”为与输出一致的只读文件标记；标签不会再对像素应用一次变换。P3-D65 是色域，不能等同于 Display P3：P3-D65 + sRGB 才组成 Display P3，Blackmagic 的[官方 Colorist Guide（第 172 页）](https://documents.blackmagicdesign.com/UserManuals/DaVinci-Resolve-20-Colorist-Guide.pdf)明确说明这一组合。ProRes 是编码格式，本身不固定 Gamma。切换色域会保留兼容的 Gamma 2.4；P3-D65 也提供 Gamma 2.2、Gamma 2.6 和 PQ。
+
+当前 P3 Gamma 2.4/2.6、Rec.709 Gamma 2.6 限于 MOV，以数值 gama 标签准确记录，不能冒用 BT.709 或 ST428 的传递函数代码。Gamma 2.2 使用原生 H.273 transfer=4。其他容器中不能可靠记录的曲线显示为禁用项，并在直接 API / MCP / CLI 提交时拒绝。
 
 | 输出设置 | 文件中的实际标记 | Resolve 输入解释 |
 |---|---|---|
@@ -12,10 +16,21 @@
 | ACES2065-1 / Linear | EXR AP0/D60 chromaticities、colorInteropID=lin_ap0_scene；无压缩 half 存档另带 ACES 容器旗标 | ACES2065-1，Linear |
 | Rec.709 / Gamma 2.4 | MOV colr=1-2-1 与 gama=2.4；DPX Rec.709 色度、用户定义 TRC、电视头 Gamma=2.4 | Rec.709，Gamma 2.4 |
 | Rec.709 / sRGB | 视频 colr=1-13-1；PNG sRGB/gAMA/cHRM；TIFF sRGB ICC | sRGB |
+| Rec.709 / Gamma 2.2 | 视频 colr=1-4-1；MOV 另带 gama=2.2 | Rec.709，Gamma 2.2 |
+| Rec.709 / Gamma 2.6 | MOV colr=1-2-1 与 gama=2.6 | Rec.709，Gamma 2.6，核对后手动解释 |
+| P3-D65 / Gamma 2.2 | 视频 colr=12-4-1；MOV 另带 gama=2.2 | P3-D65，Gamma 2.2 |
+| P3-D65 / Gamma 2.4 | MOV colr=12-2-1 与 gama=2.4 | P3-D65，Gamma 2.4，核对后手动解释 |
+| P3-D65 / Gamma 2.6 | MOV colr=12-2-1 与 gama=2.6 | P3-D65，Gamma 2.6，核对后手动解释 |
+| P3-D65 / sRGB（Display P3） | 视频 colr=12-13-1 | P3-D65，sRGB |
+| P3-D65 / ST2084 | 视频 colr=12-16-1 | P3-D65，ST2084 |
 | Rec.2020 / ST.2084 | 视频 colr=9-16-9 | Rec.2020，ST2084 |
 | Rec.2020 / HLG | 视频 colr=9-18-9 | Rec.2020，HLG |
 
 表中的视频矩阵代码适用于 YCbCr；RGB 视频的矩阵代码为 0。NCLC 无 Gamma 2.4 枚举，MOV 用额外的数值 gama 字段表达；MP4/MXF/MKV 的 Rec.709 仍使用 BT.709 信号约定，不能把它当成对 Rec.1886 的唯一证明，应明确核对 Gamma 2.4。NCLC 不携带独立范围位，范围仍须按编码约定及报告核对。
+
+“数据级别”默认 Auto；界面同时说明实际解析为 Video（Limited）或 Full。提交时即冻结为具体范围，不在工作进程中重新猜测。RGB/图像序列使用 Full；ProRes/DNxHR/v210 的当前实现使用 Video，无法可靠自描述的 Full 覆盖仍禁用并注明原因。H.264/HEVC 可显式选择已支持的 Full/Video。旧 full/limited/limit 接口值继续兼容。
+
+纯 Gamma 的改变只重新编码同一幅显示线性图像，ACES 呈现只执行一次，Alpha 不进入 OCIO。当前 SDR 仍使用 100 nit ACES 2.0 视图；选择 Gamma 2.6 不会自动变成 DCI 白点、48 nit 院线视图或 DCP。HDR 使用实际已实现的 1000 nit 视图，图像预览仍为独立 sRGB 显示。
 
 Blackmagic 的[官方色彩管理指南，第 113 页起](https://documents.blackmagicdesign.com/SupportNotes/DaVinci_Resolve_17_New_Features_Guide.pdf)说明 Resolve 读取 QuickTime NCLC、MXF 元数据及 ACES XML 信息。标准字段的存在不等于所有版本都能自动分配图像序列的输入空间；尤其不要把自定义 `chromascript:*` 字段或普通 `sequence.json` 当作 Resolve 自动读取的格式。项目启用 DaVinci YRGB Color Managed 后，检查媒体池输入色彩空间；必要时按表指定。EXR 的 AP1 数据绝不能为了“自动识别”而假标 AP0。
 

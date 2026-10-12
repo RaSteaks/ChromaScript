@@ -14,9 +14,7 @@ test("output color space and gamma stay linked through HDR, narrow layout and re
   const gamma = target.getByLabel("传递函数 / Gamma", { exact: true });
   await expect(space).toHaveValue("Rec.709");
   await expect(gamma).toHaveValue("gamma2.4");
-  await expect(gamma.locator("option:checked")).toHaveText(
-    "Gamma 2.4（BT.1886）",
-  );
+  await expect(gamma.locator("option:checked")).toHaveText("Gamma 2.4");
   await expect(
     target.getByLabel("目标显示峰值亮度", { exact: true }),
   ).toHaveValue("100 cd/m²（nit）");
@@ -54,7 +52,7 @@ test("output color space and gamma stay linked through HDR, narrow layout and re
     fullPage: true,
   });
   // Capture gamut, transfer, target luminance and data range as separate decisions.
-  await target.getByLabel("数据范围", { exact: true }).scrollIntoViewIfNeeded();
+  await target.getByLabel("数据级别", { exact: true }).scrollIntoViewIfNeeded();
   const colorRegion = await gamma.evaluate((element) => {
     const group = element.closest(".delivery-fields")!;
     const spaceField = group
@@ -134,21 +132,69 @@ test("linear EXR uses no display luminance while image formats retain their enco
   await expect(target.locator(".color-encoding-summary")).toContainText("D65");
 });
 
-test("requested gamuts and Full Limited ranges are real linked choices", async ({
+test("image gamut menus keep unavailable choices discoverable", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  const target = page.getByRole("group", { name: "交付目标 1", exact: true });
+  for (const viewport of [
+    { width: 1440, height: 1000 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    for (const container of ["png", "tiff", "dpx"]) {
+      await target
+        .getByLabel("封装 / 图像格式", { exact: true })
+        .selectOption(container);
+      // Wait for the linked response, rather than inspecting the old menu while pending.
+      await expect(
+        target.getByLabel("视频 / 图像编码", { exact: true }),
+      ).toHaveValue(container);
+      const space = target.getByLabel("输出色彩空间", { exact: true });
+      await expect(space).toBeEnabled();
+      await expect(space.locator("option")).toHaveCount(6);
+      await expect(space.locator("option:not([disabled])")).toHaveCount(1);
+      await expect(space.locator('option[value="ACEScg"]')).toBeDisabled();
+      await expect(space.locator('option[value="ACEScg"]')).toContainText(
+        "EXR",
+      );
+      // Opening a read-oriented native menu must remain possible with mouse/keyboard.
+      await space.click();
+      await page.keyboard.press("Escape");
+      await expect(space).toBeFocused();
+      await page.keyboard.press("Space");
+      await page.keyboard.press("Escape");
+      await expect(space).toBeFocused();
+      await expect(space).toHaveValue("Rec.709");
+      await expect(
+        target.getByLabel("传递函数 / Gamma", { exact: true }),
+      ).toBeDisabled();
+    }
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  }
+});
+
+test("requested gamuts and Auto Video Full levels are real linked choices", async ({
   page,
 }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
   const target = page.getByRole("group", { name: "交付目标 1", exact: true });
   const space = target.getByLabel("输出色彩空间", { exact: true });
-  const range = target.getByLabel("数据范围", { exact: true });
+  const range = target.getByLabel("数据级别", { exact: true });
+  await expect(range).toHaveValue("auto");
   for (const value of ["P3-D65", "Rec.709", "Rec.2020", "ACEScct", "ACEScg"])
     await expect(space.locator(`option[value="${value}"]`)).toHaveCount(1);
   await expect(range.locator('option[value="full"]')).toHaveText(
     "Full（全范围）",
   );
   await expect(range.locator('option[value="limited"]')).toHaveText(
-    "Limited（视频范围）",
+    "Video（Limited，视频范围）",
   );
   await space.selectOption("P3-D65");
   await expect(
@@ -227,4 +273,96 @@ test("wide gamut delivery retains a separate sRGB browser preview", async ({
   await expect(
     page.getByRole("button", { name: "运动预览", exact: true }),
   ).toBeDisabled();
+});
+
+test("Resolve-style ProRes delivery keeps P3 gamma independent and freezes Auto levels", async ({
+  page,
+}) => {
+  const session = await (await page.request.get("/api/session")).json();
+  const headers = { Authorization: "Bearer " + session.token };
+  const created = await page.request.post("/api/operations/create_project", {
+    headers,
+    data: { name: "Resolve 交付验证 " + Date.now() },
+  });
+  expect(created.ok()).toBe(true);
+  const { project } = await created.json();
+  const scene = await page.request.post("/api/operations/create_scene", {
+    headers,
+    data: { project_id: project.id, template_id: "gradient" },
+  });
+  expect(scene.ok()).toBe(true);
+  await page.goto("/");
+  await page.getByLabel("当前项目", { exact: true }).selectOption(project.id);
+  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  const target = page.getByRole("group", { name: "交付目标 1", exact: true });
+  const field = (name: string) => target.getByLabel(name, { exact: true });
+  await field("封装 / 图像格式").selectOption("mov");
+  await field("视频 / 图像编码").selectOption("prores");
+  await expect(field("编码档位").locator("option:checked")).toHaveText(
+    "422 HQ",
+  );
+  await field("输出色彩空间").selectOption("P3-D65");
+  const gamma = field("传递函数 / Gamma");
+  // Changing primaries must retain a compatible Gamma 2.4 rather than imply Display P3.
+  await expect(gamma).toHaveValue("gamma2.4");
+  for (const value of ["gamma2.2", "gamma2.4", "gamma2.6", "srgb", "st2084"])
+    await expect(gamma.locator(`option[value="${value}"]`)).toBeEnabled();
+  await expect(field("色彩空间标签")).toHaveValue("P3-D65");
+  await expect(field("Gamma 标签")).toHaveValue("Gamma 2.4（MOV 数值标签）");
+  await expect(field("Gamma 标签")).toHaveAttribute("readonly", "");
+  await expect(field("数据级别")).toHaveValue("auto");
+  await expect(target).toContainText(
+    "Auto 按当前格式使用 Video（Limited，视频范围）",
+  );
+  await gamma.focus();
+  await page.keyboard.press("Space");
+  await page.keyboard.press("Escape");
+  await expect(gamma).toBeFocused();
+  await gamma.selectOption("gamma2.6");
+  await expect(field("Gamma 标签")).toHaveValue("Gamma 2.6（MOV 数值标签）");
+  await expect(field("目标显示峰值亮度")).toHaveValue("100 cd/m²（nit）");
+  mkdirSync("../reports", { recursive: true });
+  await page.screenshot({
+    path: "../reports/resolve-delivery-desktop.png",
+    fullPage: true,
+  });
+  await gamma.selectOption("srgb");
+  await expect(target).toContainText("P3-D65 + sRGB 为 Display P3");
+  await gamma.selectOption("gamma2.4");
+  await field("封装 / 图像格式").selectOption("mp4");
+  await expect(field("输出色彩空间")).toHaveValue("P3-D65");
+  await expect(gamma).toHaveValue("srgb");
+  await expect(gamma.locator('option[value="gamma2.4"]')).toBeDisabled();
+  await expect(gamma.locator('option[value="gamma2.6"]')).toBeDisabled();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await expect(field("色彩空间标签")).toHaveValue("P3-D65");
+  // Auto and explicit Video freeze to the same MP4; only Full makes it distinct.
+  await page.getByRole("button", { name: "添加交付目标", exact: true }).click();
+  const second = page.getByRole("group", { name: "交付目标 2", exact: true });
+  // New targets start with their own defaults, so align profile, sampling and color
+  // before comparing Auto against the equivalent explicit Video range.
+  for (const label of ["编码档位", "位深", "色度采样"])
+    await second
+      .getByLabel(label, { exact: true })
+      .selectOption(await field(label).inputValue());
+  await second
+    .getByLabel("输出色彩空间", { exact: true })
+    .selectOption("P3-D65");
+  await second
+    .getByLabel("传递函数 / Gamma", { exact: true })
+    .selectOption("srgb");
+  await second.getByLabel("数据级别", { exact: true }).selectOption("limited");
+  await expect(
+    page.getByText("交付设置重复，请调整或移除重复目标。", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: /^提交交付/ })).toBeDisabled();
+  await second.getByLabel("数据级别", { exact: true }).selectOption("full");
+  await expect(
+    page.getByText("交付设置重复，请调整或移除重复目标。", { exact: true }),
+  ).not.toBeVisible();
 });

@@ -95,7 +95,8 @@ def test_image_storage_and_alpha_choices():
         config.bit_depth,
         config.compression,
         config.data_range,
-    ) == ("exr", "ACEScg", 16, "zip", "full")
+    ) == ("exr", "ACEScg", 16, "zip", "auto")
+    assert configured_output(config).data_range == "full"
     config = change(config, "bit_depth", 32)
     config = change(config, "compression", "piz")
     assert configured_output(config).bit_depth == 32
@@ -140,6 +141,7 @@ def test_configured_submission_never_requires_saved_presets(tmp_path: Path):
     assert service.store.list("preset") == []
     output = first["outputs"][0]
     assert output["container"] == "exr" and output["bit_depth"] == 16 and not output["builtin"]
+    assert config.data_range == "auto" and output["data_range"] == "full"
     assert service.store.get("snapshot", first["id"])["outputs"][0] == output
     assert (
         service.estimate_delivery(settings, [config])["image_outputs_upper_bound_bytes"]
@@ -149,11 +151,55 @@ def test_configured_submission_never_requires_saved_presets(tmp_path: Path):
         service.submit_configured_delivery(
             **{**args, "configurations": [config, config], "idempotency_key": "duplicate"}
         )
+    # Explicit Full and Auto must not create two copies of the same EXR output.
+    explicit = config.model_copy(update={"data_range": "full"})
+    assert configured_output(config).id == configured_output(explicit).id
+    with pytest.raises(ChromaError, match="重复"):
+        service.submit_configured_delivery(
+            **{**args, "configurations": [config, explicit], "idempotency_key": "duplicate-auto"}
+        )
     mxf = change(DeliveryConfiguration(), "container", "mxf")
     with pytest.raises(ChromaError, match="timebase|broadcast"):
         service.validate_delivery_configuration(
             mxf, RenderSettings(width=320, height=180, frames=2, fps={"numerator": 120})
         )
+
+
+def test_unsupported_historical_exr_preset_stays_readable_but_cannot_render(tmp_path: Path):
+    from pydantic import ValidationError
+
+    from chromascript.models import DeliveryPreset
+
+    service = Service(tmp_path / "workspace")
+    stored = DeliveryPreset(
+        id="historical-exr",
+        name="historical",
+        family="test",
+        container="exr",
+        codec="exr",
+        bit_depth=32,
+        color={"output": "ACEScg"},
+        builtin=False,
+    ).model_dump()
+    # Seed the exact unchecked record that an older version could persist.
+    stored["color"]["output"] = "P3-Gamma2.2"
+    service.store.put("preset", stored["id"], stored)
+    catalog = service.list_delivery_presets()["presets"]
+    historical = next(preset for preset in catalog if preset["id"] == stored["id"])
+    assert historical["availability"] == "unavailable"
+    assert "EXR delivery requires" in historical["validation_error"]
+    assert any(preset["availability"] == "experimental" for preset in catalog)
+    assert service.get_delivery_preset(stored["id"])["preset"] == stored
+    assert service.export_delivery_preset(stored["id"])["json"] == stored
+    assert service.store.get("preset", stored["id"]) == stored
+    settings = RenderSettings(width=32, height=32, frames=1)
+    with pytest.raises(ValidationError, match="EXR delivery requires"):
+        service.validate_delivery(stored["id"], settings)
+    project = service.create_project("historical preset")["project"]
+    scene = service.create_scene(project["id"], template_id="gradient")
+    with pytest.raises(ValidationError, match="EXR delivery requires"):
+        service.submit_delivery(scene["record"]["id"], settings, [stored["id"]], "invalid-old")
+    assert service.store.list("job") == []
 
 
 @pytest.mark.integration

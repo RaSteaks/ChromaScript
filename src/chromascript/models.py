@@ -150,9 +150,24 @@ class RenderSettings(Model):
 # Display encodings and scene-referred ACES encodings remain distinct. ACEScct
 # shares AP1 with ACEScg, but its log curve must never receive a display tone map.
 OutputColorSpace = Literal["P3-D65", "Rec.709", "Rec.2020", "ACEScct", "ACEScg", "ACES2065-1"]
-OutputGamma = Literal["linear", "acescct", "gamma2.4", "srgb", "st2084", "hlg"]
+OutputGamma = Literal[
+    "linear", "acescct", "gamma2.2", "gamma2.4", "gamma2.6", "srgb", "st2084", "hlg"
+]
 OutputTransform = Literal[
-    "ACEScg", "ACES2065-1", "ACEScct", "sRGB", "Rec.709", "Display-P3", "P3-PQ", "PQ", "HLG"
+    "ACEScg",
+    "ACES2065-1",
+    "ACEScct",
+    "sRGB",
+    "Rec.709",
+    "Display-P3",
+    "P3-PQ",
+    "PQ",
+    "HLG",
+    "Rec.709-Gamma2.2",
+    "Rec.709-Gamma2.6",
+    "P3-Gamma2.2",
+    "P3-Gamma2.4",
+    "P3-Gamma2.6",
 ]
 OUTPUT_ENCODINGS: dict[str, tuple[OutputColorSpace, OutputGamma]] = {
     "ACEScg": ("ACEScg", "linear"),
@@ -164,7 +179,17 @@ OUTPUT_ENCODINGS: dict[str, tuple[OutputColorSpace, OutputGamma]] = {
     "P3-PQ": ("P3-D65", "st2084"),
     "PQ": ("Rec.2020", "st2084"),
     "HLG": ("Rec.2020", "hlg"),
+    # P3-D65 identifies primaries, not Display P3's sRGB transfer function.
+    # Preserve the legacy aliases while allowing Resolve-style independent gamma choices.
+    "Rec.709-Gamma2.2": ("Rec.709", "gamma2.2"),
+    "Rec.709-Gamma2.6": ("Rec.709", "gamma2.6"),
+    "P3-Gamma2.2": ("P3-D65", "gamma2.2"),
+    "P3-Gamma2.4": ("P3-D65", "gamma2.4"),
+    "P3-Gamma2.6": ("P3-D65", "gamma2.6"),
 }
+# Only these scene encodings have implemented native EXR primaries/interoperability IDs.
+# Legacy presets and the direct-delivery matrix must share the same format boundary.
+EXR_OUTPUTS = ("ACEScg", "ACES2065-1", "ACEScct")
 
 
 def normalize_delivery_field(field: str, value: Any) -> Any:
@@ -188,7 +213,28 @@ def normalize_delivery_field(field: str, value: Any) -> Any:
             "aces20651": "ACES2065-1",
         }.get(key, value)
     if field == "data_range":
-        return {"full": "full", "limit": "limited", "limited": "limited"}.get(key, value)
+        return {
+            "auto": "auto",
+            "full": "full",
+            "video": "limited",
+            "limit": "limited",
+            "limited": "limited",
+        }.get(key, value)
+    if field == "gamma":
+        return {
+            "gamma22": "gamma2.2",
+            "22": "gamma2.2",
+            "gamma24": "gamma2.4",
+            "24": "gamma2.4",
+            "gamma26": "gamma2.6",
+            "26": "gamma2.6",
+            "srgb": "srgb",
+            "linear": "linear",
+            "acescct": "acescct",
+            "pq": "st2084",
+            "st2084": "st2084",
+            "hlg": "hlg",
+        }.get(key, value)
     return value
 
 
@@ -238,6 +284,8 @@ class DeliveryPreset(Model):
             raise ValueError("Unbaked scene-linear masters require floating-point EXR")
         if self.container == "exr" and (self.codec != "exr" or self.bit_depth not in (16, 32)):
             raise ValueError("EXR requires half or float")
+        if self.container == "exr" and self.color.output not in EXR_OUTPUTS:
+            raise ValueError("EXR delivery requires ACEScg, ACES2065-1 or ACEScct encoding")
         # Integer sequence families have explicit storage depths; reject requests
         # which a native writer would silently convert to a different precision.
         legal_integer_depths = {"png": {8, 16}, "tiff": {8, 16}, "dpx": {10, 12, 16}}
@@ -259,6 +307,13 @@ class DeliveryPreset(Model):
                 raise ValueError("ACEScct delivery needs EXR or a declared video encoding")
         if self.color.output in {"PQ", "HLG", "P3-PQ"} and self.bit_depth < 10:
             raise ValueError("HDR output requires at least 10-bit precision")
+        # These pure-power curves have no exact H.273 code. Only MOV's numeric
+        # gama atom currently preserves their transfer unambiguously in this encoder.
+        if (
+            self.color.output in {"P3-Gamma2.4", "P3-Gamma2.6", "Rec.709-Gamma2.6"}
+            and self.container != "mov"
+        ):
+            raise ValueError("This gamma encoding requires QuickTime MOV numeric gamma metadata")
         if self.container == "png" and self.alpha_mode != "straight":
             raise ValueError("PNG stores straight alpha; choose straight association")
         if self.alpha and self.container not in {"exr", "png", "tiff", "mov", "mkv"}:
@@ -296,14 +351,15 @@ class DeliveryConfiguration(Model):
     )
     gamma: OutputGamma = Field(
         default="gamma2.4",
-        description="Output transfer encoding; linear, acescct (AP1 log), gamma2.4 (BT.1886), srgb, st2084 (PQ), or hlg.",
+        description="Output transfer encoding; linear, acescct (AP1 log), gamma2.2, gamma2.4, gamma2.6, srgb, st2084 (PQ), or hlg. Gamut and transfer are independent; container support is validated.",
     )
     # Keep the combined output alias for existing scripts and frozen presets.
     color_output: OutputTransform = Field(
         default="Rec.709",
         description="Legacy combined alias; new callers select color_space and gamma. The resolved alias must agree with the pair.",
     )
-    data_range: Literal["full", "limited"] = "limited"
+    # Auto remains a draft choice; DeliveryPreset freezes the concrete codec range.
+    data_range: Literal["auto", "full", "limited"] = "auto"
     compression: Literal["zip", "piz", "none"] | None = None
     quality_mode: Literal["crf", "bitrate", "fixed"] = "crf"
     crf: int | None = Field(default=18, ge=0, le=51)

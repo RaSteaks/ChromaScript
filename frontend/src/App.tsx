@@ -1411,6 +1411,93 @@ export default function App() {
                         </strong>
                       </div>
                     </div>
+                    {/* Code follows the picture in the same column, independent of inspector height. */}
+                    <details className="code-disclosure">
+                      <summary>
+                        <Code2 size={16} />
+                        <strong>代码编辑</strong>
+                        <span>WGSL · 展开修改画面逻辑</span>
+                        <ChevronRight size={15} />
+                      </summary>
+                      <section className="code-section">
+                        <div className="section-heading">
+                          <span>
+                            <Code2 size={15} />
+                            场景代码 <small>WGSL</small>
+                          </span>
+                          <div>
+                            <Button
+                              disabled={!draft || !!pending}
+                              onClick={() =>
+                                void run("验证代码", () =>
+                                  call("validate_scene", { scene_id: sceneId }),
+                                )
+                              }
+                            >
+                              <Check size={14} />
+                              验证已保存版本
+                            </Button>
+                            <Button
+                              disabled={!sceneId || !!pending}
+                              onClick={() =>
+                                guard(() => {
+                                  void run("重新载入", async () => {
+                                    const v = await call<SceneReply>(
+                                      "get_scene",
+                                      {
+                                        scene_id: sceneId,
+                                      },
+                                    );
+                                    setSaved(v);
+                                    setDraft(structuredClone(v.scene));
+                                    setColorDrafts({});
+                                    return v;
+                                  });
+                                })
+                              }
+                            >
+                              <RefreshCw size={14} />
+                              重新载入
+                            </Button>
+                          </div>
+                        </div>
+                        {stale && (
+                          <Notice
+                            error
+                            text="场景已有其他客户端更新。请复制当前代码或重新载入后再保存。"
+                          />
+                        )}
+                        <label className="sr-only" htmlFor="scene-code">
+                          WGSL 场景代码
+                        </label>
+                        <Textarea
+                          id="scene-code"
+                          className="resize-none code-editor"
+                          spellCheck={false}
+                          disabled={!draft || !!pending}
+                          value={draft?.code || ""}
+                          onChange={(e) =>
+                            setDraft((old) =>
+                              old ? { ...old, code: e.target.value } : old,
+                            )
+                          }
+                          aria-describedby="code-help"
+                        />
+                        <div className="code-footer">
+                          <span id="code-help">
+                            shade(ctx) → 线性 ACEScg RGBA · 使用 ctx.time 与
+                            ctx.seed
+                          </span>
+                          <Button
+                            disabled={!draft}
+                            onClick={() => void copy(draft?.code || "")}
+                            aria-label="复制场景代码"
+                          >
+                            <Copy size={13} />
+                          </Button>
+                        </div>
+                      </section>
+                    </details>
                   </div>
                   <aside className="parameter-panel">
                     {/* Keep logical canvas/time settings next to live feedback, separate from its proxy budget. */}
@@ -1612,89 +1699,6 @@ export default function App() {
                     </div>
                   </aside>
                 </div>
-                <details className="code-disclosure">
-                  <summary>
-                    <Code2 size={16} />
-                    <strong>代码编辑</strong>
-                    <span>WGSL · 展开修改画面逻辑</span>
-                    <ChevronRight size={15} />
-                  </summary>
-                  <section className="code-section">
-                    <div className="section-heading">
-                      <span>
-                        <Code2 size={15} />
-                        场景代码 <small>WGSL</small>
-                      </span>
-                      <div>
-                        <Button
-                          disabled={!draft || !!pending}
-                          onClick={() =>
-                            void run("验证代码", () =>
-                              call("validate_scene", { scene_id: sceneId }),
-                            )
-                          }
-                        >
-                          <Check size={14} />
-                          验证已保存版本
-                        </Button>
-                        <Button
-                          disabled={!sceneId || !!pending}
-                          onClick={() =>
-                            guard(() => {
-                              void run("重新载入", async () => {
-                                const v = await call<SceneReply>("get_scene", {
-                                  scene_id: sceneId,
-                                });
-                                setSaved(v);
-                                setDraft(structuredClone(v.scene));
-                                setColorDrafts({});
-                                return v;
-                              });
-                            })
-                          }
-                        >
-                          <RefreshCw size={14} />
-                          重新载入
-                        </Button>
-                      </div>
-                    </div>
-                    {stale && (
-                      <Notice
-                        error
-                        text="场景已有其他客户端更新。请复制当前代码或重新载入后再保存。"
-                      />
-                    )}
-                    <label className="sr-only" htmlFor="scene-code">
-                      WGSL 场景代码
-                    </label>
-                    <Textarea
-                      id="scene-code"
-                      className="resize-none code-editor"
-                      spellCheck={false}
-                      disabled={!draft || !!pending}
-                      value={draft?.code || ""}
-                      onChange={(e) =>
-                        setDraft((old) =>
-                          old ? { ...old, code: e.target.value } : old,
-                        )
-                      }
-                      aria-describedby="code-help"
-                    />
-                    <div className="code-footer">
-                      <span id="code-help">
-                        shade(ctx) → 线性 ACEScg RGBA · 使用 ctx.time 与
-                        ctx.seed
-                      </span>
-                      <Button
-                        disabled={!draft}
-                        onClick={() => void copy(draft?.code || "")}
-                        aria-label="复制场景代码"
-                      >
-                        <Copy size={13} />
-                      </Button>
-                    </div>
-                  </section>
-                </details>
                 <div className="step-actions">
                   <Button onClick={() => setStep("scene")}>返回选择场景</Button>
                   <Button

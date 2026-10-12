@@ -85,7 +85,15 @@ export type DeliveryConfiguration = {
   alpha_mode: "none" | "straight" | "premultiplied";
   color_space:
     "P3-D65" | "Rec.709" | "Rec.2020" | "ACEScct" | "ACEScg" | "ACES2065-1";
-  gamma: "linear" | "acescct" | "gamma2.4" | "srgb" | "st2084" | "hlg";
+  gamma:
+    | "linear"
+    | "acescct"
+    | "gamma2.2"
+    | "gamma2.4"
+    | "gamma2.6"
+    | "srgb"
+    | "st2084"
+    | "hlg";
   // Combined alias is retained for older API clients; the editor uses the pair.
   color_output:
     | "ACEScg"
@@ -95,9 +103,15 @@ export type DeliveryConfiguration = {
     | "Rec.709"
     | "Display-P3"
     | "P3-PQ"
+    | "Rec.709-Gamma2.2"
+    | "Rec.709-Gamma2.6"
+    | "P3-Gamma2.2"
+    | "P3-Gamma2.4"
+    | "P3-Gamma2.6"
     | "PQ"
     | "HLG";
-  data_range: "full" | "limited";
+  // Auto is editing intent; the server freezes a concrete range in each output.
+  data_range: "auto" | "full" | "limited";
   compression: "zip" | "piz" | "none" | null;
   quality_mode: "crf" | "bitrate" | "fixed";
   crf: number | null;
@@ -122,7 +136,11 @@ export type ColorEncoding = {
   output_view: string | null;
 };
 export type DeliveryOptions = {
+  specification: "resolve-21-delivery-v1";
   color_encoding: ColorEncoding;
+  file_tags: { color_space: string; gamma: string };
+  resolved_data_range: "full" | "limited";
+  gamma_note: string;
   color_space_note: string;
   data_range_note: string;
   color_note: string;

@@ -13,9 +13,9 @@ from typing import Any, BinaryIO, Callable, Iterable, Iterator
 import numpy as np
 from numpy.typing import NDArray
 
-from .color import output_metadata, tags
+from .color import NUMERIC_GAMMAS, output_metadata, tags
 from .errors import ChromaError
-from .models import DeliveryPreset, RenderSettings
+from .models import OUTPUT_ENCODINGS, DeliveryPreset, RenderSettings
 
 
 def available_encoders() -> set[str]:
@@ -34,9 +34,12 @@ def available_encoders() -> set[str]:
 
 def _video_tags(preset: DeliveryPreset) -> dict[str, str]:
     result = tags(preset.color.output)
-    if preset.container == "mov" and preset.color.output == "Rec.709":
-        # NCLC has no gamma-2.4 code. A QuickTime gama atom carries the exact
-        # exponent; transfer=2 avoids incorrectly labelling it as the 709 OETF.
+    if preset.container == "mov" and OUTPUT_ENCODINGS[preset.color.output][1] in {
+        "gamma2.4",
+        "gamma2.6",
+    }:
+        # NCLC has no pure gamma-2.4/2.6 code. MOV's numeric gama atom carries the
+        # exponent; ST428/BT.709 tags would describe a different signal encoding.
         result["transfer"] = "unknown"
     return result
 
@@ -106,6 +109,9 @@ def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path)
     if not executable:
         raise ChromaError("ffmpeg_unavailable", "Install FFmpeg and add it to PATH")
     color_tags = _video_tags(preset)
+    # H.273 transfer 4 is "bt470m" in filters/probe output and "gamma22" in
+    # encoder options. Keep the verified tag canonical and adapt only this CLI spelling.
+    encoder_transfer = "gamma22" if color_tags["transfer"] == "bt470m" else color_tags["transfer"]
     pixel = preset.pixel_format
     rgb = pixel.startswith(("gbr", "rgb", "bgr"))
     alpha = preset.alpha
@@ -174,7 +180,7 @@ def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path)
         "-color_primaries",
         color_tags["primaries"],
         "-color_trc",
-        color_tags["transfer"],
+        encoder_transfer,
         "-colorspace",
         "rgb" if rgb else color_tags["matrix"],
         "-color_range",
@@ -182,9 +188,10 @@ def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path)
     ]
     if preset.container in {"mov", "mp4"}:
         movflags = "+faststart+write_colr"
-        if preset.container == "mov" and preset.color.output == "Rec.709":
+        gamma = OUTPUT_ENCODINGS[preset.color.output][1]
+        if preset.container == "mov" and gamma in NUMERIC_GAMMAS:
             movflags += "+write_gama"
-            args += ["-mov_gamma", "2.4"]
+            args += ["-mov_gamma", str(NUMERIC_GAMMAS[gamma])]
         args += ["-movflags", movflags, "-timecode", settings.timecode]
     if preset.container == "mxf":
         args += ["-timecode", settings.timecode, "-f", "mxf"]
@@ -364,6 +371,7 @@ def check_probe(
             "transfer": {
                 "bt709": 1,
                 "unknown": 2,
+                "bt470m": 4,
                 "iec61966-2-1": 13,
                 "smpte2084": 16,
                 "arib-std-b67": 18,
@@ -379,12 +387,15 @@ def check_probe(
             preset.data_range == "full"
         ):
             issues.append("MP4 colr range mismatch")
+        gamma = OUTPUT_ENCODINGS[preset.color.output][1]
         if (
             preset.container == "mov"
-            and preset.color.output == "Rec.709"
+            and gamma in NUMERIC_GAMMAS
             and (
                 len(container_color) != 1
-                or not np.isclose(container_color[0].get("gamma", 0), 2.4, atol=1 / 65536)
+                or not np.isclose(
+                    container_color[0].get("gamma", 0), NUMERIC_GAMMAS[gamma], atol=1 / 65536
+                )
             )
         ):
             issues.append("QuickTime gamma mismatch or missing")
@@ -489,9 +500,11 @@ def check_image_metadata(metadata: dict[str, Any], preset: DeliveryPreset) -> li
         actual_chroma = metadata.get("chromaticities")
         if actual_chroma is None:
             actual_chroma = []
-        if expected and (
-            np.shape(actual_chroma) != (8,) or not np.allclose(actual_chroma, expected, atol=1e-7)
-        ):
+        # Fail closed for unchecked historical presets too; absent native color
+        # support must never be mistaken for a successfully verified EXR encoding.
+        if expected is None:
+            issues.append("Unsupported EXR color encoding")
+        elif np.shape(actual_chroma) != (8,) or not np.allclose(actual_chroma, expected, atol=1e-7):
             issues.append("EXR chromaticities mismatch")
         interop_id = {"ACEScg": "lin_ap1_scene", "ACES2065-1": "lin_ap0_scene"}.get(
             preset.color.output
