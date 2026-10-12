@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "name": "几何与透明度",
+  "description": "解析形状、运动与透明边缘，用于检查 Alpha 合成。",
+  "code": "\nfn shade(ctx: SceneContext) -> vec4<f32> {\n    let aspect = ctx.resolution.x / ctx.resolution.y;\n    let p = (ctx.uv - vec2<f32>(0.5)) * vec2<f32>(aspect, 1.0);\n    let center = vec2<f32>(sin(ctx.time * ctx.params.speed) * 0.25, 0.0);\n    let d = length(p - center);\n    let a = 1.0 - smoothstep(0.225, 0.235, d);\n    return vec4<f32>(ctx.params.color * 2.5, a);\n}\n",
+  "parameters": [
+    {
+      "schema_version": 1,
+      "name": "color",
+      "label": "颜色",
+      "kind": "color",
+      "default": [
+        0.8,
+        0.25,
+        0.035
+      ],
+      "minimum": null,
+      "maximum": null,
+      "color_space": "ACEScg"
+    },
+    {
+      "schema_version": 1,
+      "name": "speed",
+      "label": "速度",
+      "kind": "number",
+      "default": 0.3,
+      "minimum": 0.0,
+      "maximum": 10.0,
+      "color_space": "ACEScg"
+    }
+  ],
+  "values": {},
+  "seed": 42
+}

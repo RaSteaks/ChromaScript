@@ -1,0 +1,197 @@
+"""GPU output is checked against independent values and storage round trips."""
+
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from chromascript.color import input_rgb, transform
+from chromascript.errors import ChromaError
+from chromascript.gpu import Renderer
+from chromascript.images import read_image, write_image
+from chromascript.models import Rational, RenderSettings, SceneSpec
+from chromascript.templates import TEMPLATES
+
+
+@pytest.fixture(scope="module")
+def renderer():
+    return Renderer()
+
+
+@pytest.mark.gpu
+def test_linear_values_time_and_alpha(renderer):
+    scene = SceneSpec(
+        name="reference",
+        code="fn shade(ctx: SceneContext) -> vec4<f32> { return vec4<f32>(-0.25, 8.0, ctx.time, 0.5); }",
+    )
+    settings = RenderSettings(width=32, height=16, frames=1, samples=4, fps=Rational(numerator=24))
+    a = renderer.render(scene, settings, 48)
+    np.testing.assert_allclose(
+        a, np.broadcast_to([-0.25, 8.0, 2.0, 0.5], a.shape), rtol=0, atol=1e-6
+    )
+
+
+@pytest.mark.gpu
+def test_transparent_samples_do_not_bleed(renderer):
+    scene = SceneSpec(
+        name="coverage",
+        code="""
+fn shade(ctx: SceneContext) -> vec4<f32> {
+ if fract(ctx.pixel.x) < 0.5 { return vec4<f32>(1.0, 0.0, 0.0, 1.0); }
+ return vec4<f32>(0.0, 0.0, 100.0, 0.0);
+}""",
+    )
+    a = renderer.render(scene, RenderSettings(width=16, height=16, frames=1, samples=4), 0)
+    np.testing.assert_allclose(a, np.broadcast_to([1, 0, 0, 0.5], a.shape), rtol=0, atol=1e-6)
+
+
+@pytest.mark.gpu
+def test_tile_boundaries_and_seed(renderer):
+    s = RenderSettings(width=300, height=160, frames=1, samples=4, tile_size=128)
+    a = renderer.render(TEMPLATES["noise"], s, 12)
+    b = renderer.render(TEMPLATES["noise"], s.model_copy(update={"tile_size": 256}), 12)
+    np.testing.assert_array_equal(a, b)
+
+
+@pytest.mark.gpu
+def test_all_templates_and_diagnostics(renderer):
+    for scene in TEMPLATES.values():
+        renderer.validate(scene)
+    bad = SceneSpec(
+        name="bad", code="fn shade(ctx: SceneContext) -> vec4<f32> { return nonsense; }"
+    )
+    with pytest.raises(ChromaError, match="nonsense"):
+        renderer.validate(bad)
+
+
+def test_aces_input_and_output_alpha():
+    np.testing.assert_allclose(
+        input_rgb([0.5, 0.5, 0.5], "sRGB"), [0.21404114] * 3, rtol=2e-4, atol=1e-6
+    )
+    image = np.array([[[0.18, 0.18, 0.18, 0.375], [16, 16, 16, 0.75]]], dtype=np.float32)
+    for output in ["sRGB", "Rec.709", "PQ", "HLG", "ACES2065-1"]:
+        result = transform(image, output)
+        np.testing.assert_array_equal(result[..., 3], image[..., 3])
+        assert np.isfinite(result).all()
+        assert np.all(result[0, 1, :3] > result[0, 0, :3])
+
+
+@pytest.mark.parametrize("depth", [16, 32])
+def test_exr_precision_and_chromaticities(tmp_path: Path, depth):
+    values = np.random.default_rng(1).uniform(-0.25, 32, (16, 32, 4)).astype(np.float32)
+    values[..., 3] = 0.5
+    path = tmp_path / f"master-{depth}.exr"
+    write_image(path, values, depth=depth)
+    actual, meta = read_image(path)
+    expected = values.astype(np.float16).astype(np.float32) if depth == 16 else values
+    np.testing.assert_array_equal(actual, expected)
+    assert meta["chromascript:color_space"] == "ACEScg"
+    assert meta["chromaticities"][0] == pytest.approx(0.713)
+    assert not meta.get("acesImageContainerFlag")
+
+
+def test_half_overflow_and_integer_quantization(tmp_path: Path):
+    with pytest.raises(ChromaError, match="half"):
+        write_image(
+            tmp_path / "overflow.exr", np.full((16, 16, 4), 70000, dtype=np.float32), depth=16
+        )
+    values = np.full((16, 16, 4), 0.25, dtype=np.float32)
+    values[..., 3] = 1
+    p = tmp_path / "display.png"
+    write_image(p, values, space="sRGB", depth=16)
+    a, _ = read_image(p)
+    np.testing.assert_allclose(a, values, atol=1 / 65535, rtol=0)
+
+
+def test_premultiplied_storage_roundtrip(tmp_path: Path):
+    values = np.zeros((16, 16, 4), dtype=np.float32)
+    values[:] = [2, 0.5, 0.25, 0.5]
+    p = tmp_path / "associated.exr"
+    write_image(p, values, alpha_mode="premultiplied")
+    raw, _ = read_image(p, straight=False)
+    np.testing.assert_allclose(raw[0, 0], [1, 0.25, 0.125, 0.5])
+    actual, _ = read_image(p)
+    np.testing.assert_allclose(actual, values)
+
+
+@pytest.mark.parametrize("extension", ["png", "tiff"])
+def test_straight_integer_alpha_is_not_implicitly_associated(tmp_path, extension):
+    values = np.zeros((16, 16, 4), dtype=np.float32)
+    values[:] = [0.25, 0.5, 0.75, 0.5]
+    path = tmp_path / ("alpha." + extension)
+    write_image(path, values, space="sRGB", depth=16)
+    actual, _ = read_image(path)
+    np.testing.assert_allclose(actual, values, rtol=0, atol=1 / 65535)
+
+
+def test_nonalpha_output_composites_before_display_transform():
+    from chromascript.color import render_output
+
+    values = np.array([[[2.0, 1.0, 0.5, 0.25]]], dtype=np.float32)
+    expected = transform(np.array([[[0.5, 0.25, 0.125, 1.0]]], dtype=np.float32), "sRGB")
+    actual = render_output(values, "sRGB", False)
+    np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-6)
+
+
+@pytest.mark.gpu
+def test_invalid_samples_cannot_hide_in_antialias_average(renderer):
+    bad_alpha = SceneSpec(
+        name="invalid alpha",
+        code="fn shade(ctx: SceneContext) -> vec4<f32> { return vec4<f32>(1.0, 0.0, 0.0, select(-1.0, 2.0, fract(ctx.pixel.x)<0.5)); }",
+    )
+    with pytest.raises(ChromaError, match="alpha"):
+        renderer.render(bad_alpha, RenderSettings(width=16, height=16, frames=1, samples=4), 0)
+    bad_rgb = SceneSpec(
+        name="hidden NaN",
+        code="fn shade(ctx: SceneContext) -> vec4<f32> { return vec4<f32>(bitcast<f32>(0x7fc00000u), 0.0, 0.0, 0.0); }",
+    )
+    with pytest.raises(ChromaError, match="NaN"):
+        renderer.render(bad_rgb, RenderSettings(width=16, height=16, frames=1, samples=4), 0)
+
+
+def test_exr_has_exact_rational_playback_rate(tmp_path):
+    path = tmp_path / "timebase.exr"
+    write_image(path, np.ones((16, 16, 4), dtype=np.float32), fps=(60000, 1001), frame_index=12)
+    _, meta = read_image(path)
+    assert tuple(meta["FramesPerSecond"]) == (60000, 1001)
+    assert meta["chromascript:frame_index"] == 12
+
+
+def test_grading_space_conversion_roundtrip():
+    values = np.array([[[0.18, 2.0, 0.01]]], dtype=np.float32)
+    encoded = transform(values, "ACEScct")
+    restored = transform(encoded, "ACEScg", source="ACEScct")
+    np.testing.assert_allclose(restored, values, rtol=2e-5, atol=1e-6)
+
+
+def test_standard_aces_archive_remains_strict(tmp_path):
+    from chromascript.presets import builtins
+
+    p = builtins()["aces2065-archive"]
+    assert p.compression == "none" and p.bit_depth == 16
+    path = tmp_path / "archive.exr"
+    write_image(
+        path,
+        np.ones((16, 16, 4), dtype=np.float32),
+        space="ACES2065-1",
+        depth=p.bit_depth,
+        compression=p.compression,
+    )
+    _, meta = read_image(path)
+    assert meta["acesImageContainerFlag"] == 1
+    assert meta["compression"] == "none"
+
+
+def test_associated_tiff_uses_standard_alpha_metadata(tmp_path):
+    # TIFF drops custom EXR attributes; ExtraSamples is its authoritative association.
+    values = np.full((16, 16, 4), 0.5, dtype=np.float32)
+    values[..., :3] = [0.25, 0.5, 0.75]
+    path = tmp_path / "associated.tiff"
+    write_image(path, values, space="sRGB", depth=16, alpha_mode="premultiplied")
+    raw, metadata = read_image(path, straight=False)
+    assert metadata["chromascript:alpha_mode"] == "premultiplied"
+    np.testing.assert_allclose(
+        raw[..., :3], values[..., :3] * values[..., 3:4], rtol=0, atol=1 / 65535
+    )
+    actual, _ = read_image(path)
+    np.testing.assert_allclose(actual, values, rtol=0, atol=3 / 65535)

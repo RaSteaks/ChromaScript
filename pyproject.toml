@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chromascript"
+version = "0.1.0"
+description = "Model-callable ACES 2.0 procedural video renderer"
+requires-python = ">=3.12"
+dependencies = [
+  "numpy==2.5.4", "wgpu==0.32.0", "opencolorio==2.5.0",
+  "OpenImageIO==3.1.18.1", "fastapi==0.143.0", "uvicorn==0.54.0",
+  "mcp==2.3.0", "pydantic==2.14.1", "httpx==0.28.1",
+  "typer==0.27.3", "psutil==7.2.2", "pillow==12.3.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "ruff==0.17.0", "mypy==2.4.0"]
+
+[project.scripts]
+chromascript = "chromascript.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["gpu: requires a native GPU", "integration: starts workers or encoders"]
+[tool.ruff]
+line-length = 100
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+ignore = ["E501"]
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true

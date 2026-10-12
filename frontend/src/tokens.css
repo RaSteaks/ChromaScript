@@ -1,0 +1,23 @@
+/* Generated from DESIGN.md; use scripts/design_tokens.py to update. */
+:root {
+  --color-background: #191B1E;
+  --color-surface: #22252A;
+  --color-raised: #2B2F35;
+  --color-border: #3B4149;
+  --color-text: #E3E6EB;
+  --color-muted: #A9B1BC;
+  --color-success: #91C7A5;
+  --color-warning: #E6C184;
+  --color-danger: #F1A3A3;
+  --color-focus: #B3DDE8;
+  --color-scrollbar: #66717F;
+  --color-primary: #88BBC8;
+  --font-sans: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 20px;
+  --space-xl: 28px;
+  --radius: 6px;
+}

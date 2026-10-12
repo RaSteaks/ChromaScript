@@ -1,0 +1,34 @@
+{
+  "profile": "product-admin",
+  "sourceRoots": [
+    "frontend/src"
+  ],
+  "locale": "zh-CN",
+  "canonicalMap": "UX-CONTRACT.md",
+  "requiredCapabilities": [
+    "Form",
+    "Select/Listbox",
+    "Scrollbar",
+    "Toast",
+    "CRUD"
+  ],
+  "ownership": {
+    "Select/Listbox": "native"
+  },
+  "requiredCommands": [
+    "typecheck",
+    "lint",
+    "e2e",
+    "accessibility"
+  ],
+  "commands": {
+    "typecheck": "npm --prefix frontend run typecheck",
+    "lint": "npm --prefix frontend run lint",
+    "e2e": "npm --prefix frontend run test:e2e",
+    "accessibility": "npm --prefix frontend run test:a11y"
+  },
+  "evidence": {
+    "crudFullFlow": "frontend/tests/workbench.spec.ts",
+    "failurePaths": "frontend/tests/workbench.spec.ts"
+  }
+}

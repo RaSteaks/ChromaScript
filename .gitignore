@@ -1,0 +1,59 @@
+# 本地项目、令牌、数据库、渲染缓存和交付成果。
+/workspace/
+# 验收生成数据；文字报告仍纳入版本管理。
+/reports/*.json
+/reports/*.png
+
+# Python 虚拟环境、字节码、安装元数据及构建产物。
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+/build/
+/dist/
+
+# 静态检查、测试及覆盖率缓存。
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+/htmlcov/
+
+# 前端依赖、生产构建及工具缓存。
+node_modules/
+/frontend/dist/
+/frontend/.vite/
+/frontend/coverage/
+*.tsbuildinfo
+.eslintcache
+
+# 浏览器测试的报告、截图与追踪文件。
+/frontend/playwright-report/
+/frontend/test-results/
+/playwright-report/
+/test-results/
+
+# 本地环境配置；保留可共享的配置模板。
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.sample
+!.env.template
+
+# 运行日志、临时文件及编辑器备份。
+*.log
+npm-debug.log*
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# 系统生成的目录元数据。
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini

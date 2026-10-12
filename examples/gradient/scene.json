@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "name": "广色域渐变",
+  "description": "线性 ACEScg 色彩、明暗渐变与柔和移动。",
+  "code": "\nfn shade(ctx: SceneContext) -> vec4<f32> {\n    let wave = 0.5 + 0.5 * sin(ctx.uv.x * 6.283185 + ctx.time * ctx.params.speed);\n    let c = mix(vec3<f32>(0.01, 0.06, 0.18), ctx.params.color, wave);\n    return vec4<f32>(c * exp2(ctx.params.exposure) * (0.1 + ctx.uv.y * 3.0), 1.0);\n}\n",
+  "parameters": [
+    {
+      "schema_version": 1,
+      "name": "color",
+      "label": "颜色",
+      "kind": "color",
+      "default": [
+        0.8,
+        0.25,
+        0.035
+      ],
+      "minimum": null,
+      "maximum": null,
+      "color_space": "ACEScg"
+    },
+    {
+      "schema_version": 1,
+      "name": "exposure",
+      "label": "曝光（档）",
+      "kind": "number",
+      "default": 0.0,
+      "minimum": -10.0,
+      "maximum": 10.0,
+      "color_space": "ACEScg"
+    },
+    {
+      "schema_version": 1,
+      "name": "speed",
+      "label": "速度",
+      "kind": "number",
+      "default": 0.3,
+      "minimum": 0.0,
+      "maximum": 10.0,
+      "color_space": "ACEScg"
+    }
+  ],
+  "values": {},
+  "seed": 42
+}

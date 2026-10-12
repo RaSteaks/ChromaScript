@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "name": "曝光阶梯",
+  "description": "18% 中灰的 -6 至 +6 档曝光，保留高光与测试负值。",
+  "code": "\nfn shade(ctx: SceneContext) -> vec4<f32> {\n    let step = floor(ctx.uv.x * 13.0) - 6.0;\n    var v = 0.18 * exp2(step + ctx.params.exposure);\n    if ctx.uv.y < 0.08 { v = -0.025; }\n    return vec4<f32>(vec3<f32>(v), 1.0);\n}\n",
+  "parameters": [
+    {
+      "schema_version": 1,
+      "name": "exposure",
+      "label": "曝光（档）",
+      "kind": "number",
+      "default": 0.0,
+      "minimum": -10.0,
+      "maximum": 10.0,
+      "color_space": "ACEScg"
+    }
+  ],
+  "values": {},
+  "seed": 42
+}

@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "name": "螺旋粒子",
+  "description": "固定种子的解析粒子轨道；任意时间可独立渲染。",
+  "code": "\nfn shade(ctx: SceneContext) -> vec4<f32> {\n    let p = (ctx.uv - vec2<f32>(0.5)) * vec2<f32>(ctx.resolution.x / ctx.resolution.y, 1.0);\n    let r = length(p);\n    let angle = atan2(p.y, p.x) + ctx.time * ctx.params.speed;\n    let spiral = pow(max(0.0, cos(angle * 3.0 - r * 35.0)), 30.0);\n    let beads = pow(max(0.0, cos(r * 160.0 + angle * 8.0)), 18.0);\n    let falloff = exp(-r * 4.0);\n    let glow = spiral * (0.2 + beads * 7.0) * falloff;\n    return vec4<f32>((vec3<f32>(0.002, 0.004, 0.008) + ctx.params.color * glow) * exp2(ctx.params.exposure), 1.0);\n}\n",
+  "parameters": [
+    {
+      "schema_version": 1,
+      "name": "color",
+      "label": "颜色",
+      "kind": "color",
+      "default": [
+        0.8,
+        0.25,
+        0.035
+      ],
+      "minimum": null,
+      "maximum": null,
+      "color_space": "ACEScg"
+    },
+    {
+      "schema_version": 1,
+      "name": "speed",
+      "label": "速度",
+      "kind": "number",
+      "default": 0.3,
+      "minimum": 0.0,
+      "maximum": 10.0,
+      "color_space": "ACEScg"
+    },
+    {
+      "schema_version": 1,
+      "name": "exposure",
+      "label": "曝光（档）",
+      "kind": "number",
+      "default": 0.0,
+      "minimum": -10.0,
+      "maximum": 10.0,
+      "color_space": "ACEScg"
+    }
+  ],
+  "values": {},
+  "seed": 42
+}
