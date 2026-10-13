@@ -31,11 +31,20 @@ struct Uniforms {
 @group(0) @binding(1) var<storage, read_write> pixels: array<vec4<f32>>;
 """
 KERNEL = """
+fn chromascript_half_sample(value: vec4<f32>) -> vec4<f32> {
+    let bits = bitcast<vec4<u32>>(value);
+    let exponent = bits & vec4<u32>(0x7f800000u);
+    // Halve normal values by their exponent. Fast-math backends may otherwise
+    // reassociate a*0.5+b*0.5 into (a+b)*0.5 and reintroduce overflow.
+    // Near underflow, keep the backend's ordinary float32 half/flush behavior.
+    return select(value * 0.5, bitcast<vec4<f32>>(bits - vec4<u32>(0x00800000u)),
+                  exponent > vec4<u32>(0x00800000u));
+}
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= settings.tile_size.x || gid.y >= settings.tile_size.y { return; }
     let side = u32(sqrt(f32(settings.samples)));
-    var sum = vec4<f32>(0.0);
+    var samples: array<vec4<f32>, 16>;
     for (var sy = 0u; sy < side; sy++) {
         for (var sx = 0u; sx < side; sx++) {
             let offset = (vec2<f32>(f32(sx), f32(sy)) + 0.5) / f32(side);
@@ -58,12 +67,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 pixels[gid.y * settings.tile_size.x + gid.x] = vec4<f32>(0.0, 0.0, 0.0, -1.0);
                 return;
             }
-            // Accumulate coverage-weighted radiance, then unassociate. This avoids
-            // dark fringes and RGB leakage when averaging transparent samples.
-            sum += vec4<f32>(c.rgb * c.a, c.a);
+            // Keep coverage-weighted radiance: hidden RGB must not bleed into edges.
+            samples[sy * side + sx] = vec4<f32>(c.rgb * c.a, c.a);
         }
     }
-    sum /= f32(settings.samples);
+    // Sample counts are powers of two. Average pairs before adding, so a finite
+    // constant near float32's maximum never needs an overflowing N-times sum.
+    // Balanced reduction also avoids repeatedly rounding small contributions.
+    for (var stride = settings.samples / 2u; stride > 0u; stride /= 2u) {
+        for (var i = 0u; i < stride; i++) {
+            samples[i] = chromascript_half_sample(samples[i])
+                         + chromascript_half_sample(samples[i + stride]);
+        }
+    }
+    let sum = samples[0];
     var rgb = vec3<f32>(0.0);
     if sum.a > 0.0 { rgb = sum.rgb / sum.a; }
     pixels[gid.y * settings.tile_size.x + gid.x] = vec4<f32>(rgb, sum.a);

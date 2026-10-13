@@ -16,8 +16,8 @@ DOCUMENTS = {
         "linear/acescct/gamma2.2/gamma2.4/gamma2.6/srgb/st2084/hlg. P3-D65 is a gamut, "
         "independent of transfer: P3-D65/srgb is Display P3; ProRes does not imply sRGB. "
         "Rec.709 supports gamma2.2/gamma2.4/gamma2.6/srgb; P3-D65 also supports st2084. "
-        "P3 gamma2.4/gamma2.6 and Rec.709 gamma2.6 currently require MOV numeric gamma "
-        "metadata; incompatible containers disable and reject those combinations. "
+        "P3 gamma2.4/gamma2.6 and Rec.709 gamma2.6 currently use a MOV comment declaration "
+        "requiring manual interpretation; other containers disable and reject those combinations. "
         "Rec.2020 supports st2084/hlg. ACEScct uses AP1 log; ACEScg/AP0 use linear. "
         "EXR accepts only ACEScg, ACES2065-1 or ACEScct in both legacy presets and direct "
         "delivery; other encodings are rejected before saving or queueing. "
@@ -42,11 +42,15 @@ DOCUMENTS = {
         "an explicit comment declaration; interpret it as ACES(AP1)/ACEScct when importing. "
         "Files carry native EXR chromaticities/colorInteropID, PNG sRGB/gAMA/cHRM, TIFF sRGB "
         "ICC, DPX Rec.709/numeric gamma, or video container/codec tags. MOV pure gamma "
-        "2.4/2.6 uses colr transfer=2 plus numeric gama; Gamma 2.2 uses transfer=4. MP4 "
-        "Rec.709 retains the BT.709 convention, so confirm Gamma 2.4 in Resolve. "
+        "2.4/2.6 uses colr transfer=2 and a native comment declaration, requiring manual "
+        "Gamma interpretation. colr supersedes gama, so gama is never written alongside it. "
+        "Gamma 2.2 uses transfer=4. MP4 Rec.709 retains the BT.709 convention; all Gamma "
+        "2.4/2.6 video requires checking the intended input interpretation. "
         "Reports provide exact encoding and Resolve input suggestions, not certified "
         "application imports. Current FFmpeg ProRes/DNxHR input precision is at most 10-bit; "
-        "decoded storage depth is reported separately. Evidence applies to exact dimensions, "
+        "decoded storage depth is reported separately. Verification compares decoded profile, "
+        "RGB/YCbCr type, chroma subsampling, required channels and component precision. "
+        "Evidence applies to exact dimensions, "
         "fps, codec/profile/pixel format and configuration. submit_configured_delivery takes "
         "1..20 distinct outputs. Legacy preset APIs remain compatible. 4K60 is an output "
         "acceptance target, not realtime. DCP, IMF and audio remain outside v1."
@@ -61,4 +65,13 @@ DOCUMENTS["workflow"] += (
     " is at most 480 pixels with one sample per pixel, preserving logical scene coordinates and"
     " rational frame time. It writes no revisions, artifacts, EXR caches or jobs. Do not use its"
     " 8-bit display values for original-pixel inspection; render a stored frame for that."
+)
+
+# Stored previews filter the already-rendered display light; this is not another
+# ACES output transform and never alters the original floating-point master.
+DOCUMENTS["color"] += (
+    " Stored previews above 1280 pixels are downsampled after decoding sRGB to display-linear "
+    "light, with premultiplied alpha, then unassociated, re-encoded and quantized once. "
+    "Spatial samples use balanced pairwise averages with overflow-safe halving; float32 "
+    "rounding and underflow limits still apply."
 )

@@ -50,8 +50,10 @@ def test_streams_and_precision(tmp_path: Path, id):
         wrong["container_color"][0]["primaries"] = 12
         assert not check_probe(wrong, p, s)["passed"]
         if p.container == "mov":
-            assert info["container_color"][0]["gamma"] == pytest.approx(2.4, abs=1 / 65536)
+            # colr takes precedence over gama; automatic pure-gamma import is not certified.
+            assert "gamma" not in info["container_color"][0]
             assert info["container_color"][0]["transfer"] == 2
+            assert result["color_encoding"]["requires_manual_video_interpretation"]
 
 
 @pytest.mark.integration
@@ -123,6 +125,29 @@ def test_unknown_frame_rate_is_a_verification_failure():
     )
     assert not checked["passed"]
     assert "frame-rate mismatch" in checked["issues"]
+
+
+@pytest.mark.integration
+def test_decoded_profile_and_sampling_must_match_the_requested_delivery(tmp_path):
+    # One real 4:2:2 file supplies independent evidence for both negative cases.
+    p = builtins()["prores-2"]
+    settings = RenderSettings(width=64, height=64, frames=1)
+    info = encode(
+        p, settings, tmp_path / "422.mov", [np.ones((64, 64, 4), np.float32)], lambda _: None
+    )
+    assert check_probe(info, p, settings)["passed"]
+    assert check_probe(info, p.model_copy(update={"profile": "standard"}), settings)["passed"]
+    assert check_probe(info, p.model_copy(update={"profile": "auto"}), settings)["passed"]
+    wrong_profile = p.model_copy(update={"profile": "3"})
+    assert any(
+        "profile mismatch" in issue
+        for issue in check_probe(info, wrong_profile, settings)["issues"]
+    )
+    wrong_sampling = p.model_copy(update={"pixel_format": "yuv444p10le"})
+    assert "chroma sampling mismatch" in check_probe(info, wrong_sampling, settings)["issues"]
+    missing = deepcopy(info)
+    missing["streams"][0].pop("profile")
+    assert not check_probe(missing, p, settings)["passed"]
 
 
 @pytest.mark.integration

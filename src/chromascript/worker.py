@@ -14,14 +14,13 @@ from typing import Any
 
 import numpy as np
 import psutil
-from PIL import Image
 
 from .color import color_info, output_metadata, render_output, transform
 from .encoding import check_image_metadata, check_probe, encode
 from .environment import runtime_identity
 from .errors import ChromaError
 from .gpu import Renderer
-from .images import file_hash, read_image, srgb_profile, write_image
+from .images import file_hash, read_image, resize_srgb, write_image
 from .models import Artifact, DeliveryPreset, RenderSettings, SceneSpec
 from .store import Store, canonical, now
 
@@ -175,16 +174,10 @@ def run(root: Path, job_id: str) -> None:
             )
             pixels, _ = read_image(path)
             preview = transform(pixels, "sRGB")
-            # Model previews are bounded sRGB images with native color metadata;
-            # attaching an ICC profile does not transform samples or alpha again.
+            # Filter the display copy in linear light before final quantization;
+            # the original ACEScg cache and the single ACES rendering stay separate.
             png = directory / f"preview-{frame_index:08d}.png"
-            if max(settings.width, settings.height) > 1280:
-                values = np.rint(np.clip(preview, 0, 1) * 255).astype(np.uint8)
-                image = Image.fromarray(values)
-                image.thumbnail((1280, 1280))
-                image.save(png, icc_profile=srgb_profile())
-            else:
-                write_image(png, preview, space="sRGB", depth=8)
+            write_image(png, resize_srgb(preview, 1280), space="sRGB", depth=8)
             artifact(
                 png,
                 "preview-image",

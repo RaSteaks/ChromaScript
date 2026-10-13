@@ -308,7 +308,8 @@ test("Resolve-style ProRes delivery keeps P3 gamma independent and freezes Auto 
   for (const value of ["gamma2.2", "gamma2.4", "gamma2.6", "srgb", "st2084"])
     await expect(gamma.locator(`option[value="${value}"]`)).toBeEnabled();
   await expect(field("色彩空间标签")).toHaveValue("P3-D65");
-  await expect(field("Gamma 标签")).toHaveValue("Gamma 2.4（MOV 数值标签）");
+  // Unspecified TRC requires manual import; gama cannot supplement colr.
+  await expect(field("Gamma 标签")).toHaveValue("未指定（按 Gamma 2.4 手动解读）");
   await expect(field("Gamma 标签")).toHaveAttribute("readonly", "");
   await expect(field("数据级别")).toHaveValue("auto");
   await expect(target).toContainText(
@@ -319,7 +320,7 @@ test("Resolve-style ProRes delivery keeps P3 gamma independent and freezes Auto 
   await page.keyboard.press("Escape");
   await expect(gamma).toBeFocused();
   await gamma.selectOption("gamma2.6");
-  await expect(field("Gamma 标签")).toHaveValue("Gamma 2.6（MOV 数值标签）");
+  await expect(field("Gamma 标签")).toHaveValue("未指定（按 Gamma 2.6 手动解读）");
   await expect(field("目标显示峰值亮度")).toHaveValue("100 cd/m²（nit）");
   mkdirSync("../reports", { recursive: true });
   await page.screenshot({

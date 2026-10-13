@@ -307,13 +307,15 @@ class DeliveryPreset(Model):
                 raise ValueError("ACEScct delivery needs EXR or a declared video encoding")
         if self.color.output in {"PQ", "HLG", "P3-PQ"} and self.bit_depth < 10:
             raise ValueError("HDR output requires at least 10-bit precision")
-        # These pure-power curves have no exact H.273 code. Only MOV's numeric
-        # gama atom currently preserves their transfer unambiguously in this encoder.
+        # These power curves have no exact H.273 code. Keep the implemented
+        # MOV declaration workflow; the declaration requires manual interpretation.
         if (
             self.color.output in {"P3-Gamma2.4", "P3-Gamma2.6", "Rec.709-Gamma2.6"}
             and self.container != "mov"
         ):
-            raise ValueError("This gamma encoding requires QuickTime MOV numeric gamma metadata")
+            raise ValueError(
+                "This gamma encoding requires MOV declaration and manual interpretation"
+            )
         if self.container == "png" and self.alpha_mode != "straight":
             raise ValueError("PNG stores straight alpha; choose straight association")
         if self.alpha and self.container not in {"exr", "png", "tiff", "mov", "mkv"}:

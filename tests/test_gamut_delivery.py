@@ -120,7 +120,9 @@ def test_p3_gamut_switch_retains_gamma_and_auto_freezes_the_codec_range():
         configured_output(DeliveryConfiguration.model_validate(exr["configuration"])).data_range
         == "full"
     )
-    assert result["file_tags"]["gamma"] == "Gamma 2.4（MOV 数值标签）"
+    assert result["file_tags"]["gamma"] == "未指定（按 Gamma 2.4 手动解读）"
+    assert result["color_encoding"]["requires_manual_video_interpretation"]
+    assert "手动" in result["color_note"]
     assert result["specification"] == "resolve-21-delivery-v1"
 
 
@@ -171,7 +173,7 @@ def test_unrepresentable_gamma_is_disabled_and_rejected_outside_mov():
         with pytest.raises(ChromaError, match="不兼容"):
             configured_output(DeliveryConfiguration(color_space="P3-D65", gamma=gamma))
     # The legacy preset operation must not bypass the shared file-metadata limit.
-    with pytest.raises(ValidationError, match="numeric gamma metadata"):
+    with pytest.raises(ValidationError, match="manual interpretation"):
         DeliveryPreset(
             id="bad-p3",
             name="invalid",
@@ -256,6 +258,7 @@ def test_unchecked_exr_display_encoding_never_passes_native_verification(tmp_pat
         ("P3-D65", "srgb", 13),
         ("P3-D65", "st2084", 16),
         ("Rec.709", "gamma2.2", 4),
+        ("Rec.709", "gamma2.4", 2),
         ("Rec.709", "gamma2.6", 2),
     ],
 )
@@ -275,17 +278,22 @@ def test_prores_native_gamma_and_decoded_pixels(tmp_path, space, gamma, transfer
     assert checked["passed"], checked["issues"]
     assert native["container_color"][0]["primaries"] == (12 if space == "P3-D65" else 1)
     assert native["container_color"][0]["transfer"] == transfer
-    if gamma.startswith("gamma"):
-        assert native["container_color"][0]["gamma"] == pytest.approx(
-            float(gamma[5:]), abs=1 / 65536
-        )
-        # Corrupting numeric gamma must fail even when the codec and P3 tags survive.
+    assert "gamma" not in native["container_color"][0]
+    if gamma in {"gamma2.4", "gamma2.6"}:
+        # Native declarations preserve intent, not automatic decoder interpretation.
         from copy import deepcopy
 
+        assert checked["color_encoding"]["requires_manual_video_interpretation"]
+        declaration = json.loads(native["format"]["tags"]["comment"])
+        assert declaration["primaries"] == space and declaration["transfer"] == gamma
+        missing = deepcopy(native)
+        missing["format"]["tags"].pop("comment")
+        assert not check_probe(missing, preset, settings)["passed"]
         wrong = deepcopy(native)
-        wrong["container_color"][0]["gamma"] = 1.8
+        wrong["container_color"][0]["gamma"] = float(gamma[5:])
         assert (
-            "QuickTime gamma mismatch or missing" in check_probe(wrong, preset, settings)["issues"]
+            "Conflicting QuickTime colr/gama metadata"
+            in check_probe(wrong, preset, settings)["issues"]
         )
     decoded = subprocess.run(
         [

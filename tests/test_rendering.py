@@ -8,7 +8,7 @@ import pytest
 from chromascript.color import input_rgb, transform
 from chromascript.errors import ChromaError
 from chromascript.gpu import Renderer
-from chromascript.images import read_image, write_image
+from chromascript.images import read_image, resize_srgb, write_image
 from chromascript.models import Rational, RenderSettings, SceneSpec
 from chromascript.templates import TEMPLATES
 
@@ -43,6 +43,61 @@ fn shade(ctx: SceneContext) -> vec4<f32> {
     )
     a = renderer.render(scene, RenderSettings(width=16, height=16, frames=1, samples=4), 0)
     np.testing.assert_allclose(a, np.broadcast_to([1, 0, 0, 0.5], a.shape), rtol=0, atol=1e-6)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("samples", [1, 4, 16])
+def test_sample_reduction_keeps_finite_extremes_and_coverage(renderer, samples):
+    # A constant's mean must not depend on sample count; include negative maxima,
+    # tiny coverage, signed cancellation and hidden RGB in one small GPU dispatch.
+    scene = SceneSpec(
+        name="finite averages",
+        code="""
+fn shade(ctx: SceneContext) -> vec4<f32> {
+    let maximum = bitcast<f32>(0x7f7fffffu);
+    if ctx.pixel.y < 4.0 { return vec4<f32>(maximum, -maximum, 1e38, 1.0); }
+    if ctx.pixel.y < 8.0 { return vec4<f32>(1e38, -1e38, 1.0, 1e-20); }
+    if ctx.pixel.y < 12.0 {
+        let sign = select(-1.0, 1.0, fract(ctx.pixel.x) < 0.5);
+        return vec4<f32>(sign * maximum, 0.0, 0.0, 1.0);
+    }
+    return vec4<f32>(maximum, -maximum, 1e38, 0.0);
+}""",
+    )
+    image = renderer.render(
+        scene, RenderSettings(width=16, height=16, frames=1, samples=samples), 0
+    )
+    maximum = np.finfo(np.float32).max
+    np.testing.assert_allclose(image[0, 0], [maximum, -maximum, 1e38, 1], rtol=2e-6, atol=0)
+    np.testing.assert_allclose(image[4, 0], [1e38, -1e38, 1, 1e-20], rtol=2e-6, atol=0)
+    assert image[8, 0, 0] == (-maximum if samples == 1 else 0)
+    np.testing.assert_array_equal(image[12:, :, :], 0)
+
+
+@pytest.mark.parametrize(
+    "pair,expected",
+    [
+        ([[0, 0, 0, 1], [1, 1, 1, 1]], [0.73535698, 0.73535698, 0.73535698, 1]),
+        ([[1, 0, 0, 1], [0, 0, 1, 0]], [1, 0, 0, 0.5]),
+        ([[1, 0, 0, 0.25], [0, 1, 0, 0.75]], [0.53709873, 0.88082502, 0, 0.5]),
+        ([[1, 0, 0, 0], [0, 1, 0, 0]], [0, 0, 0, 0]),
+    ],
+)
+def test_srgb_thumbnail_averages_light_and_coverage_before_quantization(tmp_path, pair, expected):
+    # Published sRGB code values for linear 1/2, 1/4 and 3/4 are independent
+    # references; opaque and transparent inputs catch different ordering errors.
+    source = np.tile(np.array(pair, np.float32), (2, 2, 1))
+    original = source.copy()
+    resized = resize_srgb(source, 2)
+    assert resized.shape == (1, 2, 4)
+    np.testing.assert_allclose(resized, np.broadcast_to(expected, resized.shape), atol=2e-7, rtol=0)
+    np.testing.assert_array_equal(source, original)
+    path = tmp_path / "thumbnail.png"
+    write_image(path, resized, space="sRGB", depth=8)
+    decoded, _ = read_image(path)
+    np.testing.assert_allclose(
+        decoded, np.broadcast_to(expected, resized.shape), atol=1 / 255, rtol=0
+    )
 
 
 @pytest.mark.gpu

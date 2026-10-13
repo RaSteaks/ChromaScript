@@ -287,9 +287,9 @@ def output_metadata(output: str) -> dict[str, Any]:
         "output_transform": output,
         "reference": "scene" if scene_referred else "display",
         "resolve_input_color_space": "ACES (AP1)" if scene_log else space,
-        "requires_manual_video_interpretation": scene_log
-        or gamma == "gamma2.6"
-        or output == "P3-Gamma2.4",
+        # Video tag vocabularies do not independently describe these power curves.
+        # Even Rec.709/BT.709 convention requires checking the intended Gamma 2.4.
+        "requires_manual_video_interpretation": scene_log or gamma in {"gamma2.4", "gamma2.6"},
         "resolve_input_gamma": {
             "linear": "Linear",
             "acescct": "ACEScct",

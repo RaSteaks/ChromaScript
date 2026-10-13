@@ -13,7 +13,7 @@ from typing import Any, BinaryIO, Callable, Iterable, Iterator
 import numpy as np
 from numpy.typing import NDArray
 
-from .color import NUMERIC_GAMMAS, output_metadata, tags
+from .color import output_metadata, tags
 from .errors import ChromaError
 from .models import OUTPUT_ENCODINGS, DeliveryPreset, RenderSettings
 
@@ -38,10 +38,25 @@ def _video_tags(preset: DeliveryPreset) -> dict[str, str]:
         "gamma2.4",
         "gamma2.6",
     }:
-        # NCLC has no pure gamma-2.4/2.6 code. MOV's numeric gama atom carries the
-        # exponent; ST428/BT.709 tags would describe a different signal encoding.
+        # NCLC has no pure gamma-2.4/2.6 code. colr supersedes gama, so keep
+        # unspecified TRC and an explicit declaration requiring manual import.
         result["transfer"] = "unknown"
     return result
+
+
+def _encoding_declaration(preset: DeliveryPreset) -> dict[str, str] | None:
+    """Native comments record intent, not a standardized automatic color transform."""
+    space, gamma = OUTPUT_ENCODINGS[preset.color.output]
+    if preset.color.output == "ACEScct" or (
+        preset.container == "mov" and gamma in {"gamma2.4", "gamma2.6"}
+    ):
+        return {
+            "chromascript_color_encoding": preset.color.output,
+            "primaries": "AP1" if gamma == "acescct" else space,
+            "transfer": "ACEScct" if gamma == "acescct" else gamma,
+            "data_range": preset.data_range,
+        }
+    return None
 
 
 def _boxes(stream: BinaryIO, start: int, end: int) -> Iterator[tuple[bytes, int, int]]:
@@ -187,30 +202,14 @@ def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path)
         "pc" if preset.data_range == "full" else "tv",
     ]
     if preset.container in {"mov", "mp4"}:
-        movflags = "+faststart+write_colr"
-        gamma = OUTPUT_ENCODINGS[preset.color.output][1]
-        if preset.container == "mov" and gamma in NUMERIC_GAMMAS:
-            movflags += "+write_gama"
-            args += ["-mov_gamma", str(NUMERIC_GAMMAS[gamma])]
-        args += ["-movflags", movflags, "-timecode", settings.timecode]
+        # QuickTime forbids relying on gama alongside colr: compliant readers
+        # ignore gama in that combination. Never emit it as a gamma certificate.
+        args += ["-movflags", "+faststart+write_colr", "-timecode", settings.timecode]
     if preset.container == "mxf":
         args += ["-timecode", settings.timecode, "-f", "mxf"]
-    if preset.color.output == "ACEScct":
-        # No H.273 AP1/ACEScct enums exist. Preserve a machine-readable native
-        # declaration instead of falsely labelling grading data as Rec.709.
-        args += [
-            "-metadata",
-            "comment="
-            + json.dumps(
-                {
-                    "chromascript_color_encoding": "ACEScct",
-                    "primaries": "AP1",
-                    "transfer": "ACEScct",
-                    "data_range": preset.data_range,
-                },
-                separators=(",", ":"),
-            ),
-        ]
+    declaration = _encoding_declaration(preset)
+    if declaration is not None:
+        args += ["-metadata", "comment=" + json.dumps(declaration, separators=(",", ":"))]
     args += ["-threads", "4", str(destination)]
     return args
 
@@ -365,7 +364,7 @@ def check_probe(
         issues.append(f"matrix mismatch: {video.get('color_space')}")
     if preset.container in {"mov", "mp4"}:
         # A valid codec VUI alone does not prove Resolve can read container color
-        # metadata. Verify the physical colr atom and explicit QuickTime gamma.
+        # metadata. Verify physical colr without claiming automatic Gamma interpretation.
         expected_colr = {
             "primaries": {"bt2020": 9, "smpte432": 12, "unknown": 2}.get(expected["primaries"], 1),
             "transfer": {
@@ -387,30 +386,16 @@ def check_probe(
             preset.data_range == "full"
         ):
             issues.append("MP4 colr range mismatch")
-        gamma = OUTPUT_ENCODINGS[preset.color.output][1]
-        if (
-            preset.container == "mov"
-            and gamma in NUMERIC_GAMMAS
-            and (
-                len(container_color) != 1
-                or not np.isclose(
-                    container_color[0].get("gamma", 0), NUMERIC_GAMMAS[gamma], atol=1 / 65536
-                )
-            )
-        ):
-            issues.append("QuickTime gamma mismatch or missing")
-    if preset.color.output == "ACEScct":
+        if any("gamma" in entry for entry in container_color):
+            issues.append("Conflicting QuickTime colr/gama metadata")
+    expected_declaration = _encoding_declaration(preset)
+    if expected_declaration is not None:
         try:
             declaration = json.loads(info.get("format", {}).get("tags", {}).get("comment", ""))
         except (ValueError, TypeError):
             declaration = {}
-        if declaration != {
-            "chromascript_color_encoding": "ACEScct",
-            "primaries": "AP1",
-            "transfer": "ACEScct",
-            "data_range": preset.data_range,
-        }:
-            issues.append("missing or incorrect native ACEScct declaration")
+        if declaration != expected_declaration:
+            issues.append(f"missing or incorrect native {preset.color.output} declaration")
     expected_range = "pc" if preset.data_range == "full" else "tv"
     actual_range = video.get("color_range")
     implicit_range = actual_range is None and video.get("codec_name") in {
@@ -425,23 +410,46 @@ def check_probe(
         issues.append(f"range mismatch: {video.get('color_range')}")
     # Decoder storage may be wider than the encoder input (notably ProRes 4444).
     # Check minimum precision while reporting both quantities separately.
-    import re
-
     storage = video.get("pix_fmt", "")
-    depth_match = re.search(r"(?:p|rgb|rgba|gbrp|gray)(10|12|16|48|64)(?:le|be)?$", storage)
-    actual_depth = int(video.get("bits_per_raw_sample", "0") or 0)
-    if depth_match:
-        actual_depth = max(
-            actual_depth, {48: 16, 64: 16}.get(int(depth_match[1]), int(depth_match[1]))
-        )
-    if not actual_depth:
-        actual_depth = 8
+    actual_depth = 0
+    try:
+        actual_pixel = pixel_format_info(storage)
+        expected_pixel = pixel_format_info(preset.pixel_format)
+    except ChromaError:
+        issues.append("missing or unknown decoded pixel format")
+    else:
+        actual_depth = min(c["bit_depth"] for c in actual_pixel["components"][:3])
+        # Compare semantics, not format strings: ProRes 4444 legitimately decodes
+        # wider than its input and may expose an extra opaque alpha channel.
+        if actual_pixel["flags"]["rgb"] != expected_pixel["flags"]["rgb"]:
+            issues.append("RGB/YCbCr component type mismatch")
+        if any(
+            actual_pixel.get(key, 0) != expected_pixel.get(key, 0)
+            for key in ("log2_chroma_w", "log2_chroma_h")
+        ):
+            issues.append("chroma sampling mismatch")
+        if actual_pixel["nb_components"] < (4 if preset.alpha else 3):
+            issues.append("missing color/alpha components")
+        if preset.alpha and not actual_pixel["flags"]["alpha"]:
+            issues.append("missing alpha channel")
     if actual_depth < preset.bit_depth:
         issues.append(
             f"precision mismatch: decoded {actual_depth}-bit < requested {preset.bit_depth}-bit"
         )
-    if preset.alpha and "a" not in video.get("pix_fmt", ""):
-        issues.append("missing alpha channel")
+    if preset.profile is not None:
+        expected_profile = PROFILE_NAMES.get(preset.codec, {}).get(preset.profile)
+        # Legacy ProRes presets may explicitly select the encoder's auto (-1)
+        # profile. Verify a known decoded profile without inventing a fixed request.
+        automatic = preset.codec == "prores_ks" and preset.profile in {"auto", "-1"}
+        profile_matches = (
+            video.get("profile") in PROFILE_NAMES["prores_ks"].values()
+            if automatic
+            else expected_profile is not None and video.get("profile") == expected_profile
+        )
+        if not profile_matches:
+            issues.append(
+                f"profile mismatch: requested {preset.profile}, got {video.get('profile')}"
+            )
     return {
         "passed": not issues,
         "issues": issues,
@@ -459,10 +467,43 @@ def check_probe(
         "container_color": info.get("container_color"),
         "color_signaling": "native ACEScct declaration; AP1/transfer flags unspecified, manual interpretation required"
         if preset.color.output == "ACEScct"
+        else "colr/codec tags and native declaration; manual gamma interpretation required"
+        if expected_declaration is not None
         else "QuickTime/MP4 colr and codec tags"
         if preset.container in {"mov", "mp4"}
         else "container and codec tags",
     }
+
+
+# Encoder option names and ffprobe profile names are different vocabularies.
+# Unknown requested profiles fail closed rather than certifying from the codec alone.
+PROFILE_NAMES = {
+    "prores_ks": {
+        alias: decoded
+        for i, (name, decoded) in enumerate(
+            zip(
+                ("proxy", "lt", "standard", "hq", "4444", "4444xq"),
+                ("Proxy", "LT", "Standard", "HQ", "4444", "XQ"),
+                strict=True,
+            )
+        )
+        for alias in (str(i), name)
+    },
+    "dnxhd": {
+        alias: "DNXHR " + name.upper()
+        for i, name in enumerate(("lb", "sq", "hq", "hqx", "444"), start=1)
+        for alias in (str(i), "dnxhr_" + name)
+    },
+    "libx264": {
+        "baseline": "Constrained Baseline",
+        "main": "Main",
+        "high": "High",
+        "high10": "High 10",
+        "high422": "High 4:2:2",
+        "high444": "High 4:4:4 Predictive",
+    },
+    "libx265": {"main": "Main", "main10": "Main 10"},
+}
 
 
 @lru_cache(maxsize=64)

@@ -33,6 +33,33 @@ def srgb_profile() -> bytes:
     return ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
 
 
+def resize_srgb(image: NDArray[np.float32], max_dimension: int) -> NDArray[np.float32]:
+    """Downsample an already-rendered, straight sRGB display copy in linear light."""
+    height, width, _ = image.shape
+    scale = min(1.0, max_dimension / max(width, height))
+    if scale == 1:
+        return image
+    size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    result = np.empty((size[1], size[0], 4), dtype=np.float32)
+    alpha = np.clip(image[..., 3], 0, 1)
+    # Float planes defer quantization until PNG writing. BOX uses nonnegative box
+    # weights, keeping filtered alpha in [0,1] without ringing at transparent edges.
+    result[..., 3] = np.asarray(Image.fromarray(alpha).resize(size, Image.Resampling.BOX))
+    for channel in range(3):
+        encoded = np.clip(image[..., channel], 0, 1)
+        linear = np.where(encoded <= 0.04045, encoded / 12.92, ((encoded + 0.055) / 1.055) ** 2.4)
+        associated = np.asarray(Image.fromarray(linear * alpha).resize(size, Image.Resampling.BOX))
+        # Only undo/reapply the sRGB transfer: ACES rendering has already happened.
+        # Alpha weights light but never receives a transfer function itself.
+        straight = np.divide(
+            associated, result[..., 3], out=np.zeros_like(associated), where=result[..., 3] > 0
+        )
+        result[..., channel] = np.where(
+            straight <= 0.0031308, straight * 12.92, 1.055 * straight ** (1 / 2.4) - 0.055
+        )
+    return result
+
+
 def _dpx_byte_order(header: bytes) -> str:
     if header[:4] == b"SDPX":
         return ">"

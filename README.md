@@ -80,7 +80,7 @@ CLI 的 --workspace 在子命令之前。所有产品操作均可通过 call 使
 
 输出设置分别记录色彩空间 / 色域、传递函数 / Gamma、目标显示峰值亮度和数据级别。传递函数名称为 Linear、Gamma 2.2、Gamma 2.4、Gamma 2.6、sRGB（IEC 61966-2-1）、PQ（SMPTE ST 2084）及 HLG（ARIB STD-B67）；具体组合由本机能力矩阵约束。
 
-P3 采用 **P3-D65**，色域与 Gamma 分别选择，支持本机已实现的 Gamma 2.2 / 2.4 / 2.6、sRGB 和 PQ 组合；P3-D65 + sRGB 对应 Display P3。ProRes 不固定 Gamma，切换到 P3-D65 会保留兼容的 Gamma 2.4。P3 Gamma 2.4/2.6 和 Rec.709 Gamma 2.6 当前使用 MOV 数值 Gamma 标签；其他容器中的不可用项变灰并注明原因。只读色彩空间标签和 Gamma 标签随实际像素输出生成。规格与本机 Resolve 21 手册的对应关系见[交付和导入说明](docs/RESOLVE_IMPORT.md)。BT.2020 与 Rec.2020 为同一色域。ACEScct 使用 AP1 对数编码，可导出 10-bit 及以上视频或浮点 EXR；ACEScg/AP0 线性母版使用 EXR。
+P3 采用 **P3-D65**，色域与 Gamma 分别选择，支持本机已实现的 Gamma 2.2 / 2.4 / 2.6、sRGB 和 PQ 组合；P3-D65 + sRGB 对应 Display P3。ProRes 不固定 Gamma，切换到 P3-D65 会保留兼容的 Gamma 2.4。P3 Gamma 2.4/2.6 和 Rec.709 Gamma 2.6 当前限定于 MOV 声明流程：传递函数标记为未指定，原生 comment 和报告记录准确编码，导入时须手动解释；其他容器中的不可用项变灰并注明原因。只读色彩空间标签和 Gamma 标签随实际像素输出生成。规格与本机 Resolve 21 手册的对应关系见[交付和导入说明](docs/RESOLVE_IMPORT.md)。BT.2020 与 Rec.2020 为同一色域。ACEScct 使用 AP1 对数编码，可导出 10-bit 及以上视频或浮点 EXR；ACEScg/AP0 线性母版使用 EXR。
 
 数据级别按 Resolve 显示 **Auto / Video（Limited）/ Full**，默认 Auto 并说明实际范围；提交时冻结具体范围。RGB/浮点图像采用 Full，ProRes/DNxHR/v210 的当前 YCbCr 输出采用 Video（Limited）。不可用范围仍显示为禁用项。接口兼容 `full` / `limited` / `limit`，并接受 `auto` / `video`。ACEScct 视频没有可准确表达 AP1/ACEScct 的 H.273 标记，采用未指定原色/传递函数并写入原生 comment 声明；调色软件中需显式指定解释。超出整数编码范围的对数值会报错，使用 float EXR 可以保留。
 
@@ -109,7 +109,7 @@ P3 采用 **P3-D65**，色域与 Gamma 分别选择，支持本机已实现的 G
 
 ctx.pixel 为左上原点的全局像素坐标；ctx.uv 为左下原点的归一化坐标。ctx.time 来自精确有理数帧率，送入 GPU 的时间为 float32；ctx.frame、ctx.seed 为整数。场景不能依赖真实时钟或上一帧。
 
-采样在线性空间累积预乘颜色，最后恢复直通 Alpha。无 Alpha 输出在线性空间合成到黑色后执行输出变换。PNG 使用直通 Alpha；EXR/TIFF/支持的专业视频提供明确的关联方式。
+采样在线性空间对预乘颜色逐级成对平均，最后恢复直通 Alpha；减半操作避免 GPU 快速数学重排造成有限大数的中间和溢出。float32 舍入和下溢限制仍然适用。无 Alpha 输出在线性空间合成到黑色后执行输出变换。PNG 使用直通 Alpha；EXR/TIFF/支持的专业视频提供明确的关联方式。
 
     .venv/bin/chromascript preview <scene-id> --frame 60
     .venv/bin/chromascript render <scene-id> --container exr --bit-depth 32 --compression zip --alpha-mode straight --width 3840 --height 2160 --frames 300
@@ -126,20 +126,20 @@ ctx.pixel 为左上原点的全局像素坐标；ctx.uv 为左下原点的归一
 - SDR：ACES 2.0 100 nit Rec.709 输出视图、Rec.1886 显示编码。
 - PQ：ACES 2.0 1000 nit、Rec.2020 限制色域输出。
 - HLG：使用同一 HDR 画面呈现结果，通过 OCIO 官方 1000 nit HLG 显示变换编码。
-- sRGB 预览与原始 ACES 浮点数值分别提供；Alpha 不进入颜色处理器。
+- sRGB 预览与原始 ACES 浮点数值分别提供；Alpha 不进入颜色处理器。长边超过 1280 的存储预览先解码到显示线性光，以预乘 Alpha 缩小，再恢复直通、编码并量化；不重复应用 ACES 呈现。
 - 工具空间转换和显示输出变换不同：ACEScct 等工作空间转换不应用显示呈现；sRGB / Rec.709 / PQ / HLG 别名使用明确的 ACES 输出视图。
 
 交付面板由用户通过联动下拉列表选择封装、编码、档位、位深、色度采样、输出色彩空间、Gamma、Alpha、范围、压缩和质量控制，覆盖 MP4/MOV H.264、HEVC、全部六档 ProRes、DNxHR MOV/MXF、EXR、PNG/TIFF/DPX、FFV1、无压缩 RGB/YUV 及平台构图。可添加多个独立交付目标。更改选项会更新其他可选项，并提示兼容性调整；任务提交前会再次校验。旧预设接口仅为已有脚本及历史任务保留，网页不再使用预设。
 
 色彩空间与 Gamma 分开指定：`Rec.709` 搭配 `gamma2.4`（Rec.1886）或 `srgb`；`Rec.2020` 搭配 `st2084`（PQ）或 `hlg`；`ACEScg` / `ACES2065-1` 搭配 `linear`。选择 Rec.2020 HDR 会联动到兼容的位深。MCP / HTTP 的 `DeliveryConfiguration` 与 CLI 的 `--color-space`、`--gamma` 使用同一约束；旧 `color_output` / `--color-output` 仍兼容，不能与矛盾的新字段一起提交。
 
-每项能力记录实际已验证组合；编码器存在不等于整个规格已验证。ProRes / DNxHR 软件编码输入最高 10-bit，解码器显示 12-bit 存储不代表端到端 12-bit。自定义预设也会检查输入像素格式精度。
+每项能力记录实际已验证组合；编码器存在不等于整个规格已验证。交付检查对照实际解码档位、RGB/YCbCr 类型、色度采样和所需通道，不仅检查最低位深；4:2:2 文件不能通过 4:4:4 规格检查。ProRes / DNxHR 软件编码输入最高 10-bit，解码器显示 12-bit 存储不代表端到端 12-bit。自定义预设也会检查输入像素格式精度。
 
 submit_configured_delivery 直接接受 configurations 数组，无需保存预设。get_delivery_options 返回合法选项、联动调整和允许帧率；validate_delivery_configuration 与 estimate_delivery 分别校验和估算当前配置。项目默认色彩和旧批量接口保留兼容，显式交付配置决定本次输出。
 
 文件本身包含标准色彩元数据：EXR 写入 AP1/AP0 `chromaticities` 与 `colorInteropID`；PNG 写入 `sRGB` / `gAMA` / `cHRM`；TIFF 嵌入真实 sRGB ICC 配置；DPX 写入 Rec.709 色度定义、用户定义传递函数和数值 Gamma 2.4。PNG/TIFF 交付限定 sRGB，DPX 限定 Rec.709 / Gamma 2.4，避免原生写入器静默采用错误默认值。检查会回读实际字段，缺失或不匹配时交付失败。
 
-MOV/MP4 写入 Resolve 可读取的标准 `colr`（NCLC/NCLX）标记，并与编码器的色彩标记一起检查。MOV 的 Rec.709 / Gamma 2.4 使用 `1-2-1`（RGB 矩阵为 0）与数值 `gama=2.4`，因为 NCLC 没有 Gamma 2.4 枚举；MP4 等格式沿用 BT.709 信号约定，不能仅由该标记证明 Rec.1886 Gamma，应在 Resolve 中核对 Gamma 2.4。PQ / HLG / sRGB 则分别有明确的传递函数代码 16 / 18 / 13。
+MOV/MP4 写入标准 `colr`（NCLC/NCLX）标记，并与编码器的色彩标记一起检查。依照 [Apple 规范](https://developer.apple.com/documentation/quicktime-file-format/color_parameter_atom)，存在 `colr` 时读取器应忽略 `gama`，因此不再同时写入两者。MOV 的 Gamma 2.4/2.6 使用未指定传递函数（代码 2），另以原生 comment 和报告记录色域、Gamma 及范围；这些声明不构成自动识别认证，须在导入端手动核对。MP4 等格式的 Rec.709 沿用 BT.709 信号约定，同样需核对 Gamma 2.4。Gamma 2.2 / PQ / HLG / sRGB 分别使用传递函数代码 4 / 16 / 18 / 13。
 
 图像序列附带 sequence.json，记录精确帧率、帧索引、时间码起点及独立的 `color_encoding.color_space` / `gamma`；EXR 也写入标准有理数 FramesPerSecond 元数据。报告记录 Resolve 输入空间/Gamma 建议和实际原生检查结果；应用内导入没有自动认证，`resolve_import_verified` 为 false。不同 Resolve 版本和项目色彩管理对图像元数据的自动解释不同，导入后按[说明](docs/RESOLVE_IMPORT.md)核对输入设置和时间码。
 

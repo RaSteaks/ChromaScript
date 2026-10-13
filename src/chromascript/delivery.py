@@ -11,7 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from .color import GAMMA_LABELS, NUMERIC_GAMMAS, SPACE_LABELS, output_metadata, tags
+from .color import GAMMA_LABELS, SPACE_LABELS, output_metadata, tags
 from .encoding import available_encoders
 from .errors import ChromaError
 from .models import (
@@ -231,8 +231,8 @@ def _colors(codec: str, depth: int = 32, container: str | None = None) -> list[s
         return ["Rec.709"]
     outputs = ["Rec.709", "sRGB", "Display-P3", "Rec.709-Gamma2.2", "P3-Gamma2.2"]
     if container == "mov":
-        # MOV can carry exact numeric gamma. Do not misuse ST428/BT.709 enums
-        # for P3 power curves in containers without an implemented equivalent.
+        # Keep the implemented MOV-only declaration workflow. These curves still
+        # require manual import: a comment is not an automatic transfer-function tag.
         outputs += ["P3-Gamma2.4", "P3-Gamma2.6", "Rec.709-Gamma2.6"]
     # Integer log exports need useful precision and a container with explicit
     # user metadata. Float EXR remains available for values outside [0, 1].
@@ -451,7 +451,7 @@ def delivery_options(
         reason = ""
         if gamma not in available_gammas:
             reason = (
-                "需 QuickTime MOV 记录数值 Gamma"
+                "当前仅支持 MOV 声明，需手动解释 Gamma"
                 if gamma in {"gamma2.4", "gamma2.6"}
                 else "当前格式不可用"
             )
@@ -472,8 +472,8 @@ def delivery_options(
         if native["primaries"] == "unknown":
             file_space = "未指定（AP1 见交付说明）"
         file_gamma = (
-            f"Gamma {NUMERIC_GAMMAS[normalized.gamma]}（MOV 数值标签）"
-            if normalized.container == "mov" and normalized.gamma in NUMERIC_GAMMAS
+            f"未指定（按 {encoding['resolve_input_gamma']} 手动解读）"
+            if normalized.container == "mov" and normalized.gamma in {"gamma2.4", "gamma2.6"}
             else "Rec.709（按 Gamma 2.4 解读）"
             if normalized.color_output == "Rec.709"
             else "未指定（ACEScct 见交付说明）"
@@ -508,7 +508,7 @@ def delivery_options(
         "data_range_note": range_note,
         "color_note": "ACEScct 视频导入时请明确指定 ACES (AP1) / ACEScct；原生色彩标记为未指定，完整解释见交付报告。"
         if normalized.color_output == "ACEScct" and codec != "exr"
-        else f"导入时请核对 {encoding['resolve_input_color_space']} / {encoding['resolve_input_gamma']}；MOV 记录数值 Gamma，不能把未指定的 TRC 当作 sRGB。"
+        else f"导入时请手动核对 {encoding['resolve_input_color_space']} / {encoding['resolve_input_gamma']}；文件标签不能单独证明此 Gamma，完整编码见交付报告，不能把未指定的 TRC 当作 sRGB。"
         if encoding["requires_manual_video_interpretation"] and codec not in IMAGES
         else "",
         "options": {
