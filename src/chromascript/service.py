@@ -23,6 +23,8 @@ from .color import color_info, transform
 from .encoding import available_encoders, pixel_format_info, probe
 from .environment import runtime_identity
 from .errors import ChromaError
+from .exports import bundle_name
+from .exports import export_directory as resolve_export_directory
 from .gpu import Renderer
 from .images import read_image
 from .models import (
@@ -96,6 +98,11 @@ class Service:
             "version": "0.1.0",
             "executable": str(Path(sys.executable).with_name("chromascript")),
             "workspace": str(self.store.root),
+            # Discovery must stay available even when a previous export path is now unwritable.
+            "delivery_export": {
+                "default_directory": str(self.store.root / "exports"),
+                "allowed_roots": [str(p) for p in self.export_roots],
+            },
             "gpu": self.renderer.info,
             "encoders": sorted(available_encoders()),
             "resolutions": RESOLUTIONS,
@@ -552,6 +559,7 @@ class Service:
         key: str,
         revision_id: str | None = None,
         frame_indices: list[int] | None = None,
+        export_directory: str | None = None,
     ) -> dict[str, Any]:
         record, spec, rid = self.scene(scene_id, revision_id)
         self.project(record["project_id"], True)
@@ -587,6 +595,16 @@ class Service:
             "runtime": runtime_identity(),
             "gpu_backend": self.renderer.info,
         }
+        destination = None
+        if kind == "delivery":
+            # Freeze the resolved parent and its permitted root in the same identity
+            # as the scene/outputs. Changing a destination requires a new request key.
+            destination = self.get_delivery_export_options(export_directory)["directory"]
+            root = max(
+                (p for p in self.export_roots if Path(destination).is_relative_to(p)),
+                key=lambda p: len(p.parts),
+            )
+            snapshot.update(export_directory=destination, export_root=str(root))
         digest = hashlib.sha256(canonical(snapshot).encode()).hexdigest()
         stamp = now()
         job = Job(
@@ -604,6 +622,8 @@ class Service:
             snapshot_hash=digest,
             idempotency_key=key,
         )
+        if destination is not None:
+            job.export_path = str(Path(destination) / bundle_name(spec.name, job.id))
         return {"job": self.store.create_job(key, digest, job.model_dump(), snapshot)}
 
     @operation("Queue one unbaked EXR frame and its sRGB PNG preview.")
@@ -654,7 +674,7 @@ class Service:
         )
 
     @operation(
-        "Queue a low-resolution motion preview; retrieve PNG artifacts as native model images."
+        "Queue a fixed sRGB motion preview, independent of delivery color; retrieve PNG artifacts as native model images."
     )
     def render_preview(
         self,
@@ -666,7 +686,8 @@ class Service:
         return self.submit(
             scene_id,
             settings or RenderSettings(width=960, height=540, frames=120),
-            [self.preset("h264-review")],
+            # Never inherit a project/delivery Gamma for the browser's sRGB viewer.
+            [self.preset("h264-srgb-preview")],
             "preview",
             idempotency_key or identifier(),
             revision_id,
@@ -699,6 +720,7 @@ class Service:
         preset_ids: list[str],
         idempotency_key: str,
         revision_id: str | None = None,
+        export_directory: str | None = None,
     ) -> dict[str, Any]:
         if not preset_ids or len(preset_ids) > 40 or len(set(preset_ids)) != len(preset_ids):
             raise ChromaError("preset_selection", "Choose 1..40 distinct presets")
@@ -709,7 +731,22 @@ class Service:
             "delivery",
             idempotency_key,
             revision_id,
+            export_directory=export_directory,
         )
+
+    @operation(
+        "Read allowed export locations and validate a delivery parent directory without writing."
+    )
+    def get_delivery_export_options(self, export_directory: str | None = None) -> dict[str, Any]:
+        default = str(self.store.root / "exports")
+        directory = resolve_export_directory(
+            default if export_directory is None else export_directory, self.export_roots
+        )
+        return {
+            "directory": str(directory),
+            "default_directory": default,
+            "allowed_roots": [str(p) for p in self.export_roots],
+        }
 
     @operation("Query linked delivery dropdown options from the installed codec capabilities.")
     def get_delivery_options(
@@ -748,6 +785,7 @@ class Service:
         configurations: list[DeliveryConfiguration],
         idempotency_key: str,
         revision_id: str | None = None,
+        export_directory: str | None = None,
     ) -> dict[str, Any]:
         from .delivery import configured_output
 
@@ -765,6 +803,7 @@ class Service:
             "delivery",
             idempotency_key,
             revision_id,
+            export_directory=export_directory,
         )
 
     @operation("List jobs and stages with pagination.")

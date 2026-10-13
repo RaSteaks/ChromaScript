@@ -190,6 +190,9 @@ export type Job = {
   settings: Settings;
   error: { code: string; message: string } | null;
   artifacts: string[];
+  // Older jobs have no bundle; a path alone does not certify export completion.
+  export_path?: string | null;
+  export_completed?: boolean;
 };
 export type Artifact = {
   id: string;
@@ -209,6 +212,7 @@ export type Capability = {
   color: { id: string; sha256: string };
   resolutions: Record<string, [number, number]>;
   frame_rates: { numerator: number; denominator: number }[];
+  delivery_export?: { default_directory: string; allowed_roots: string[] };
 };
 export type Template = { id: string; name: string; description: string };
 export type Operation = {

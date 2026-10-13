@@ -118,6 +118,9 @@ def render(
     frames: int = 300,
     fps_numerator: int = 60,
     fps_denominator: int = 1,
+    export_directory: Annotated[
+        str | None, typer.Option(help="Parent directory for a new scene/code/thumbnail/video bundle")
+    ] = None,
     key: Annotated[str, typer.Option("--key")] = "",
 ) -> None:
     """Queue directly configured output; unspecified fields use linked compatible defaults."""
@@ -126,6 +129,8 @@ def render(
     args = {
         "scene_id": scene_id,
         "idempotency_key": key or identifier(),
+        # The shared service validates this parent and assigns the unique bundle folder.
+        "export_directory": export_directory,
         "settings": {
             "width": width,
             "height": height,

@@ -19,6 +19,7 @@ from .color import color_info, output_metadata, render_output, transform
 from .encoding import check_image_metadata, check_probe, encode
 from .environment import runtime_identity
 from .errors import ChromaError
+from .exports import bundle_name, publish_bundle
 from .gpu import Renderer
 from .images import file_hash, read_image, resize_srgb, write_image
 from .models import Artifact, DeliveryPreset, RenderSettings, SceneSpec
@@ -49,6 +50,7 @@ def run(root: Path, job_id: str) -> None:
     artifacts: list[str] = list(job["artifacts"])
     directory = store.file(f"jobs/{job_id}/output")
     directory.mkdir(parents=True, exist_ok=True)
+    bundle_files: dict[str, Path] = {}
 
     def progress(stage: str, amount: float, completed: int | None = None) -> None:
         nonlocal peak
@@ -112,6 +114,17 @@ def run(root: Path, job_id: str) -> None:
         source_path = directory / "scene-snapshot.json"
         atomic_json(source_path, snapshot)
         artifact(source_path, "source", "application/json")
+        if snapshot.get("export_directory"):
+            # Export the frozen revision, never the scene's potentially newer editor draft.
+            scene_path = directory / "scene.json"
+            atomic_json(scene_path, scene.model_dump())
+            code_path = directory / "shader.wgsl"
+            code_path.write_text(scene.code, encoding="utf-8")
+            artifact(scene_path, "source", "application/json")
+            artifact(code_path, "source", "text/plain")
+            bundle_files.update(
+                {"scene.json": scene_path, "shader.wgsl": code_path, "scene-snapshot.json": source_path}
+            )
         # Cache identity excludes output transforms and frame count, so matching frames
         # can be shared across multiple delivery jobs without changing scene time.
         render_key = hashlib.sha256(
@@ -184,6 +197,10 @@ def run(root: Path, job_id: str) -> None:
                 "image/png",
                 {"frame": frame_index, "color_space": "sRGB", "display_transform": True},
             )
+            if frame_index == frame_indices[0]:
+                # The thumbnail is the first delivered frame's SDR display copy;
+                # raw ACEScg masters and HDR video keep their independent transforms.
+                bundle_files["thumbnail.png"] = png
 
         results = []
 
@@ -278,6 +295,9 @@ def run(root: Path, job_id: str) -> None:
                     "storage": metadata,
                     "frame_count": len(frame_indices),
                 }
+                for path in sequence.iterdir():
+                    if path.is_file():
+                        bundle_files[str(path.relative_to(directory))] = path
             else:
                 target = directory / f"{preset.id}.{preset.container}"
 
@@ -315,6 +335,7 @@ def run(root: Path, job_id: str) -> None:
                     else "video/x-matroska",
                     {"preset_id": preset.id, "verification": result},
                 )
+                bundle_files[target.name] = target
             results.append(result)
             # Evidence is bound to the actual configuration, geometry and encoder input.
             evidence_key = hashlib.sha256(
@@ -371,6 +392,21 @@ def run(root: Path, job_id: str) -> None:
         report_path = directory / "verification.json"
         atomic_json(report_path, report)
         artifact(report_path, "report", "application/json")
+        exported = False
+        if snapshot.get("export_directory"):
+            bundle_files["verification.json"] = report_path
+            target = Path(snapshot["export_directory"]) / bundle_name(scene.name, job_id)
+            if str(target) != job.get("export_path"):
+                raise ChromaError("snapshot_corrupt", "Frozen export destination differs from the job")
+            progress("exporting", 0.98)
+            publish_bundle(
+                bundle_files,
+                target,
+                Path(snapshot["export_root"]),
+                {"job_id": job_id, "snapshot_sha256": job["snapshot_hash"]},
+                partial(progress, "exporting", 0.98),
+            )
+            exported = True
         store.update(
             "job",
             job_id,
@@ -382,6 +418,7 @@ def run(root: Path, job_id: str) -> None:
                 "updated_at": now(),
                 "elapsed_seconds": time.monotonic() - start,
                 "peak_rss_bytes": peak,
+                "export_completed": exported,
             },
         )
         print(f"Completed {job_id} in {time.monotonic() - start:.2f}s", flush=True)

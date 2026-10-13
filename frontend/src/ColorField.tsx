@@ -81,7 +81,11 @@ export function ColorField({
   const current = inspection?.key === key ? inspection : null;
 
   return (
-    <Field label={label} id={id} hint={`${colorSpace} · OKLCH 感知选色`}>
+    <Field
+      label={label}
+      id={id}
+      hint={`参数存储：${colorSpace} · OKLCH 感知选色`}
+    >
       <Button
         id={id}
         className="color-trigger outline"
@@ -148,7 +152,10 @@ export function ColorField({
             </label>
           ))}
         </div>
-        <small>保留负值与大于 1 的浮点值。</small>
+        {/* Parameter encoding is separate from the shader's fixed linear space. */}
+        <small>
+          保留负值与大于 1 的浮点值。参数进入代码前统一转换为线性 ACEScg。
+        </small>
         {rawInvalid && (
           <small id={id + "-rgb-error"} role="alert">
             请输入三个有限的浮点数；未完成的输入尚未应用。
@@ -273,7 +280,8 @@ function ColorPicker({
         <p className="color-picker-intro">OKLCH · 按色相、明度和彩度选取颜色</p>
         <p className="color-picker-description">
           色样使用 sRGB / ACES 2.0 SDR 预览。应用后写入 {colorSpace}{" "}
-          场景参数，再保存场景并刷新画面。
+          颜色参数；进入代码前统一转换为线性
+          ACEScg。应用仅更新草稿，保存仍需手动操作。
         </p>
         {candidate ? (
           <>

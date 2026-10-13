@@ -114,6 +114,51 @@ test("live draft changes update immediately without saving or creating jobs", as
   });
 });
 
+test("fixed ACEScg generation and sRGB preview remain independent of delivery", async ({
+  page,
+}) => {
+  const { image } = await scene(page);
+  const original = await image.getAttribute("src");
+  const workflow = page.getByRole("region", {
+    name: "色彩工作流程",
+    exact: true,
+  });
+  await expect(workflow).toContainText("ACEScg · AP1 · 线性（固定）");
+  await expect(workflow).toContainText("sRGB · ACES 2.0 显示变换");
+  await expect(workflow.locator("select, input")).toHaveCount(0);
+  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  await expect(workflow).toBeVisible();
+  const target = page.getByRole("group", { name: "交付目标 1", exact: true });
+  await target
+    .getByLabel("视频 / 图像编码", { exact: true })
+    .selectOption("hevc");
+  await target
+    .getByLabel("输出色彩空间", { exact: true })
+    .selectOption("Rec.2020");
+  await expect(
+    target.getByLabel("传递函数 / Gamma", { exact: true }),
+  ).toHaveValue("st2084");
+  await expect(workflow).toContainText("sRGB · ACES 2.0 显示变换");
+  await page
+    .getByRole("button", { name: "2. 编辑与预览", exact: true })
+    .click();
+  // Re-rendering after an HDR delivery edit must preserve the same sRGB bytes.
+  await expect(page.getByText("实时预览已更新", { exact: true })).toBeVisible();
+  await expect(image).toHaveAttribute("src", original!);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await workflow.scrollIntoViewIfNeeded();
+  await expect(workflow).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: "../reports/color-workflow-mobile.png",
+    fullPage: true,
+  });
+});
+
 test("canvas specifications are edited in preview and shared with delivery", async ({
   page,
 }) => {

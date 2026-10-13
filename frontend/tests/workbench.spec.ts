@@ -409,7 +409,8 @@ test("image sequence export preserves destination on errors and copies all frame
   await destination.fill(original);
   await dialog.getByRole("button", { name: "复制序列", exact: true }).click();
   await expect(dialog).not.toBeVisible();
-  await expect(page.locator(".export-result")).toContainText(original);
+  // A delivery also exposes its automatic bundle beside a separate sequence export.
+  await expect(page.locator(".export-result").filter({ hasText: original })).toBeVisible();
   // Native filesystem evidence confirms the visible action exported the entire sequence.
   const { readdirSync } = await import("node:fs");
   expect(readdirSync(original).sort()).toEqual([

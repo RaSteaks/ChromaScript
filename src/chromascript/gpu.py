@@ -56,6 +56,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let uv = vec2<f32>(pixel.x / dims.x, 1.0 - pixel.y / dims.y);
             let ctx = SceneContext(pixel, uv, dims, settings.time_data.x,
                                    u32(settings.time_data.y), settings.seed, make_parameters());
+            // shade() returns scene-linear ACEScg, including literal RGB values.
+            // Apply the selected ACES display/output transform only after rendering.
             let c = shade(ctx);
             // Validate every sample, including hidden RGB, before averaging can hide
             // invalid values. IEEE exponent bits identify both infinity and NaN.
@@ -197,6 +199,8 @@ class Renderer:
         for index, parameter in enumerate(scene.parameters):
             value = scene.values.get(parameter.name, parameter.default)
             if parameter.kind == "color":
+                # Decode the parameter's storage space once; shader inputs and
+                # output remain linear ACEScg regardless of the delivery target.
                 params[index, :3] = input_rgb(value, parameter.color_space)
             else:
                 params[index, 0] = float(value)

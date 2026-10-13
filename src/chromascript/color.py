@@ -97,6 +97,10 @@ def color_info() -> dict[str, Any]:
         "ocio_version": ocio.__version__,
         "sha256": hashlib.sha256(c.serialize().encode()).hexdigest(),
         "working_space": "ACEScg",
+        # Expose the fixed shader/display contract through existing CLI and MCP discovery.
+        "code_space": "ACEScg",
+        "working_transfer": "linear",
+        "preview": {"display": "sRGB", "view": SDR_VIEW},
         "spaces": list(c.getColorSpaceNames()),
         "displays": {d: list(c.getViews(d)) for d in c.getDisplays()},
         "outputs": list(OUTPUT_ENCODINGS),

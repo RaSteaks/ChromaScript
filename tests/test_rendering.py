@@ -9,7 +9,7 @@ from chromascript.color import input_rgb, transform
 from chromascript.errors import ChromaError
 from chromascript.gpu import Renderer
 from chromascript.images import read_image, resize_srgb, write_image
-from chromascript.models import Rational, RenderSettings, SceneSpec
+from chromascript.models import Parameter, Rational, RenderSettings, SceneSpec
 from chromascript.templates import TEMPLATES
 
 
@@ -29,6 +29,25 @@ def test_linear_values_time_and_alpha(renderer):
     np.testing.assert_allclose(
         a, np.broadcast_to([-0.25, 8.0, 2.0, 0.5], a.shape), rtol=0, atol=1e-6
     )
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("space,expected", [("ACEScg", 0.5), ("sRGB", 0.21404114)])
+def test_parameter_encoding_does_not_change_shader_literal_space(renderer, space, expected):
+    # The sRGB midpoint decodes to linear 0.21404114 before the shader sees it;
+    # a shader literal remains 0.5 ACEScg in the same frame. Neither is display-baked.
+    scene = SceneSpec(
+        name="fixed generation space",
+        code="""fn shade(ctx: SceneContext) -> vec4<f32> {
+            if ctx.pixel.x < 8.0 { return vec4<f32>(ctx.params.tint, 0.375); }
+            return vec4<f32>(0.5, 0.5, 0.5, 0.375);
+        }""",
+        parameters=[Parameter(name="tint", kind="color", default=[0.5] * 3, color_space=space)],
+    )
+    image = renderer.render(scene, RenderSettings(width=16, height=16, frames=1, samples=4), 0)
+    np.testing.assert_allclose(image[0, 0, :3], [expected] * 3, rtol=2e-4, atol=1e-6)
+    np.testing.assert_array_equal(image[0, 8], [0.5, 0.5, 0.5, 0.375])
+    np.testing.assert_array_equal(image[..., 3], 0.375)
 
 
 @pytest.mark.gpu

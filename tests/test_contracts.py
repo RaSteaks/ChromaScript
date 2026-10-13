@@ -82,6 +82,23 @@ def test_invalid_delivery_combinations():
         )
 
 
+def test_fixed_working_space_is_independent_of_delivery(service, scene):
+    # All transports validate the same model; changing output cannot redefine code RGB.
+    project_id = scene["record"]["project_id"]
+    for output in ("sRGB", "Rec.709", "PQ", "ACEScct"):
+        result = service.set_color_pipeline(project_id, ColorPipeline(output=output))
+        assert result["pipeline"]["working_space"] == "ACEScg"
+        info = result["configuration"]
+        assert info["code_space"] == info["working_space"] == "ACEScg"
+        assert info["working_transfer"] == "linear"
+        assert info["preview"]["display"] == "sRGB"
+    with pytest.raises(ValidationError):
+        ColorPipeline(working_space="sRGB")
+    for field in ("input_space", "working_space"):
+        with pytest.raises(ValidationError):
+            SceneSpec.model_validate({**TEMPLATES["gradient"].model_dump(), field: "sRGB"})
+
+
 def test_revision_conflict_has_no_phantom_history(service, scene):
     original = scene["revision_id"]
     sid = scene["record"]["id"]

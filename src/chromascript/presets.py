@@ -54,6 +54,19 @@ def builtins() -> dict[str, DeliveryPreset]:
         bit_depth=8,
         crf=18,
     )
+    # Browser motion previews have their own fixed sRGB encoding. Keep the legacy
+    # Rec.709 delivery preset unchanged so saved deliveries retain their meaning.
+    add(
+        "h264-srgb-preview",
+        "H.264 · sRGB 网页预览",
+        "网页预览",
+        "mp4",
+        "libx264",
+        pixel_format="yuv420p",
+        bit_depth=8,
+        crf=18,
+        color=ColorPipeline(output="sRGB"),
+    )
     add(
         "h264-mov",
         "H.264 · QuickTime",

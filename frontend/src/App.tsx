@@ -30,6 +30,8 @@ import {
 import { artifactUrl, call, connect } from "./api";
 import { WorkflowNav, WORKFLOW, type WorkflowStep } from "./WorkflowNav";
 import { DeliveryEditor } from "./DeliveryEditor";
+import { DeliveryDestination } from "./DeliveryDestination";
+import { ColorWorkflow } from "./ColorWorkflow";
 import {
   ColorField,
   validColorChannels,
@@ -120,6 +122,13 @@ export default function App() {
   >({});
   const [templates, setTemplates] = useState<Template[]>([]);
   const delivery = useDeliveryTargets();
+  // Keep destination drafts across workflow steps and reconnects, including an empty edit.
+  const [deliveryDirectory, setDeliveryDirectory] = useState<string | null>(
+    null,
+  );
+  const [deliveryDirectoryError, setDeliveryDirectoryError] = useState("");
+  const destination =
+    deliveryDirectory ?? caps?.delivery_export?.default_directory ?? "";
   const [jobs, setJobs] = useState<Job[]>([]);
   const [jobPage, setJobPage] = useState(0);
   const [jobTotal, setJobTotal] = useState(0);
@@ -204,20 +213,36 @@ export default function App() {
   const motion = artifacts.find((a) => {
     const verification = a.metadata.verification as
       | {
-          video?: { codec_name?: string; pix_fmt?: string };
-          color_encoding?: { color_space?: string };
+          passed?: boolean;
+          video?: {
+            codec_name?: string;
+            pix_fmt?: string;
+            color_primaries?: string;
+            color_transfer?: string;
+            color_space?: string;
+          };
+          color_encoding?: {
+            color_space?: string;
+            gamma?: string;
+            output_transform?: string;
+          };
         }
       | undefined;
     const video = verification?.video;
-    // A P3/log deliverable is not the sRGB review proxy shown by this viewer.
-    // Generate a separate preview so labels and display interpretation stay honest.
+    // A filename or Rec.709 gamut alone cannot establish sRGB. Check the verified
+    // rendering recipe and native tags; legacy Gamma 2.4 previews need regeneration.
     return (
       a.kind === "video" &&
       activeJob?.scene_id === sceneId &&
-      (a.name === "h264-review.mp4" ||
-        (video?.codec_name === "h264" &&
-          video.pix_fmt === "yuv420p" &&
-          verification?.color_encoding?.color_space === "Rec.709"))
+      verification?.passed === true &&
+      video?.codec_name === "h264" &&
+      video.pix_fmt === "yuv420p" &&
+      video.color_primaries === "bt709" &&
+      video.color_transfer === "iec61966-2-1" &&
+      video.color_space === "bt709" &&
+      verification.color_encoding?.color_space === "Rec.709" &&
+      verification.color_encoding.gamma === "srgb" &&
+      verification.color_encoding.output_transform === "sRGB"
     );
   });
   const frameRate = Number(fps.split("/")[0]) / Number(fps.split("/")[1]);
@@ -671,6 +696,7 @@ export default function App() {
         revision: saved?.revision_id,
         settings: s,
         configurations: delivery.configurations,
+        export_directory: kind === "delivery" ? destination.trim() : undefined,
         frame,
       });
       if (submission.current?.recipe !== recipe)
@@ -710,6 +736,20 @@ export default function App() {
         });
       else {
         if (!delivery.ready) throw new Error("请先完成有效的交付格式设置。");
+        // Validate through the shared operation before queueing; a failed edit stays visible.
+        try {
+          await call("get_delivery_export_options", {
+            export_directory: destination.trim(),
+          });
+          setDeliveryDirectoryError("");
+        } catch (error) {
+          setDeliveryDirectoryError(errorText(error));
+          // Restore focus after the pending state releases the disabled field.
+          requestAnimationFrame(() =>
+            document.getElementById("delivery-directory")?.focus(),
+          );
+          throw error;
+        }
         for (const configuration of delivery.configurations)
           await call("validate_delivery_configuration", {
             configuration,
@@ -721,6 +761,7 @@ export default function App() {
           configurations: delivery.configurations,
           idempotency_key,
           revision_id,
+          export_directory: destination.trim(),
         });
       }
       submission.current = null;
@@ -1155,6 +1196,11 @@ export default function App() {
                           disabled={!motion}
                           className={showMotion ? "selected" : ""}
                           aria-pressed={showMotion}
+                          title={
+                            motion
+                              ? "播放已验证的 sRGB 视频"
+                              : "请生成 sRGB 运动预览；其他 Gamma 或未验证视频不可用于网页预览"
+                          }
                           onClick={() => {
                             setLiveEnabled(false);
                             setShowMotion(true);
@@ -1485,8 +1531,9 @@ export default function App() {
                         />
                         <div className="code-footer">
                           <span id="code-help">
-                            shade(ctx) → 线性 ACEScg RGBA · 使用 ctx.time 与
-                            ctx.seed
+                            shade(ctx) 固定返回线性 ACEScg RGBA（非预乘）。RGB
+                            可小于 0 或大于 1，Alpha 为 0–1；颜色参数已转换为
+                            ACEScg。使用 ctx.time 与 ctx.seed。
                           </span>
                           <Button
                             disabled={!draft}
@@ -1619,6 +1666,8 @@ export default function App() {
 
                       {settingsError && <Notice error text={settingsError} />}
                     </section>
+                    {/* The same fixed color contract is visible beside code and delivery. */}
+                    <ColorWorkflow />
                     <div className="section-heading">
                       <h3>
                         <Settings2 size={16} />
@@ -1759,12 +1808,26 @@ export default function App() {
                       <ChevronRight size={14} />
                     </Button>
                     {settingsError && <Notice error text={settingsError} />}
+                    <ColorWorkflow />
                   </section>
                   <div className="delivery-panel">
+                    <DeliveryDestination
+                      options={caps?.delivery_export}
+                      value={destination}
+                      error={deliveryDirectoryError}
+                      disabled={!!pending}
+                      onChange={(value) => {
+                        // Clear the matching banner when correcting a rejected path.
+                        if (deliveryDirectoryError) setError("");
+                        setDeliveryDirectory(value);
+                        setDeliveryDirectoryError("");
+                      }}
+                    />
                     <DeliveryEditor delivery={delivery} disabled={!!pending} />
                     <p className="technical-note">
-                      HDR 文件使用独立输出变换。当前网页提供 sRGB
-                      预览，不替代校准监看。
+                      从线性 ACEScg 转换至所选输出：显示交付应用一次 ACES
+                      输出变换；ACES 场景编码仅转换色彩空间，不烘焙显示效果。
+                      网页始终使用 sRGB 预览，不替代 HDR 校准监看。
                     </p>
                   </div>
                 </div>
@@ -1808,7 +1871,11 @@ export default function App() {
                     <Button
                       className="primary"
                       disabled={
-                        dirty || !!pending || !delivery.ready || !!settingsError
+                        dirty ||
+                        !!pending ||
+                        !delivery.ready ||
+                        !!settingsError ||
+                        !caps?.delivery_export
                       }
                       onClick={() => void render("delivery")}
                     >
@@ -1983,6 +2050,22 @@ export default function App() {
                         {jobLabel(activeJob)} · {STATUS[activeJob.status]} ·{" "}
                         {activeJob.settings.width} × {activeJob.settings.height}
                       </p>
+                    )}
+                    {activeJob?.export_path && (
+                      <div className="export-result" role="status">
+                        <span>
+                          {activeJob.export_completed
+                            ? "已导出至"
+                            : "完成后自动导出至"}{" "}
+                          <code>{activeJob.export_path}</code>
+                        </span>
+                        <Button
+                          aria-label="复制交付文件夹路径"
+                          onClick={() => void copy(activeJob.export_path!)}
+                        >
+                          <Copy size={14} />
+                        </Button>
+                      </div>
                     )}
                     {!artifacts.length && (
                       <div className="results-empty">

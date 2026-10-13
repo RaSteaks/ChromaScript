@@ -1,5 +1,141 @@
 import { expect, test } from "@playwright/test";
 import { mkdirSync } from "node:fs";
+import type { Artifact, Job, SceneReply } from "../src/types";
+
+test("motion preview requires verified sRGB pixels and tags regardless of filename", async ({
+  page,
+}) => {
+  const session = await (await page.request.get("/api/session")).json();
+  async function call<T>(name: string, data: unknown): Promise<T> {
+    const response = await page.request.post("/api/operations/" + name, {
+      headers: { Authorization: "Bearer " + session.token },
+      data,
+    });
+    expect(response.ok()).toBe(true);
+    return response.json();
+  }
+  const { project } = await call<{ project: { id: string } }>(
+    "create_project",
+    { name: "运动预览色彩验证 " + Date.now() },
+  );
+  const scene = await call<SceneReply>("create_scene", {
+    project_id: project.id,
+    template_id: "gradient",
+  });
+  const { job } = await call<{ job: Job }>("render_preview", {
+    scene_id: scene.record.id,
+    settings: { width: 32, height: 32, frames: 2, samples: 1 },
+  });
+  await expect
+    .poll(
+      async () =>
+        (await call<{ job: Job }>("get_job", { job_id: job.id })).job.status,
+      { timeout: 20000 },
+    )
+    .toBe("completed");
+  const completed = await call<{ job: Job; artifacts: Artifact[] }>("get_job", {
+    job_id: job.id,
+  });
+  const video = completed.artifacts.find((a) => a.kind === "video")!;
+  const verified = video.metadata.verification as {
+    passed: boolean;
+    video: Record<string, string>;
+    color_encoding: Record<string, string>;
+  };
+  expect(verified.passed).toBe(true);
+  expect(verified.video.color_transfer).toBe("iec61966-2-1");
+  expect(verified.color_encoding.gamma).toBe("srgb");
+
+  // Only metadata is varied after a real GPU/encoder run, covering old artifacts
+  // and mismatched claims without ever treating a filename as color evidence.
+  const variants = [
+    { name: "independent-srgb.mp4", verification: verified, playable: true },
+    { name: "h264-review.mp4", verification: undefined, playable: false },
+    {
+      name: "h264-review.mp4",
+      verification: {
+        ...verified,
+        video: { ...verified.video, color_transfer: "bt709" },
+        color_encoding: {
+          ...verified.color_encoding,
+          gamma: "gamma2.4",
+          output_transform: "Rec.709",
+        },
+      },
+      playable: false,
+    },
+    {
+      name: video.name,
+      verification: {
+        ...verified,
+        color_encoding: { ...verified.color_encoding, gamma: "gamma2.2" },
+      },
+      playable: false,
+    },
+    {
+      name: video.name,
+      verification: {
+        ...verified,
+        video: { ...verified.video, color_transfer: "bt709" },
+      },
+      playable: false,
+    },
+    {
+      name: video.name,
+      verification: { ...verified, passed: false },
+      playable: false,
+    },
+  ];
+  let variant = variants[0];
+  await page.route("**/api/operations/get_job", (route) => {
+    if (route.request().postDataJSON().job_id !== job.id)
+      return route.continue();
+    return route.fulfill({
+      json: {
+        ...completed,
+        artifacts: completed.artifacts.map((a) =>
+          a.id === video.id
+            ? {
+                ...a,
+                name: variant.name,
+                metadata: { ...a.metadata, verification: variant.verification },
+              }
+            : a,
+        ),
+      },
+    });
+  });
+  for (variant of variants) {
+    await page.goto("/");
+    await page.getByLabel("当前项目", { exact: true }).selectOption(project.id);
+    await page
+      .getByRole("button", { name: "4. 任务与成果", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "查看画面预览", exact: true })
+      .click();
+    const motion = page.getByRole("button", { name: "运动预览", exact: true });
+    if (variant.playable) {
+      await expect(motion).toBeEnabled();
+      await motion.click();
+      await expect(page.locator(".preview-stage video")).toHaveAttribute(
+        "src",
+        "/api/artifacts/" + video.id,
+      );
+      // Confirm Chrome can decode the real sRGB MP4, beyond merely mounting a URL.
+      await expect
+        .poll(() =>
+          page
+            .locator(".preview-stage video")
+            .evaluate((element: HTMLVideoElement) => element.readyState),
+        )
+        .toBeGreaterThanOrEqual(2);
+    } else {
+      await expect(motion).toBeDisabled();
+      await expect(page.locator(".preview-stage video")).toHaveCount(0);
+    }
+  }
+});
 
 test("output color space and gamma stay linked through HDR, narrow layout and retry", async ({
   page,
@@ -309,7 +445,9 @@ test("Resolve-style ProRes delivery keeps P3 gamma independent and freezes Auto 
     await expect(gamma.locator(`option[value="${value}"]`)).toBeEnabled();
   await expect(field("色彩空间标签")).toHaveValue("P3-D65");
   // Unspecified TRC requires manual import; gama cannot supplement colr.
-  await expect(field("Gamma 标签")).toHaveValue("未指定（按 Gamma 2.4 手动解读）");
+  await expect(field("Gamma 标签")).toHaveValue(
+    "未指定（按 Gamma 2.4 手动解读）",
+  );
   await expect(field("Gamma 标签")).toHaveAttribute("readonly", "");
   await expect(field("数据级别")).toHaveValue("auto");
   await expect(target).toContainText(
@@ -320,7 +458,9 @@ test("Resolve-style ProRes delivery keeps P3 gamma independent and freezes Auto 
   await page.keyboard.press("Escape");
   await expect(gamma).toBeFocused();
   await gamma.selectOption("gamma2.6");
-  await expect(field("Gamma 标签")).toHaveValue("未指定（按 Gamma 2.6 手动解读）");
+  await expect(field("Gamma 标签")).toHaveValue(
+    "未指定（按 Gamma 2.6 手动解读）",
+  );
   await expect(field("目标显示峰值亮度")).toHaveValue("100 cd/m²（nit）");
   mkdirSync("../reports", { recursive: true });
   await page.screenshot({

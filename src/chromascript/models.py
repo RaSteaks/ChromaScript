@@ -43,7 +43,11 @@ class Parameter(Model):
     default: Any = 0.0
     minimum: float | None = None
     maximum: float | None = None
-    color_space: Literal["ACEScg", "sRGB"] = "ACEScg"
+    # Parameter storage encoding does not select the shader's generation space.
+    color_space: Literal["ACEScg", "sRGB"] = Field(
+        default="ACEScg",
+        description="Stored RGB parameter encoding; converted to linear ACEScg before shade(ctx).",
+    )
 
     @model_validator(mode="after")
     def valid(self) -> Parameter:
@@ -81,7 +85,12 @@ class Parameter(Model):
 class SceneSpec(Model):
     name: str = Field(min_length=1, max_length=120)
     description: str = ""
-    code: str = Field(min_length=1, max_length=200_000)
+    # Code and numeric literals always use scene-linear AP1, never a delivery encoding.
+    code: str = Field(
+        min_length=1,
+        max_length=200_000,
+        description="WGSL shade(ctx) returns straight-alpha linear ACEScg RGBA. Color parameters arrive in ACEScg; RGB may be negative or above 1. Alpha is coverage, not color.",
+    )
     parameters: list[Parameter] = Field(default_factory=list, max_length=24)
     values: dict[str, Any] = Field(default_factory=dict)
     seed: int = Field(default=42, ge=0, le=4_294_967_295)
@@ -239,7 +248,11 @@ def normalize_delivery_field(field: str, value: Any) -> Any:
 
 
 class ColorPipeline(Model):
-    working_space: Literal["ACEScg"] = "ACEScg"
+    # Keep the fixed space explicit in every transport; only output is selectable.
+    working_space: Literal["ACEScg"] = Field(
+        default="ACEScg",
+        description="Fixed linear ACEScg (AP1) for code generation and internal processing; independent of output and the sRGB web preview.",
+    )
     config: Literal["cg-config-v4.0.0_aces-v2.0_ocio-v2.5"] = "cg-config-v4.0.0_aces-v2.0_ocio-v2.5"
     output: OutputTransform = "Rec.709"
     peak_nits: Literal[1000] = 1000
@@ -426,6 +439,9 @@ class Job(Model):
     elapsed_seconds: float = 0
     peak_rss_bytes: int = 0
     artifacts: list[str] = Field(default_factory=list)
+    # New deliveries publish one bundle; historical/preview jobs have no destination.
+    export_path: str | None = None
+    export_completed: bool = False
 
 
 class Artifact(Model):

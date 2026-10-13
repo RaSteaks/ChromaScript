@@ -1,6 +1,7 @@
 """Live proxies are bounded, revision-free and faithful to color/alpha/frame semantics."""
 
 import base64
+import subprocess
 from io import BytesIO
 
 import numpy as np
@@ -13,11 +14,12 @@ from chromascript.api import create_app
 from chromascript.color import transform
 from chromascript.errors import ChromaError
 from chromascript.gpu import Renderer
-from chromascript.models import Parameter, Rational, RenderSettings, SceneSpec
+from chromascript.models import ColorPipeline, Parameter, Rational, RenderSettings, SceneSpec
 from chromascript.operations import REGISTRY, execute
 from chromascript.preview import LivePreviewRequest, preview_image
 from chromascript.service import Service
 from chromascript.templates import TEMPLATES
+from chromascript.worker import run
 
 
 @pytest.fixture(scope="module")
@@ -81,7 +83,7 @@ def test_preview_encodes_display_copy_and_straight_alpha():
 
 
 @pytest.mark.gpu
-def test_preview_draft_never_writes_revisions_jobs_or_artifacts(tmp_path, renderer):
+def test_preview_draft_never_writes_revisions_jobs_or_artifacts(tmp_path, renderer, request):
     service = Service(tmp_path)
     service._renderer = renderer
     project = service.create_project("live draft")["project"]
@@ -94,6 +96,12 @@ def test_preview_draft_never_writes_revisions_jobs_or_artifacts(tmp_path, render
         parameters=[Parameter(name="exposure", default=-0.25)],
     )
     tables = ["project", "scene", "revision", "job", "artifact"]
+    # Keep WAL sidecars alive across both complete file snapshots. Otherwise GC
+    # can close the last SQLite connection between reads and change only their
+    # existence, despite preview writing no state. Do not exclude files from comparison.
+    connection = service.store.connect()
+    request.addfinalizer(connection.close)
+    connection.execute("SELECT count(*) FROM records").fetchone()
     before = {table: service.store.list(table) for table in tables}
     files = set(tmp_path.rglob("*"))
     args = {
@@ -125,6 +133,66 @@ def test_preview_draft_never_writes_revisions_jobs_or_artifacts(tmp_path, render
     assert {table: service.store.list(table) for table in tables} == before
     assert set(tmp_path.rglob("*")) == files
     assert service.get_scene(saved["record"]["id"])["revision_id"] == saved["revision_id"]
+
+
+@pytest.mark.gpu
+@pytest.mark.integration
+@pytest.mark.parametrize("project_output", ["Rec.709", "PQ", "ACEScct"])
+def test_motion_preview_encodes_srgb_independently_of_project_output(tmp_path, project_output):
+    service = Service(tmp_path)
+    project = service.create_project("fixed motion display")["project"]
+    service.set_color_pipeline(project["id"], ColorPipeline(output=project_output))
+    scene = service.create_scene(
+        project["id"],
+        spec=SceneSpec(
+            name="neutral reference",
+            code="fn shade(ctx: SceneContext) -> vec4<f32> { return vec4<f32>(0.18, 0.18, 0.18, 1.0); }",
+        ),
+    )
+    job = execute(
+        service,
+        "render_preview",
+        {
+            "scene_id": scene["record"]["id"],
+            "settings": {"width": 32, "height": 32, "frames": 2, "samples": 1},
+        },
+    )["job"]
+    assert job["outputs"][0]["color"]["output"] == "sRGB"
+    assert service.preset("h264-review").color.output == "Rec.709"
+    run(tmp_path, job["id"])
+    completed = service.get_job(job["id"])
+    assert completed["job"]["status"] == "completed", completed["job"]["error"]
+    video = next(a for a in completed["artifacts"] if a["kind"] == "video")
+    verified = video["metadata"]["verification"]
+    assert verified["passed"], verified["issues"]
+    assert verified["color_encoding"]["gamma"] == "srgb"
+    assert verified["video"]["color_transfer"] == "iec61966-2-1"
+    assert verified["probe"]["container_color"][0]["transfer"] == 13
+    # Decode encoded RGB without another transfer conversion. Neutral opaque pixels
+    # isolate the sRGB curve from chroma subsampling and alpha-compositing differences.
+    decoded = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(service.store.file(video["relative_path"])),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    pixels = np.frombuffer(decoded.stdout, np.uint8).reshape(32, 32, 3)
+    live = preview_image(np.array([[[0.18, 0.18, 0.18, 1.0]]], np.float32))
+    with Image.open(BytesIO(base64.b64decode(live["data"]))) as png:
+        expected = np.broadcast_to(np.asarray(png)[0, 0, :3], pixels.shape)
+        np.testing.assert_allclose(pixels, expected, rtol=0, atol=2)
 
 
 @pytest.mark.gpu
