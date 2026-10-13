@@ -53,6 +53,56 @@ async function editCode(page: Page, code: string) {
   await editor.fill(code);
 }
 
+for (const suspendedAudio of [false, true]) {
+  test(`silent playback advances, loops and pauses (suspended audio: ${suspendedAudio})`, async ({
+    page,
+  }) => {
+    if (suspendedAudio) {
+      // Model a browser/device that leaves audio activation pending. A silent
+      // composition must advance even when AudioContext.resume never resolves.
+      await page.addInitScript(() => {
+        AudioContext.prototype.resume = () => new Promise<void>(() => {});
+      });
+    }
+    await setup(page);
+    await editCode(
+      page,
+      `import {useCurrentFrame} from 'remotion';
+export default function FrameProbe() {
+  const frame = useCurrentFrame();
+  return <div data-testid="frame-probe" data-frame={frame}>{frame}</div>;
+}`,
+    );
+    const probe = page
+      .frameLocator("iframe[title='动画画面']")
+      .getByTestId("frame-probe");
+    await expect(probe).toHaveAttribute("data-frame", "0");
+    const timeline = page.getByLabel("动画时间线", { exact: true });
+    await page.getByRole("button", { name: "播放动画", exact: true }).click();
+    // Verify rendered composition time, not just the optimistic play event.
+    await expect(probe).not.toHaveAttribute("data-frame", "0");
+    await page.getByRole("button", { name: "暂停动画", exact: true }).click();
+    await expect(
+      page.getByRole("button", { name: "播放动画", exact: true }),
+    ).toBeEnabled();
+    const paused = await timeline.inputValue();
+    await expect(probe).toHaveAttribute("data-frame", paused);
+    await page.waitForTimeout(250);
+    await expect(timeline).toHaveValue(paused);
+    await expect(probe).toHaveAttribute("data-frame", paused);
+
+    await timeline.fill("11");
+    await expect(probe).toHaveAttribute("data-frame", "11");
+    await page.getByRole("button", { name: "播放动画", exact: true }).click();
+    await expect(probe).not.toHaveAttribute("data-frame", "11");
+    await page.getByRole("button", { name: "工作区", exact: true }).click();
+    await page.getByRole("button", { name: "动画代码", exact: true }).click();
+    await expect(
+      page.getByRole("button", { name: "播放动画", exact: true }),
+    ).toBeEnabled();
+  });
+}
+
 test("Remotion editing, seeking, recovery and actual local video export", async ({
   page,
 }) => {

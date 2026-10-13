@@ -92,6 +92,9 @@ function Preview() {
       fps={config.fps}
       controls={false}
       autoPlay={false}
+      // This workspace is silent. Parent postMessage commands carry no iframe
+      // user activation; waiting for a suspended audio clock can freeze frame 0.
+      initiallyMuted
       loop
       style={{ width: "100%", height: "100%" }}
       errorFallback={({ error }) => {

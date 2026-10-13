@@ -45,6 +45,8 @@ cd /absolute/path/ChromaScript
 
 制作 Remotion / Three.js 动画时，点击顶部“动画代码”，选择项目并新建文字或三维动画。修改左侧 TSX 后，右侧自动编译预览；下方可修改尺寸、帧数与有理数帧率。点击“保存动画”后再“导出 MP4”，在同页查看任务进度、下载视频和验证报告。导出文件夹还保留 TSX 源码与 JSON 规格。
 
+在 VS Code 中编辑本地动画时，将源码放在 `workspace/authored/` 下。本地 `workspace/tsconfig.json` 复用 `frontend` 的 TypeScript 设置和已安装依赖，为 React、Remotion 与 JSX 提供类型检查；无需在工作区重复安装依赖。可运行 `frontend/node_modules/.bin/tsc --project workspace/tsconfig.json --noEmit` 检查这些源码。该配置与动画源码均属于本地工作区，不纳入 Git 或前端应用构建。
+
 代码默认导出一个 React 组件，用 `useCurrentFrame()` 和 `useVideoConfig()` 计算每帧状态。三维场景使用 `@remotion/three` 的 `ThreeCanvas`，避免 `useFrame()` 累加时间、`Date.now()` 或非固定随机数。允许导入 React、Remotion、Three.js、React Three Fiber 和 `@remotion/three`，不支持网络素材或任意文件导入。编译错误会保留上一版可用画面和当前草稿。
 
 模型/CLI 使用 `list_motion_templates`、`create_motion_scene`、`get_motion_scene`、`update_motion_scene`、`compile_motion_preview`、`submit_motion_render` 等共享操作，例如 `chromascript call list_motion_templates`。`get_documentation` 的 `motion` 主题提供完整调用约定。
