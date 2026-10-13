@@ -27,7 +27,8 @@ def configure(
 @app.command()
 def serve(
     port: int = 8765,
-    export_root: Annotated[list[Path] | None, typer.Option("--export-root")] = None,
+    # Keep old launch scripts parseable; export selection no longer requires grants.
+    export_root: Annotated[list[Path] | None, typer.Option("--export-root", help="Legacy compatibility; export directories need no allowlist")] = None,
 ) -> None:
     """Start the persistent local UI/API/MCP daemon."""
     import uvicorn

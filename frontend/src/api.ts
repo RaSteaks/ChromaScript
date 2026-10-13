@@ -1,5 +1,14 @@
 /** Shared transport: tokens are in memory; mutations are never silently retried. */
 let token = "";
+/** Keep conflict codes available to editors while preserving existing Error messages. */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public code: string = "request_failed",
+  ) {
+    super(message);
+  }
+}
 export async function connect(): Promise<{ workspace: string }> {
   const response = await fetch("/api/session");
   if (!response.ok) throw new Error("本地服务未连接，请启动服务后重试。");
@@ -26,12 +35,19 @@ export async function call<T>(
     },
   );
   const data = await response.json();
-  if (!response.ok)
-    throw new Error(
-      data.error?.message ||
-        data.detail?.[0]?.msg ||
-        "操作未完成，请检查参数后重试。",
+  if (!response.ok) {
+    // A previous daemon lets StaticFiles answer unknown POST routes with 405;
+    // newer routers may use 404. Neither means the user's project data is empty.
+    const unavailable = response.status === 404 || response.status === 405;
+    const detail =
+      typeof data.detail === "string" ? data.detail : data.detail?.[0]?.msg;
+    throw new ApiError(
+      unavailable
+        ? "当前本地服务尚未提供此功能，请重启 ChromaScript 服务后重新连接。"
+        : data.error?.message || detail || "操作未完成，请检查参数后重试。",
+      unavailable ? "operation_unavailable" : data.error?.code,
     );
+  }
   return data as T;
 }
 export function artifactUrl(id: string, download = false): string {

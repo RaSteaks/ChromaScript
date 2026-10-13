@@ -49,22 +49,37 @@ test("delivery destination validates paths, preserves drafts and exports a compl
   await expect(directory).toHaveAttribute("aria-invalid", "true");
   await expect(directory).toBeFocused();
   await expect(page.locator("#workflow-title")).toHaveText("设置交付");
-  await directory.fill("/outside-not-allowed");
+  await directory.fill("relative/export");
   await submit.click();
-  await expect(page.locator("#delivery-directory-help")).toContainText(
-    "允许的目录",
-  );
+  await expect(page.locator("#delivery-directory-help")).toContainText("绝对");
   expect(
     (await call<{ total: number }>("list_jobs", { project_id: project.id }))
       .total,
   ).toBe(0);
 
+  // Choose a real destination outside the workspace with no startup grant.
   const parent = join(
-    caps.delivery_export!.allowed_roots[1] || caps.workspace,
-    "导出 验证",
+    "/private/tmp",
+    "ChromaScript 选择导出",
     String(Date.now()),
   );
-  await directory.fill(parent);
+  mkdirSync(parent, { recursive: true });
+  expect(caps.delivery_export!.unrestricted).toBe(true);
+  await directory.fill(caps.delivery_export!.default_directory);
+  let selections = 0;
+  await page.route("**/api/operations/choose_export_directory", (route) => {
+    selections++;
+    return route.fulfill({
+      json:
+        selections === 1
+          ? { cancelled: true, directory: null }
+          : { cancelled: false, directory: parent },
+    });
+  });
+  await page.getByRole("button", { name: "选择文件夹", exact: true }).click();
+  await expect(directory).toHaveValue(caps.delivery_export!.default_directory);
+  await page.getByRole("button", { name: "选择文件夹", exact: true }).click();
+  await expect(directory).toHaveValue(parent);
   await expect(page.getByRole("alert")).not.toBeVisible();
   await page
     .getByRole("button", { name: "2. 编辑与预览", exact: true })
@@ -135,6 +150,30 @@ test("delivery destination validates paths, preserves drafts and exports a compl
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
     folder,
   );
+  let opens = 0;
+  await page.route("**/api/operations/open_export_directory", (route) => {
+    expect(route.request().postDataJSON().directory).toBe(folder);
+    opens++;
+    return route.fulfill(
+      opens === 1
+        ? {
+            status: 400,
+            json: {
+              error: { code: "folder_open_failed", message: "测试打开失败" },
+            },
+          }
+        : { json: { directory: folder } },
+    );
+  });
+  await result
+    .getByRole("button", { name: "打开导出文件夹", exact: true })
+    .click();
+  await expect(result.getByRole("alert")).toContainText("测试打开失败");
+  await result
+    .getByRole("button", { name: "打开导出文件夹", exact: true })
+    .click();
+  await expect(result.getByRole("alert")).not.toBeVisible();
+  expect(opens).toBe(2);
 });
 
 test("delivery destination accessibility, narrow layout and changed-path retry identity", async ({
@@ -144,12 +183,12 @@ test("delivery destination accessibility, narrow layout and changed-path retry i
   await page.setViewportSize({ width: 390, height: 844 });
   await page.emulateMedia({ reducedMotion: "reduce" });
   const directory = page.getByLabel("导出位置", { exact: true });
-  await page.getByText("可用导出目录", { exact: true }).focus();
+  await page.route("**/api/operations/choose_export_directory", (route) =>
+    route.fulfill({ json: { cancelled: true, directory: null } }),
+  );
+  await page.getByRole("button", { name: "选择文件夹", exact: true }).focus();
   await page.keyboard.press("Enter");
-  const root = page.locator(".export-roots").getByRole("button").first();
-  await root.focus();
-  await page.keyboard.press("Enter");
-  await expect(directory).toHaveValue(caps.delivery_export!.allowed_roots[0]);
+  await expect(directory).toHaveValue(caps.delivery_export!.default_directory);
   await page.getByRole("button", { name: "使用默认位置", exact: true }).click();
   await expect(directory).toHaveValue(caps.delivery_export!.default_directory);
   await directory.fill(

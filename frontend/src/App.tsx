@@ -3,6 +3,8 @@ import {
   useEffect,
   useRef,
   useState,
+  lazy,
+  Suspense,
   type MouseEvent,
 } from "react";
 import {
@@ -31,6 +33,7 @@ import { artifactUrl, call, connect } from "./api";
 import { WorkflowNav, WORKFLOW, type WorkflowStep } from "./WorkflowNav";
 import { DeliveryEditor } from "./DeliveryEditor";
 import { DeliveryDestination } from "./DeliveryDestination";
+import { FolderPickerButton, OpenExportFolder } from "./ExportFolders";
 import { ColorWorkflow } from "./ColorWorkflow";
 import {
   ColorField,
@@ -62,6 +65,10 @@ const STATUS: Record<string, string> = {
   cancelled: "已取消",
   interrupted: "已中断",
 };
+// Load the authoring editor only when requested, then retain its drafts across tabs.
+const MotionWorkbench = lazy(async () => ({
+  default: (await import("./MotionWorkbench")).MotionWorkbench,
+}));
 const STEP_HELP: Record<WorkflowStep, string> = {
   scene: "先选择项目，再打开已有场景或从模板创建画面。",
   preview: "设置画面规格，调整参数或代码，即时查看草稿效果。",
@@ -78,6 +85,7 @@ function jobLabel(job: Job) {
       sequence: "图像序列",
       delivery: "交付渲染",
       probe: "能力检查",
+      motion: "浏览器动画",
     }[job.kind] || "渲染任务"
   );
 }
@@ -98,12 +106,13 @@ function errorText(error: unknown) {
 
 export default function App() {
   const [tab, setTab] = useState("workspace");
+  const [motionVisited, setMotionVisited] = useState(false);
   // Steps are views over the same drafts, not destructive wizard transitions.
   const [step, setStep] = useState<WorkflowStep>("scene");
   const stepHeading = useRef<HTMLHeadingElement>(null);
   const previousStep = useRef(step);
   useEffect(() => {
-    document.title = `${tab === "mcp" ? "MCP 接口" : WORKFLOW.find((item) => item.id === step)?.label} · ChromaScript`;
+    document.title = `${tab === "mcp" ? "MCP 接口" : tab === "motion" ? "动画代码" : WORKFLOW.find((item) => item.id === step)?.label} · ChromaScript`;
     if (tab === "workspace" && previousStep.current !== step) {
       stepHeading.current?.focus();
       previousStep.current = step;
@@ -127,6 +136,7 @@ export default function App() {
     null,
   );
   const [deliveryDirectoryError, setDeliveryDirectoryError] = useState("");
+  const [directoryPicking, setDirectoryPicking] = useState(false);
   const destination =
     deliveryDirectory ?? caps?.delivery_export?.default_directory ?? "";
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -902,13 +912,17 @@ export default function App() {
         <nav aria-label="主要导航">
           {[
             ["workspace", "工作区"],
+            ["motion", "动画代码"],
             ["mcp", "MCP 接口"],
           ].map(([id, label]) => (
             <Button
               key={id}
               className={tab === id ? "nav-active" : "nav-button"}
               aria-current={tab === id ? "page" : undefined}
-              onClick={() => setTab(id)}
+              onClick={() => {
+                setTab(id);
+                if (id === "motion") setMotionVisited(true);
+              }}
             >
               {label}
             </Button>
@@ -918,9 +932,11 @@ export default function App() {
           <span className={"connection-dot " + (offline ? "offline" : "")} />
           {offline
             ? "服务未连接"
-            : caps
-              ? caps.gpu.backend_type + " · " + caps.gpu.device
-              : "连接本地服务…"}
+            : tab === "motion"
+              ? "Remotion · Three.js · 本地渲染"
+              : caps
+                ? caps.gpu.backend_type + " · " + caps.gpu.device
+                : "连接本地服务…"}
         </div>
       </header>
       <Notice text={error} error onClose={() => setError("")} />
@@ -1812,6 +1828,7 @@ export default function App() {
                   </section>
                   <div className="delivery-panel">
                     <DeliveryDestination
+                      onPickingChange={setDirectoryPicking}
                       options={caps?.delivery_export}
                       value={destination}
                       error={deliveryDirectoryError}
@@ -1872,6 +1889,7 @@ export default function App() {
                       className="primary"
                       disabled={
                         dirty ||
+                        directoryPicking ||
                         !!pending ||
                         !delivery.ready ||
                         !!settingsError ||
@@ -2065,6 +2083,12 @@ export default function App() {
                         >
                           <Copy size={14} />
                         </Button>
+                        {activeJob.export_completed &&
+                          activeJob.status === "completed" && (
+                            <OpenExportFolder
+                              directory={activeJob.export_path}
+                            />
+                          )}
                       </div>
                     )}
                     {!artifacts.length && (
@@ -2146,6 +2170,7 @@ export default function App() {
                         >
                           <Copy size={14} />
                         </Button>
+                        <OpenExportFolder directory={exportedPath} />
                       </div>
                     )}
 
@@ -2170,6 +2195,25 @@ export default function App() {
             )}
           </section>
         </main>
+      )}
+      {motionVisited && (
+        <Suspense
+          fallback={
+            tab === "motion" ? (
+              <main className="workbench">
+                <p role="status">正在打开动画代码…</p>
+              </main>
+            ) : null
+          }
+        >
+          <MotionWorkbench
+            active={tab === "motion"}
+            onWorkspace={() => {
+              setStep("scene");
+              setTab("workspace");
+            }}
+          />
+        </Suspense>
       )}
       {tab === "mcp" && (
         <main className="page-content">
@@ -2251,10 +2295,18 @@ export default function App() {
         </main>
       )}
       <footer className="app-footer">
-        <span>{activeProject?.name || "本地工作区"}</span>
         <span>
-          ACES 2.0 · {caps?.color.sha256.slice(0, 12) || "配置加载中"} · v
-          {caps?.version || "0.1.0"}
+          {tab === "motion"
+            ? "动画代码工作区"
+            : activeProject?.name || "本地工作区"}
+        </span>
+        <span>
+          {tab === "motion" ? (
+            "浏览器渲染 · sRGB 8-bit"
+          ) : (
+            <>ACES 2.0 · {caps?.color.sha256.slice(0, 12) || "配置加载中"}</>
+          )}{" "}
+          · v{caps?.version || "0.1.0"}
         </span>
       </footer>
       <Modal
@@ -2349,7 +2401,10 @@ export default function App() {
             label="导出目录"
             id="export-destination"
             invalid={!!exportError}
-            hint={exportError || "支持工作区及启动服务时配置的导出目录。"}
+            hint={
+              exportError ||
+              "选择父文件夹，或输入尚不存在的目标目录；已有文件不会被覆盖。"
+            }
           >
             <input
               id="export-destination"
@@ -2363,8 +2418,26 @@ export default function App() {
             />
           </Field>
           <div className="modal-actions">
+            <FolderPickerButton
+              initialDirectory={caps?.delivery_export?.default_directory || ""}
+              available={caps?.delivery_export?.directory_picker === true}
+              disabled={!!pending}
+              onPickingChange={setDirectoryPicking}
+              onSelected={(directory) => {
+                if (exportArtifact) {
+                  setExportDestination(
+                    `${directory.replace(/\/$/, "")}/${exportArtifact.name}`,
+                  );
+                  setExportError("");
+                }
+              }}
+            />
             <Button onClick={() => setExportArtifact(null)}>取消</Button>
-            <Button type="submit" className="primary" disabled={!!pending}>
+            <Button
+              type="submit"
+              className="primary"
+              disabled={!!pending || directoryPicking}
+            >
               复制序列
             </Button>
           </div>

@@ -421,7 +421,8 @@ class Job(Model):
     project_id: str
     scene_id: str
     revision_id: str
-    kind: Literal["frame", "preview", "sequence", "delivery", "probe"]
+    # Browser animations use a distinct job kind and never enter the float master cache.
+    kind: Literal["frame", "preview", "sequence", "delivery", "probe", "motion"]
     status: Literal["queued", "running", "completed", "failed", "cancelled", "interrupted"]
     stage: str = "queued"
     progress: float = 0

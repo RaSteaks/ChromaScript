@@ -2010,6 +2010,197 @@ input[type="search"]::-webkit-search-cancel-button {
   display: none;
 }
 
+/* Browser animation authoring keeps code on the left and the picture on the
+   right. Only the code surface scrolls internally; forms use document scrolling. */
+.motion-workbench[hidden] {
+  display: none;
+}
+.motion-library {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr) auto;
+  gap: var(--space-md);
+  align-items: end;
+  margin-bottom: var(--space-lg);
+}
+.motion-library .field {
+  margin-bottom: 0;
+  min-width: 0;
+}
+.motion-template-actions,
+.motion-save-actions,
+.motion-playback,
+.motion-export-actions,
+.motion-artifact-actions,
+.motion-job-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+.motion-studio {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: var(--space-lg);
+  align-items: start;
+}
+.motion-source-panel,
+.motion-preview-panel,
+.motion-settings,
+.motion-export,
+.motion-results {
+  min-width: 0;
+  padding: var(--space-lg);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+.motion-source-panel .section-heading,
+.motion-preview-panel .section-heading,
+.motion-settings .section-heading,
+.motion-results .section-heading {
+  margin-bottom: var(--space-md);
+}
+.motion-code-editor {
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.motion-code-editor .cm-content {
+  line-height: 1.6;
+}
+.motion-code-editor .cm-scroller:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+.motion-source-panel .technical-note {
+  margin: var(--space-md) 0;
+  overflow-wrap: anywhere;
+}
+.motion-preview-column {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-lg);
+}
+.motion-preview-surface {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  min-height: 160px;
+  max-height: 440px;
+  overflow: hidden;
+  background: var(--color-previewBackground);
+  border-radius: var(--radius);
+}
+.motion-preview-surface .empty-state {
+  position: absolute;
+  inset: 0;
+  padding: var(--space-lg);
+  z-index: 2;
+  background: var(--color-previewBackground);
+}
+.motion-frame {
+  display: block;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  z-index: 1;
+  background: var(--color-previewBackground);
+}
+.motion-frame.candidate {
+  /* Paint candidates behind the last picture; opacity/visibility suppression
+     can leave Chromium's iframe compositor using a stale viewport size. */
+  z-index: 0;
+  pointer-events: none;
+}
+.motion-preview-status {
+  min-height: 48px;
+  padding: var(--space-sm) 0;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+.motion-playback .mono {
+  flex: 1;
+  text-align: right;
+}
+.motion-preview-panel .technical-note {
+  margin-top: var(--space-md);
+}
+.motion-spec-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-md);
+}
+.motion-spec-fields .field {
+  min-width: 0;
+  margin-bottom: 0;
+}
+.motion-export,
+.motion-results {
+  margin-top: var(--space-lg);
+}
+.motion-export-actions {
+  margin-top: var(--space-md);
+}
+.motion-export-actions > span {
+  font-size: 12px;
+  color: var(--color-muted);
+}
+.motion-results progress {
+  width: 100%;
+  height: 8px;
+  accent-color: var(--color-primary);
+  margin: var(--space-md) 0;
+}
+.motion-job-status > .mono {
+  flex: 1;
+  text-align: right;
+}
+.motion-artifact-actions .button {
+  display: inline-flex;
+}
+.motion-path {
+  overflow-wrap: anywhere;
+  margin-top: var(--space-md);
+}
+@media (max-width: 1100px) {
+  .motion-library {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .motion-template-actions {
+    grid-column: 1 / -1;
+  }
+}
+@media (max-width: 900px) {
+  .motion-studio {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .motion-source-panel,
+  .motion-preview-panel,
+  .motion-settings,
+  .motion-export,
+  .motion-results {
+    padding: var(--space-md);
+  }
+  .motion-code-editor .cm-editor {
+    max-height: 420px;
+  }
+}
+@media (max-width: 560px) {
+  .motion-library {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .motion-job-status > .mono {
+    flex-basis: 100%;
+    text-align: left;
+  }
+  .motion-playback {
+    gap: var(--space-xs);
+  }
+}
+
 /* Export paths wrap as content; filesystem names must not widen the workbench. */
 .export-result {
   display: flex;
@@ -2025,6 +2216,20 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 .export-result code {
   font-family: var(--font-mono);
+}
+/* Both renderers and sequence exports share the same native folder controls. */
+.destination-actions,
+.export-folder-action {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+.export-folder-action > .notice {
+  flex-basis: 100%;
+}
+.export-result {
+  flex-wrap: wrap;
 }
 
 /* Linked delivery fields use the existing inspector tokens and natural document scroll. */
@@ -2097,32 +2302,6 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 .delivery-destination input {
   font-family: var(--font-mono);
-}
-.export-roots {
-  color: var(--color-muted);
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-.export-roots summary {
-  cursor: pointer;
-}
-.export-roots summary:hover {
-  color: var(--color-text);
-}
-.export-roots summary:focus-visible {
-  outline: 2px solid var(--color-focus);
-  outline-offset: 2px;
-}
-.export-roots ul {
-  padding-left: 0;
-  list-style: none;
-}
-.export-roots .button {
-  max-width: 100%;
-  white-space: normal;
-  text-align: left;
-  overflow-wrap: anywhere;
-  margin-bottom: var(--space-xs);
 }
 .delivery-editor .technical-note {
   margin-bottom: 0;

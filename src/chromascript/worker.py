@@ -36,6 +36,12 @@ def atomic_json(path: Path, value: Any) -> None:
 def run(root: Path, job_id: str) -> None:
     store = Store(root)
     job = store.get("job", job_id)
+    if job["kind"] == "motion":
+        # Display-referred browser frames must bypass WGSL validation and ACES processing.
+        from .motion_worker import run_motion
+
+        run_motion(root, job_id)
+        return
     snapshot = store.get("snapshot", job_id)
     start = time.monotonic()
     process = psutil.Process()

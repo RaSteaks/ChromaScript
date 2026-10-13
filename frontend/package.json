@@ -12,9 +12,22 @@
     "test:a11y": "playwright test -g accessibility"
   },
   "dependencies": {
+    "@codemirror/lang-javascript": "6.2.5",
+    "@codemirror/language": "6.13.1",
+    "@codemirror/view": "6.43.14",
+    "@lezer/highlight": "1.2.5",
+    "@react-three/fiber": "9.8.1",
+    "@remotion/bundler": "4.0.535",
+    "@remotion/player": "4.0.535",
+    "@remotion/renderer": "4.0.535",
+    "@remotion/three": "4.0.535",
+    "@uiw/react-codemirror": "4.25.12",
+    "esbuild": "0.28.2",
     "lucide-react": "^0.577.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "remotion": "4.0.535",
+    "three": "0.186.1"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.11.0",

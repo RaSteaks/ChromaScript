@@ -16,19 +16,13 @@ from .images import file_hash
 MANIFEST = "delivery.json"
 
 
-def export_directory(value: str, roots: list[Path]) -> Path:
-    """Resolve the destination against the same allowlist as artifact exports."""
+def export_directory(value: str) -> Path:
+    """Accept any user-selected absolute destination writable by the local process."""
     try:
         path = Path(value).expanduser()
         if not value.strip() or "\x00" in value or not path.is_absolute():
             raise ValueError("请输入绝对目录路径，例如 /Users/name/Movies。")
         path = path.resolve()
-        if not any(path.is_relative_to(root) for root in roots):
-            raise ChromaError(
-                "export_root",
-                "导出位置必须位于允许的目录内；其他目录请先通过 --export-root 配置后重启服务。",
-                allowed_roots=[str(root) for root in roots],
-            )
         parent = path
         while not parent.exists():
             parent = parent.parent
@@ -90,9 +84,11 @@ def publish_bundle(
     check_cancelled: Callable[[], None],
 ) -> Path:
     """Stage on the destination volume; expose the bundle only after all copies finish."""
-    parent = export_directory(str(target.parent), [root])
-    if parent != target.parent:
-        raise ChromaError("export_root", "导出路径发生变化，请检查目录后重新提交。")
+    parent = export_directory(str(target.parent))
+    # This is the job's frozen destination boundary, not a startup allowlist.
+    # Keep legacy broader boundaries valid while rejecting moved/symlinked paths.
+    if parent != target.parent or not parent.is_relative_to(root):
+        raise ChromaError("export_directory_changed", "导出路径发生变化，请检查目录后重新提交。")
     if _existing_bundle(target, identity):
         return target
     staging: Path | None = None

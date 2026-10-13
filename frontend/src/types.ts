@@ -175,7 +175,7 @@ export type DeliveryOptions = {
 };
 export type Job = {
   // Display the server's actual job purpose instead of an opaque identifier alone.
-  kind: "frame" | "preview" | "sequence" | "delivery" | "probe";
+  kind: "frame" | "preview" | "sequence" | "delivery" | "probe" | "motion";
   id: string;
   scene_id: string;
   project_id: string;
@@ -212,11 +212,39 @@ export type Capability = {
   color: { id: string; sha256: string };
   resolutions: Record<string, [number, number]>;
   frame_rates: { numerator: number; denominator: number }[];
-  delivery_export?: { default_directory: string; allowed_roots: string[] };
+  delivery_export?: {
+    default_directory: string;
+    // Legacy discovery key remains readable; native selection requires no roots.
+    allowed_roots: string[];
+    unrestricted?: boolean;
+    directory_picker?: boolean;
+  };
 };
 export type Template = { id: string; name: string; description: string };
 export type Operation = {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+};
+// Browser animation specifications are separate from scene-linear WGSL sources.
+export type MotionSpec = {
+  schema_version?: number;
+  name: string;
+  code: string;
+  width: number;
+  height: number;
+  frames: number;
+  fps: { numerator: number; denominator: number };
+};
+export type MotionReply = {
+  record: SceneRecord;
+  scene: MotionSpec;
+  revision_id: string;
+};
+export type MotionCapabilities = {
+  preview_available: boolean;
+  render_available: boolean;
+  browser: string | null;
+  imports: string[];
+  packages: Record<string, string | null>;
 };

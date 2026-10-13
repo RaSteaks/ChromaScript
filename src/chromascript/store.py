@@ -121,12 +121,16 @@ class Store:
             )
         return path
 
-    def revise_scene(self, scene_id: str, expected: str, revision: dict[str, Any]) -> None:
+    def revise_scene(
+        self, scene_id: str, expected: str, revision: dict[str, Any], *, motion: bool = False
+    ) -> None:
         """Commit history and current pointer together; rejected edits leave no phantom revision."""
+        # React source has its own namespace; it must never be read as WGSL/ACEScg.
+        kind, history = ("motion_scene", "motion_revision") if motion else ("scene", "revision")
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT data FROM records WHERE kind='scene' AND id=?", (scene_id,)
+                "SELECT data FROM records WHERE kind=? AND id=?", (kind, scene_id)
             ).fetchone()
             if not row:
                 raise ChromaError("not_found", "Scene does not exist")
@@ -138,12 +142,12 @@ class Store:
                     current_revision_id=scene["revision_id"],
                 )
             connection.execute(
-                "INSERT INTO records VALUES ('revision',?,?)", (revision["id"], canonical(revision))
+                "INSERT INTO records VALUES (?,?,?)", (history, revision["id"], canonical(revision))
             )
             scene.update(
                 revision_id=revision["id"], name=revision["scene"]["name"], updated_at=now()
             )
             connection.execute(
-                "UPDATE records SET data=? WHERE kind='scene' AND id=?",
-                (canonical(scene), scene_id),
+                "UPDATE records SET data=? WHERE kind=? AND id=?",
+                (canonical(scene), kind, scene_id),
             )

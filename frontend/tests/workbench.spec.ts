@@ -402,15 +402,17 @@ test("image sequence export preserves destination on errors and copies all frame
   await destination.fill("");
   await dialog.getByRole("button", { name: "复制序列", exact: true }).click();
   await expect(dialog.getByText("请输入导出目录。")).toBeVisible();
-  await destination.fill("/outside-not-allowed");
+  await destination.fill("relative/export");
   await dialog.getByRole("button", { name: "复制序列", exact: true }).click();
   await expect(dialog.getByRole("alert")).toBeVisible();
-  await expect(destination).toHaveValue("/outside-not-allowed");
+  await expect(destination).toHaveValue("relative/export");
   await destination.fill(original);
   await dialog.getByRole("button", { name: "复制序列", exact: true }).click();
   await expect(dialog).not.toBeVisible();
   // A delivery also exposes its automatic bundle beside a separate sequence export.
-  await expect(page.locator(".export-result").filter({ hasText: original })).toBeVisible();
+  await expect(
+    page.locator(".export-result").filter({ hasText: original }),
+  ).toBeVisible();
   // Native filesystem evidence confirms the visible action exported the entire sequence.
   const { readdirSync } = await import("node:fs");
   expect(readdirSync(original).sort()).toEqual([

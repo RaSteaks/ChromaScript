@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, get_type_hints
 
@@ -21,12 +22,13 @@ class Operation:
     name: str
     description: str
     input_model: type[BaseModel]
+    serialized: bool = True
 
 
 REGISTRY: dict[str, Operation] = {}
 
 
-def operation(description: str) -> Callable[..., Any]:
+def operation(description: str, *, serialized: bool = True) -> Callable[..., Any]:
     def decorate(function: Callable[..., Any]) -> Callable[..., Any]:
         hints = get_type_hints(function)
         # Reflection is the dynamic boundary; Pydantic validates the derived contracts.
@@ -38,7 +40,7 @@ def operation(description: str) -> Callable[..., Any]:
         model = create_model(
             function.__name__.title().replace("_", "") + "Input", __base__=Input, **fields
         )
-        REGISTRY[function.__name__] = Operation(function.__name__, description, model)
+        REGISTRY[function.__name__] = Operation(function.__name__, description, model, serialized)
         return function
 
     return decorate
@@ -58,7 +60,9 @@ def execute(service: Any, name: str, arguments: dict[str, Any]) -> dict[str, Any
         ) from exc
     # Serialize product transitions across HTTP, CLI and model clients. Workers
     # still update their own job records through independent SQLite transactions.
-    with service.operation_lock:
+    # Read-only native dialogs may wait for user input; they must not freeze job
+    # polling, saving or other clients while ordinary product transitions serialize.
+    with service.operation_lock if op.serialized else nullcontext():
         return getattr(service, op.name)(
             **{key: getattr(request, key) for key in op.input_model.model_fields}
         )

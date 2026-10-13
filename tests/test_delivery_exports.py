@@ -17,14 +17,14 @@ from chromascript.service import Service
 from chromascript.worker import run
 
 
-def test_directory_discovery_validation_and_symlink_boundary(tmp_path):
+def test_directory_discovery_accepts_unregistered_writable_folders(tmp_path):
     root = tmp_path / "workspace"
     external = tmp_path / "external"
     external.mkdir()
-    service = Service(root, [external])
+    service = Service(root)
     options = service.get_delivery_export_options()
     assert options["directory"] == str(root / "exports")
-    assert options["allowed_roots"] == [str(root), str(external)]
+    assert options["allowed_roots"] == [] and options["unrestricted"]
     assert not (root / "exports").exists()
     assert service.get_delivery_export_options(str(external / "新目录"))["directory"] == str(
         external / "新目录"
@@ -34,11 +34,14 @@ def test_directory_discovery_validation_and_symlink_boundary(tmp_path):
     outside.mkdir()
     (root / "escape").symlink_to(outside, target_is_directory=True)
     (root / "file").write_text("do not replace")
+    assert service.get_delivery_export_options(str(outside))["directory"] == str(outside)
+    assert service.get_delivery_export_options(str(root / "escape" / "video"))["directory"] == str(
+        outside / "video"
+    )
     for value in [
         "",
         "relative/path",
-        str(outside),
-        str(root / "escape" / "video"),
+        "bad\x00path",
         str(root / "file" / "video"),
     ]:
         with pytest.raises(ChromaError):
@@ -59,7 +62,7 @@ def test_destination_is_frozen_idempotent_and_shared_with_cli(tmp_path, monkeypa
         "settings": {"width": 32, "height": 32, "frames": 1},
         "configurations": [config],
         "idempotency_key": "export-once",
-        "export_directory": str(service.store.root / "交付"),
+        "export_directory": str(tmp_path / "选择的外部文件夹"),
     }
     first = execute(service, "submit_configured_delivery", args)["job"]
     again = execute(service, "submit_configured_delivery", args)["job"]
@@ -68,6 +71,7 @@ def test_destination_is_frozen_idempotent_and_shared_with_cli(tmp_path, monkeypa
     assert not Path(first["export_path"]).exists() and not first["export_completed"]
     snapshot = service.store.get("snapshot", first["id"])
     assert snapshot["export_directory"] == args["export_directory"]
+    assert snapshot["export_root"] == args["export_directory"]
     with pytest.raises(ChromaError, match="different render settings"):
         execute(
             service,
@@ -150,11 +154,11 @@ def test_publication_rechecks_changed_directory(tmp_path):
     root = tmp_path / "allowed"
     root.mkdir()
     parent = root / "destination"
-    assert export_directory(str(parent), [root]) == parent
+    assert export_directory(str(parent)) == parent
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     parent.symlink_to(elsewhere, target_is_directory=True)
-    with pytest.raises(ChromaError, match="允许"):
+    with pytest.raises(ChromaError, match="路径发生变化"):
         publish_bundle({}, parent / "bundle", root, {"job_id": "job"}, lambda: None)
     assert not list(elsewhere.iterdir())
 
@@ -164,7 +168,7 @@ def test_publication_rechecks_changed_directory(tmp_path):
 def test_worker_exports_frozen_code_thumbnail_video_and_sequence(tmp_path, monkeypatch):
     external = tmp_path / "外部交付"
     external.mkdir()
-    service = Service(tmp_path / "workspace", [external])
+    service = Service(tmp_path / "workspace")
     project = service.create_project("bundle")["project"]
     scene = service.create_scene(project["id"], template_id="gradient")
     job = service.submit_delivery(
@@ -181,6 +185,7 @@ def test_worker_exports_frozen_code_thumbnail_video_and_sequence(tmp_path, monke
         spec.model_copy(update={"code": spec.code + "\n// New draft"}),
         scene["revision_id"],
     )
+
     # An export failure must not discard verified workspace outputs or claim success.
     def unavailable(*args, **kwargs):
         raise ChromaError("export_failed", "temporary destination failure")

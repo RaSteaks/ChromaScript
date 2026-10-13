@@ -1,6 +1,26 @@
 """Model-facing guidance ships with the tool, independent of any chat transcript."""
 
 DOCUMENTS = {
+    # The browser branch has a distinct source-precision/color contract on all transports.
+    "motion": (
+        "Discover get_motion_capabilities and list_motion_templates for offline Remotion/Three.js. "
+        "create_motion_scene creates a MotionSpec: name, default-exported React TSX component, "
+        "even width/height (16..4096), frames (1..36000) and rational fps. Animate declaratively "
+        "with useCurrentFrame()/useVideoConfig() and ThreeCanvas, not useFrame/delta or wall time. "
+        "Allowed imports: react, react/jsx-runtime, remotion, @remotion/three, @react-three/fiber, "
+        "three. No file/network imports or remote assets. compile_motion_preview accepts an unsaved "
+        "spec and returns HTML/channel without revisions/jobs. Embed only in an allow-scripts "
+        "iframe WITHOUT allow-same-origin. get_motion_scene reads current/historical source; "
+        "update_motion_scene requires expected_revision_id. submit_motion_render requires saved "
+        "scene_id, expected_revision_id, idempotency_key and optional writable export_directory. "
+        "Poll get_job/list_jobs(kind=motion); cancel_job/resume_job are explicit. Retry rerenders "
+        "frozen browser frames and refuses runtime drift. Chrome/Chromium, Node and FFmpeg must "
+        "already be installed; no runtime browser download. Output: H.264 MP4, yuv420p, 8-bit "
+        "browser sRGB, no audio, exact rational file fps, actual decoded-property verification. "
+        "Composite transparency on black in linear sRGB. No ACES view or float/scene-linear master. "
+        "Bundles include Animation.tsx, animation.json, snapshot, thumbnail, video and report. "
+        "WGSL/ACEScg remains an independent capability."
+    ),
     # Code and picker contracts apply identically to browser, MCP and CLI clients.
     "workflow": "Discover capabilities and templates. Create a project and scene. Read the revision before editing. Compile WGSL, render keyframes and a low-resolution motion preview. Poll get_job, then get_artifact(include_image=true) for native images. Inspect original EXR values with sample_pixels/inspect_frame. Change parameters using expected_revision_id. Call get_delivery_options with configuration and changed_field to resolve linked format choices. Validate the complete configuration with validate_delivery_configuration and submit_configured_delivery with configurations and an idempotency key, inspect reports and actual streams. Resume interrupted jobs using their frozen snapshots. Rendering is offline; never invent a verified combination.",
     "scene": "Define fn shade(ctx: SceneContext) -> vec4<f32>. Return finite straight-alpha ACEScg linear RGBA with alpha in 0..1; RGB may be negative or above 1. ctx.pixel is global top-left pixel coordinates; ctx.uv is bottom-left normalized coordinates; ctx.resolution is the full canvas; ctx.time is frame_index*fps.denominator/fps.numerator; ctx.frame and ctx.seed are u32. Access named parameters as ctx.params.NAME (number:f32, color:vec3<f32>, boolean:bool). Color parameters are converted from their declared storage encoding to linear ACEScg before shader execution; literal RGB values are also interpreted as linear ACEScg. There is no selectable scene input space. Do not bake sRGB/Rec.709 encoding or an ACES output transform into shade(). Declare no bindings or entry points. Use only supplied time/seed; no previous-frame state. Sampling accumulates premultiplied radiance and coverage, then unassociates. Get templates for compilable examples.",
@@ -80,9 +100,14 @@ DOCUMENTS["color"] += (
 DOCUMENTS["delivery"] += (
     " New deliveries automatically publish a folder beneath export_directory (an optional "
     "absolute parent path, default workspace/exports). get_delivery_export_options returns "
-    "the default and allowed_roots and validates a supplied directory without writing. "
+    "the default, unrestricted=true and directory_picker capability; it validates a supplied "
+    "writable absolute directory without creating it. No startup directory allowlist is required. "
     "submit_configured_delivery and submit_delivery both accept export_directory; CLI render "
-    "exposes --export-directory. Configured --export-root permissions still apply. Each folder "
+    "exposes --export-directory. choose_export_directory opens the native macOS folder dialog "
+    "with optional initial_directory and returns directory or cancelled=true without changing "
+    "drafts or storing grants. The dialog does not block other operations. open_export_directory "
+    "takes an existing directory and opens the local file manager. Show the open-folder action "
+    "after successful export_completed. Legacy --export-root is accepted but not needed. Each folder "
     "is named from the scene and job ID and contains frozen shader.wgsl, reimportable scene.json, "
     "scene-snapshot.json, a first-frame sRGB thumbnail.png, every selected video/image sequence, "
     "verification.json and delivery.json with file hashes. Job.export_path names the folder; "

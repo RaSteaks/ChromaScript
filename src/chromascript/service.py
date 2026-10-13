@@ -20,6 +20,7 @@ from pydantic import ValidationError
 
 from .appearance import ColorAppearanceRequest, resolve_color
 from .color import color_info, transform
+from .desktop import choose_directory, directory_picker_available, open_directory
 from .encoding import available_encoders, pixel_format_info, probe
 from .environment import runtime_identity
 from .errors import ChromaError
@@ -38,6 +39,7 @@ from .models import (
     RenderSettings,
     SceneSpec,
 )
+from .motion import MotionOperations, motion_identity
 from .operations import catalogue, operation
 from .presets import FRAME_RATES, RESOLUTIONS, builtins
 from .preview import LivePreviewRequest, preview_image
@@ -45,7 +47,7 @@ from .store import Store, canonical, identifier, now
 from .templates import TEMPLATES, template_list
 
 
-class Service:
+class Service(MotionOperations):
     def __init__(self, root: Path, export_roots: list[Path] | None = None):
         self.operation_lock = threading.RLock()
         self.store = Store(root)
@@ -101,7 +103,9 @@ class Service:
             # Discovery must stay available even when a previous export path is now unwritable.
             "delivery_export": {
                 "default_directory": str(self.store.root / "exports"),
-                "allowed_roots": [str(p) for p in self.export_roots],
+                "allowed_roots": [],  # Retained for older clients; no startup restriction applies.
+                "unrestricted": True,
+                "directory_picker": directory_picker_available(),
             },
             "gpu": self.renderer.info,
             "encoders": sorted(available_encoders()),
@@ -157,7 +161,7 @@ class Service:
             "note": "压缩体积和速度取决于画面；视频编码另需磁盘空间。",
         }
 
-    @operation("Read scene, color, delivery, or model workflow documentation.")
+    @operation("Read scene, animation, color, delivery, or model workflow documentation.")
     def get_documentation(self, topic: str = "workflow") -> dict[str, Any]:
         from .documentation import DOCUMENTS
 
@@ -597,14 +601,10 @@ class Service:
         }
         destination = None
         if kind == "delivery":
-            # Freeze the resolved parent and its permitted root in the same identity
+            # Freeze the user-selected parent in the same identity
             # as the scene/outputs. Changing a destination requires a new request key.
             destination = self.get_delivery_export_options(export_directory)["directory"]
-            root = max(
-                (p for p in self.export_roots if Path(destination).is_relative_to(p)),
-                key=lambda p: len(p.parts),
-            )
-            snapshot.update(export_directory=destination, export_root=str(root))
+            snapshot.update(export_directory=destination, export_root=destination)
         digest = hashlib.sha256(canonical(snapshot).encode()).hexdigest()
         stamp = now()
         job = Job(
@@ -735,18 +735,29 @@ class Service:
         )
 
     @operation(
-        "Read allowed export locations and validate a delivery parent directory without writing."
+        "Read native folder-selection capabilities and validate any writable export directory without writing."
     )
     def get_delivery_export_options(self, export_directory: str | None = None) -> dict[str, Any]:
         default = str(self.store.root / "exports")
         directory = resolve_export_directory(
-            default if export_directory is None else export_directory, self.export_roots
+            default if export_directory is None else export_directory
         )
         return {
             "directory": str(directory),
             "default_directory": default,
-            "allowed_roots": [str(p) for p in self.export_roots],
+            "allowed_roots": [],
+            "unrestricted": True,
+            "directory_picker": directory_picker_available(),
         }
+
+    @operation("Choose an export directory in the native system dialog; cancellation preserves the draft.", serialized=False)
+    def choose_export_directory(self, initial_directory: str | None = None) -> dict[str, Any]:
+        initial = Path(initial_directory) if initial_directory else self.store.root / "exports"
+        return choose_directory(initial)
+
+    @operation("Open an existing export directory in the local file manager.", serialized=False)
+    def open_export_directory(self, directory: str) -> dict[str, Any]:
+        return open_directory(directory)
 
     @operation("Query linked delivery dropdown options from the installed codec capabilities.")
     def get_delivery_options(
@@ -808,13 +819,20 @@ class Service:
 
     @operation("List jobs and stages with pagination.")
     def list_jobs(
-        self, project_id: str | None = None, limit: int = 50, offset: int = 0
+        self,
+        project_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        kind: Literal["frame", "preview", "sequence", "delivery", "probe", "motion"] | None = None,
     ) -> dict[str, Any]:
+        # Filter before pagination so a browser-animation queue cannot be hidden
+        # behind an unrelated page of native-rendering jobs.
         return self.page(
             [
                 j
                 for j in self.store.list("job")
-                if project_id is None or j["project_id"] == project_id
+                if (project_id is None or j["project_id"] == project_id)
+                and (kind is None or j["kind"] == kind)
             ],
             limit,
             offset,
@@ -869,11 +887,16 @@ class Service:
         snapshot = self.store.get("snapshot", job_id)
         if hashlib.sha256(canonical(snapshot).encode()).hexdigest() != job["snapshot_hash"]:
             raise ChromaError("snapshot_corrupt", "Frozen configuration checksum mismatch")
-        if snapshot.get("runtime") != runtime_identity():
+        # Browser jobs freeze their own JS/browser identity and have no OCIO master cache.
+        identity = motion_identity() if job["kind"] == "motion" else runtime_identity()
+        if snapshot.get("runtime") != identity:
             raise ChromaError(
                 "runtime_changed", "Renderer or dependencies changed; submit a new job"
             )
-        if color_info()["sha256"] != snapshot["color_configuration"]["sha256"]:
+        if (
+            job["kind"] != "motion"
+            and color_info()["sha256"] != snapshot["color_configuration"]["sha256"]
+        ):
             raise ChromaError("config_changed", "Installed color configuration changed")
         self.store.update(
             "job",
@@ -945,18 +968,29 @@ class Service:
             result["text"] = path.read_text()
         return result
 
-    @operation("Copy a managed artifact to a configured export root without overwriting files.")
+    @operation("Copy a managed artifact to any writable destination without overwriting files.")
     def export_artifact(self, artifact_id: str, destination: str) -> dict[str, Any]:
         a = self.store.get("artifact", artifact_id)
         source = self.store.file(a["relative_path"])
-        target = Path(destination).expanduser().resolve()
-        if not any(target.is_relative_to(root) and target != root for root in self.export_roots):
-            raise ChromaError("export_root", "Destination must be inside a configured export root")
+        raw_target = Path(destination).expanduser()
+        if not raw_target.is_absolute() or "\x00" in destination:
+            raise ChromaError("export_directory", "请输入导出目标的绝对路径。")
+        target = resolve_export_directory(str(raw_target.parent)) / raw_target.name
         if target.exists():
             raise ChromaError("file_exists", "Choose a new destination")
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source, target) if source.is_dir() else shutil.copy2(source, target)
-        return {"destination": str(target), "artifact_id": artifact_id}
+        try:
+            if source.is_dir():
+                shutil.copytree(source, target)
+            else:
+                # Exclusive creation keeps a concurrently created file intact too.
+                with source.open("rb") as src, target.open("xb") as dst:
+                    shutil.copyfileobj(src, dst)
+        except FileExistsError as exc:
+            raise ChromaError("file_exists", "Choose a new destination") from exc
+        except OSError as exc:
+            raise ChromaError("export_failed", "导出写入失败，请检查磁盘空间和目录权限。") from exc
+        return {"destination": str(target), "directory": str(target if source.is_dir() else target.parent), "artifact_id": artifact_id}
 
     @operation("Inspect original image range, storage depth, negative/high values, and alpha.")
     def inspect_frame(self, artifact_id: str) -> dict[str, Any]:

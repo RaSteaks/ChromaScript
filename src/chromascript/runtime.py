@@ -70,7 +70,9 @@ def call(
         info["url"] + "/api/operations/" + name.removeprefix("chromascript."),
         json=arguments,
         headers={"Authorization": "Bearer " + info["token"]},
-        timeout=60,
+        # Native selection is user-paced and writes nothing. Allow the same
+        # dialog lifetime on CLI/MCP as on the browser transport.
+        timeout=330 if name.removeprefix("chromascript.") == "choose_export_directory" else 60,
     )
     data = response.json()
     if not response.is_success:
