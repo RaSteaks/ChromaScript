@@ -460,8 +460,7 @@ export function MotionWorkbench({
   return (
     <main hidden={!active} className="workbench motion-workbench">
       <div className="workbench-context">
-        <div>
-          <span className="tiny-label">REMOTION + THREE.JS</span>
+        <div className="context-title">
           <h1 ref={heading} tabIndex={-1}>
             动画代码
           </h1>
@@ -474,7 +473,7 @@ export function MotionWorkbench({
             ? "未保存"
             : saved
               ? "已保存 · " + saved.revision_id.slice(0, 8)
-              : "选择或创建动画"}
+              : ""}
         </span>
       </div>
       <Notice text={error} error />
@@ -551,6 +550,7 @@ export function MotionWorkbench({
           {templates.map((template) => (
             <Button
               key={template.id}
+              className="outline"
               disabled={!projectId || !!pending}
               onClick={() =>
                 guard("创建新动画", () => void create(template.id))
@@ -604,6 +604,18 @@ export function MotionWorkbench({
           error
           text="动画依赖尚未安装，请在项目目录运行 ./install.sh 后重新连接。"
         />
+      )}
+      {/* Nothing is open yet: point at the controls above without duplicating them. */}
+      {!draft && projectLoad === "loaded" && projects.length > 0 && (
+        <div className="workflow-empty">
+          <Film size={28} aria-hidden="true" />
+          <h2>打开或新建一个动画</h2>
+          <p>
+            {scenes.length
+              ? "在上方选择已保存的动画，或从文字、三维模板新建。"
+              : "这个项目还没有动画。用上方的按钮从文字或三维模板新建。"}
+          </p>
+        </div>
       )}
       {draft && (
         <>

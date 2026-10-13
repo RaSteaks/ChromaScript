@@ -1,4 +1,3 @@
-import { ChevronRight } from "lucide-react";
 import { Button } from "./components";
 
 export const WORKFLOW = [
@@ -37,7 +36,6 @@ export function WorkflowNav({
                 <strong>{item.label}</strong>
                 <small>{descriptions[index]}</small>
               </span>
-              <ChevronRight size={15} aria-hidden="true" />
             </Button>
           </li>
         ))}

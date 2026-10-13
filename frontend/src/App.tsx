@@ -26,7 +26,6 @@ import {
   Save,
   Settings2,
   Square,
-  Terminal,
   Workflow,
 } from "lucide-react";
 import { artifactUrl, call, connect } from "./api";
@@ -76,6 +75,19 @@ const STEP_HELP: Record<WorkflowStep, string> = {
     "沿用预览中的画面规格，选择一个或多个交付格式。下拉选项会自动联动。",
   jobs: "查看后台任务进度，选择任务后下载文件或导出完整图像序列。",
 };
+/** Scene lists show the contract's Asia/Taipei wall time, never the browser's zone. */
+const SAVED_AT = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Taipei",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+function savedAt(value: string) {
+  const time = new Date(value);
+  return Number.isNaN(time.getTime()) ? "" : SAVED_AT.format(time);
+}
 function jobLabel(job: Job) {
   if (job.kind === "frame")
     return (job.frame_indices?.length || 1) > 1 ? "关键帧预览" : "单帧预览";
@@ -964,9 +976,9 @@ export default function App() {
           <div className="workbench-context">
             <div className="context-title">
               <span className="tiny-label">
-                {activeProject?.name || "本地工作区"} / 场景
+                {activeProject?.name || "本地工作区"} /
               </span>
-              <h1>{draft?.name || "开始你的影像创作"}</h1>
+              <h1>{draft?.name || "尚未选择场景"}</h1>
             </div>
             <div className="context-actions">
               <span className={"save-state " + (dirty ? "unsaved" : "")}>
@@ -974,7 +986,7 @@ export default function App() {
                   ? "未保存"
                   : saved
                     ? "已保存 · " + saved.revision_id.slice(0, 8)
-                    : "尚未选择场景"}
+                    : ""}
               </span>
               {step !== "scene" && (
                 <Button onClick={() => setStep("scene")}>
@@ -1061,6 +1073,8 @@ export default function App() {
                         className={
                           "scene-item " + (sceneId === s.id ? "selected" : "")
                         }
+                        aria-pressed={sceneId === s.id}
+                        title={"最后保存 " + savedAt(s.updated_at)}
                         onClick={() =>
                           guard(() => {
                             setSceneId(s.id);
@@ -1070,7 +1084,9 @@ export default function App() {
                       >
                         <FileImage size={16} />
                         <span>{s.name}</span>
-                        <ChevronRight size={13} />
+                        <small className="mono" aria-hidden="true">
+                          {savedAt(s.updated_at)}
+                        </small>
                       </Button>
                     ))}
                     {!scenes.length && (
@@ -1150,40 +1166,11 @@ export default function App() {
                 <div className="editor-layout">
                   <div className="canvas-column">
                     <div className="preview-commandbar">
-                      <div className="preview-actions">
-                        <Button
-                          className="primary"
-                          disabled={!!pending || dirty || !!settingsError}
-                          onClick={() => void render("frame")}
-                        >
-                          <Play size={14} />
-                          渲染当前帧
-                        </Button>
-                        <Button
-                          disabled={!!pending || dirty || !!settingsError}
-                          onClick={() => void render("keyframes")}
-                        >
-                          预览三帧
-                        </Button>
-                        <Button
-                          disabled={!!pending || dirty || !!settingsError}
-                          onClick={() => void render("preview")}
-                        >
-                          前 2 秒动画
-                        </Button>
-                      </div>
-                      <p
-                        className={
-                          "preview-guidance " + (dirty ? "warning-text" : "")
-                        }
+                      <div
+                        className="segmented"
+                        role="group"
+                        aria-label="预览方式"
                       >
-                        {dirty
-                          ? "修改无需保存即可实时预览；保存后可渲染关键帧与动画。"
-                          : "实时预览使用低分辨率与单次采样，交付按完整规格渲染。"}
-                      </p>
-                    </div>
-                    <div className="preview-toolbar">
-                      <div className="segmented">
                         <Button
                           className={liveEnabled ? "selected" : ""}
                           aria-pressed={liveEnabled}
@@ -1226,6 +1213,47 @@ export default function App() {
                           运动预览
                         </Button>
                       </div>
+                      {/* Stored renders use the saved revision and fill the two views beside live preview. */}
+                      <div
+                        className="preview-actions"
+                        role="group"
+                        aria-label="渲染已保存版本"
+                      >
+                        <span className="tiny-label" aria-hidden="true">
+                          渲染已保存版本
+                        </span>
+                        <Button
+                          className="primary"
+                          disabled={!!pending || dirty || !!settingsError}
+                          onClick={() => void render("frame")}
+                        >
+                          <Play size={14} />
+                          渲染当前帧
+                        </Button>
+                        <Button
+                          disabled={!!pending || dirty || !!settingsError}
+                          onClick={() => void render("keyframes")}
+                        >
+                          预览三帧
+                        </Button>
+                        <Button
+                          disabled={!!pending || dirty || !!settingsError}
+                          onClick={() => void render("preview")}
+                        >
+                          前 2 秒动画
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="preview-toolbar">
+                      <p
+                        className={
+                          "preview-guidance " + (dirty ? "warning-text" : "")
+                        }
+                      >
+                        {dirty
+                          ? "修改无需保存即可实时预览；保存后可渲染关键帧与动画。"
+                          : "实时预览使用低分辨率与单次采样，交付按完整规格渲染。"}
+                      </p>
                       <span>
                         sRGB 显示预览{" "}
                         <span className="dim">
@@ -1563,6 +1591,89 @@ export default function App() {
                     </details>
                   </div>
                   <aside className="parameter-panel">
+                    {/* Parameters are tuned against the picture, so they lead the inspector. */}
+                    <section className="scene-parameters" aria-label="场景参数">
+                      <div className="section-heading">
+                        <h3>
+                          <Settings2 size={16} />
+                          场景参数
+                        </h3>
+                      </div>
+                      <p className="panel-description">
+                        调整参数即可实时查看；保存场景后用于正式渲染。
+                      </p>
+                      <div className="parameter-fields">
+                        {/* Visual colors keep display appearance separate from scene float RGB. */}
+                        {draft?.parameters.map((p) =>
+                          p.kind === "color" ? (
+                            <ColorField
+                              key={sceneId + "-" + p.name}
+                              id={"param-" + p.name}
+                              label={p.label || p.name}
+                              value={parameterValue(p) as number[]}
+                              colorSpace={p.color_space}
+                              disabled={!!pending}
+                              rawDraft={colorDrafts[p.name] ?? null}
+                              onRawDraftChange={(input) =>
+                                setColorDrafts((old) => ({
+                                  ...old,
+                                  [p.name]: input,
+                                }))
+                              }
+                              onChange={(rgb) => changeParameter(p.name, rgb)}
+                            />
+                          ) : (
+                            <Field
+                              key={p.name}
+                              label={p.label || p.name}
+                              id={"param-" + p.name}
+                              hint={
+                                p.minimum !== null || p.maximum !== null
+                                  ? [p.minimum ?? "−∞", p.maximum ?? "∞"].join(
+                                      " … ",
+                                    )
+                                  : undefined
+                              }
+                            >
+                              {p.kind === "boolean" ? (
+                                <input
+                                  id={"param-" + p.name}
+                                  type="checkbox"
+                                  checked={Boolean(parameterValue(p))}
+                                  disabled={!!pending}
+                                  onChange={(e) =>
+                                    changeParameter(p.name, e.target.checked)
+                                  }
+                                />
+                              ) : (
+                                <input
+                                  id={"param-" + p.name}
+                                  type="number"
+                                  step="0.1"
+                                  min={p.minimum ?? undefined}
+                                  max={p.maximum ?? undefined}
+                                  value={String(parameterValue(p))}
+                                  disabled={!!pending}
+                                  onChange={(e) =>
+                                    changeParameter(
+                                      p.name,
+                                      e.target.value === ""
+                                        ? ""
+                                        : Number(e.target.value),
+                                    )
+                                  }
+                                />
+                              )}
+                            </Field>
+                          ),
+                        )}
+                        {!draft && (
+                          <p className="empty-small">
+                            选择场景后显示可调参数。
+                          </p>
+                        )}
+                      </div>
+                    </section>
                     {/* Keep logical canvas/time settings next to live feedback, separate from its proxy budget. */}
                     <section className="frame-settings" aria-label="画面规格">
                       <div className="section-heading">
@@ -1684,84 +1795,6 @@ export default function App() {
                     </section>
                     {/* The same fixed color contract is visible beside code and delivery. */}
                     <ColorWorkflow />
-                    <div className="section-heading">
-                      <h3>
-                        <Settings2 size={16} />
-                        场景参数
-                      </h3>
-                    </div>
-                    <p className="panel-description">
-                      调整参数即可实时查看；保存场景后用于正式渲染。
-                    </p>
-                    <div className="parameter-fields">
-                      {/* Visual colors keep display appearance separate from scene float RGB. */}
-                      {draft?.parameters.map((p) =>
-                        p.kind === "color" ? (
-                          <ColorField
-                            key={sceneId + "-" + p.name}
-                            id={"param-" + p.name}
-                            label={p.label || p.name}
-                            value={parameterValue(p) as number[]}
-                            colorSpace={p.color_space}
-                            disabled={!!pending}
-                            rawDraft={colorDrafts[p.name] ?? null}
-                            onRawDraftChange={(input) =>
-                              setColorDrafts((old) => ({
-                                ...old,
-                                [p.name]: input,
-                              }))
-                            }
-                            onChange={(rgb) => changeParameter(p.name, rgb)}
-                          />
-                        ) : (
-                          <Field
-                            key={p.name}
-                            label={p.label || p.name}
-                            id={"param-" + p.name}
-                            hint={
-                              p.minimum !== null || p.maximum !== null
-                                ? [p.minimum ?? "−∞", p.maximum ?? "∞"].join(
-                                    " … ",
-                                  )
-                                : undefined
-                            }
-                          >
-                            {p.kind === "boolean" ? (
-                              <input
-                                id={"param-" + p.name}
-                                type="checkbox"
-                                checked={Boolean(parameterValue(p))}
-                                disabled={!!pending}
-                                onChange={(e) =>
-                                  changeParameter(p.name, e.target.checked)
-                                }
-                              />
-                            ) : (
-                              <input
-                                id={"param-" + p.name}
-                                type="number"
-                                step="0.1"
-                                min={p.minimum ?? undefined}
-                                max={p.maximum ?? undefined}
-                                value={String(parameterValue(p))}
-                                disabled={!!pending}
-                                onChange={(e) =>
-                                  changeParameter(
-                                    p.name,
-                                    e.target.value === ""
-                                      ? ""
-                                      : Number(e.target.value),
-                                  )
-                                }
-                              />
-                            )}
-                          </Field>
-                        ),
-                      )}
-                      {!draft && (
-                        <p className="empty-small">选择场景后显示可调参数。</p>
-                      )}
-                    </div>
                   </aside>
                 </div>
                 <div className="step-actions">
@@ -1999,7 +2032,10 @@ export default function App() {
                             </Button>
                             <div className="job-progress">
                               <span>
-                                {STATUS[j.status]} · {j.stage}
+                                {/* The stage adds detail only while work is active. */}
+                                {STATUS[j.status]}
+                                {["queued", "running"].includes(j.status) &&
+                                  " · " + j.stage}
                               </span>
                               <progress
                                 max={1}
@@ -2009,7 +2045,7 @@ export default function App() {
                                 }
                               />
                             </div>
-                            <span className="mono">
+                            <span className="mono job-elapsed">
                               {fmt(j.elapsed_seconds)} s
                             </span>
                             <div className="job-controls">
@@ -2225,7 +2261,6 @@ export default function App() {
                 {operations.length} 个类型化操作，共用相同场景、任务和验证数据。
               </p>
             </div>
-            <Terminal size={30} />
           </div>
           <div className="mcp-grid">
             <section className="integration-card">
