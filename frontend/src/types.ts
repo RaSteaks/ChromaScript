@@ -226,8 +226,9 @@ export type Operation = {
   description: string;
   inputSchema: Record<string, unknown>;
 };
-// Browser animation specifications are separate from scene-linear WGSL sources.
+// Three.js source has an explicit float contract; masters share the ACEScg pipeline.
 export type MotionSpec = {
+  engine: "three-float-v1" | "remotion-sdr-v1";
   schema_version?: number;
   name: string;
   code: string;
@@ -242,9 +243,23 @@ export type MotionReply = {
   revision_id: string;
 };
 export type MotionCapabilities = {
+  engines: Record<MotionSpec["engine"], { imports: string[] }>;
+  contract: "motion-dual-v1";
   preview_available: boolean;
   render_available: boolean;
   browser: string | null;
   imports: string[];
   packages: Record<string, string | null>;
+};
+
+export type MotionOutput = {
+  master_bit_depth: 16 | 32 | null;
+  video: "none" | "pq" | "hlg" | "srgb" | "rec709";
+};
+export type MotionDeliveryOptions = {
+  engine: MotionSpec["engine"];
+  default: MotionOutput;
+  contract: "motion-dual-v1";
+  master_bit_depths: (16 | 32)[];
+  videos: { value: MotionOutput["video"]; label: string; available: boolean }[];
 };

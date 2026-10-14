@@ -44,7 +44,7 @@ from .operations import catalogue, operation
 from .presets import FRAME_RATES, RESOLUTIONS, builtins
 from .preview import LivePreviewRequest, preview_image
 from .store import Store, canonical, identifier, now
-from .templates import TEMPLATES, template_list
+from .templates import TEMPLATES, blank_scene, template_list
 
 
 class Service(MotionOperations):
@@ -256,12 +256,14 @@ class Service(MotionOperations):
             raise ChromaError("unknown_template", "Choose an ID from list_templates")
         return {"template_id": template_id, "scene": TEMPLATES[template_id].model_dump()}
 
-    @operation("Create a scene from a template or explicit shader specification.")
+    @operation("Create a blank scene by default; optionally provide a template_id or complete shader spec. Templates are not required.")
     def create_scene(
-        self, project_id: str, template_id: str = "particles", spec: SceneSpec | None = None
+        self, project_id: str, template_id: str | None = None, spec: SceneSpec | None = None
     ) -> dict[str, Any]:
         self.project(project_id, True)
-        spec = spec or SceneSpec.model_validate(self.get_template(template_id)["scene"])
+        # Omitted template means an empty canvas, not an implicit visual example.
+        if spec is None:
+            spec = blank_scene() if template_id is None else SceneSpec.model_validate(self.get_template(template_id)["scene"])
         sid, rid = identifier(), identifier()
         self.store.put(
             "revision",
@@ -887,16 +889,13 @@ class Service(MotionOperations):
         snapshot = self.store.get("snapshot", job_id)
         if hashlib.sha256(canonical(snapshot).encode()).hexdigest() != job["snapshot_hash"]:
             raise ChromaError("snapshot_corrupt", "Frozen configuration checksum mismatch")
-        # Browser jobs freeze their own JS/browser identity and have no OCIO master cache.
+        # Both engines freeze their runtime and OCIO configuration before caching masters.
         identity = motion_identity() if job["kind"] == "motion" else runtime_identity()
         if snapshot.get("runtime") != identity:
             raise ChromaError(
                 "runtime_changed", "Renderer or dependencies changed; submit a new job"
             )
-        if (
-            job["kind"] != "motion"
-            and color_info()["sha256"] != snapshot["color_configuration"]["sha256"]
-        ):
+        if color_info()["sha256"] != snapshot["color_configuration"]["sha256"]:
             raise ChromaError("config_changed", "Installed color configuration changed")
         self.store.update(
             "job",

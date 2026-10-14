@@ -4,6 +4,20 @@ from __future__ import annotations
 
 from .models import Parameter, SceneSpec
 
+
+def blank_scene() -> SceneSpec:
+    """A runnable empty canvas is independent of the optional example catalogue."""
+    return SceneSpec(
+        name="空白场景",
+        description="从空白画面开始，通过代码或 MCP 添加内容。",
+        code="""// Scene-linear ACEScg RGB with straight alpha. Add your image here.
+fn shade(ctx: SceneContext) -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
+""",
+    )
+
+
 BASE = {
     "exposure": Parameter(
         name="exposure", label="曝光（档）", default=0.0, minimum=-10, maximum=10

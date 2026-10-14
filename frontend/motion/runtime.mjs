@@ -2,29 +2,29 @@
 import { build, formatMessages } from "esbuild";
 import ts from "typescript";
 import { randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  openSync,
+  writeSync,
+  closeSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const allowed = new Set([
-  "react",
-  "react/jsx-runtime",
-  "remotion",
-  "@remotion/three",
-  "@react-three/fiber",
-  "three",
-]);
+const allowed = new Set(["three"]);
 const policy =
   "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; media-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'";
 
 function validateImports(code) {
   const source = ts.createSourceFile(
-    "Animation.tsx",
+    "Animation.ts",
     code,
     ts.ScriptTarget.Latest,
     true,
-    ts.ScriptKind.TSX,
+    ts.ScriptKind.TS,
   );
   function check(specifier) {
     if (
@@ -60,7 +60,7 @@ function validateImports(code) {
   visit(source);
 }
 
-async function compile(spec, mode, channel) {
+async function compile(spec, mode, channel, display, maxDimension) {
   validateImports(spec.code);
   const config = {
     width: spec.width,
@@ -68,30 +68,26 @@ async function compile(spec, mode, channel) {
     frames: spec.frames,
     fps: spec.fps.numerator / spec.fps.denominator,
     channel,
+    frameRate: spec.fps,
+    preview: mode === "preview",
+    display,
+    maxDimension,
   };
-  const entry =
-    mode === "preview"
-      ? readFileSync(join(root, "motion/preview.tsx"), "utf8")
-      : `import React from 'react';
-       import {Composition, registerRoot} from 'remotion';
-       import Scene from 'chromascript:scene';
-       registerRoot(() => <Composition id="Animation" component={Scene} width={${spec.width}} height={${spec.height}} fps={${config.fps}} durationInFrames={${spec.frames}} />);`;
+  const entry = readFileSync(join(root, "motion/float-runtime.mjs"), "utf8");
   return build({
     stdin: {
       contents: entry,
-      sourcefile: "motion-entry.tsx",
-      loader: "tsx",
+      sourcefile: "motion-entry.ts",
+      loader: "ts",
       resolveDir: root,
     },
-    // Export keeps package imports external so Webpack shares exactly one React
-    // and Remotion registry with its rendering shell. Preview is self-contained.
+    // Every mode uses the identical isolated float renderer and local packages.
     absWorkingDir: root,
     write: false,
     bundle: true,
     minify: true,
     platform: "browser",
-    format: mode === "preview" ? "iife" : "esm",
-    packages: mode === "preview" ? undefined : "external",
+    format: "iife",
     jsx: "automatic",
     target: "es2022",
     define: { "process.env.NODE_ENV": '"production"' },
@@ -101,12 +97,12 @@ async function compile(spec, mode, channel) {
         name: "local-animation",
         setup(plugin) {
           plugin.onResolve({ filter: /^chromascript:scene$/ }, () => ({
-            path: "Animation.tsx",
+            path: "Animation.ts",
             namespace: "scene",
           }));
           plugin.onLoad({ filter: /.*/, namespace: "scene" }, () => ({
             contents: spec.code,
-            loader: "tsx",
+            loader: "ts",
             resolveDir: root,
           }));
           plugin.onResolve({ filter: /^chromascript:config$/ }, () => ({
@@ -120,7 +116,6 @@ async function compile(spec, mode, channel) {
           plugin.onResolve({ filter: /.*/, namespace: "scene" }, (args) => {
             if (!allowed.has(args.path))
               return { errors: [{ text: `不允许导入 ${args.path}。` }] };
-            if (mode !== "preview") return { path: args.path, external: true };
             return plugin.resolve(args.path, {
               resolveDir: root,
               kind: args.kind,
@@ -138,90 +133,105 @@ async function main() {
   const request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   const spec = request.spec || request;
   const channel = randomUUID();
-  const result = await compile(spec, process.argv[2], channel);
-  const javascript = result.outputFiles[0].text;
+  const result = await compile(
+    spec,
+    process.argv[2],
+    channel,
+    request.display,
+    request.max_dimension,
+  );
+  const script = result.outputFiles[0].text.replace(
+    /<\/script/gi,
+    "<\\/script",
+  );
+  // Match the host color scheme so Chromium does not force an opaque white iframe
+  // backdrop behind a correctly transparent float-scene canvas.
+  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${policy}"><style>html,body,#root{color-scheme:dark;margin:0;width:100%;height:100%;overflow:hidden;background:transparent}</style></head><body><div id="root"></div><script>${script}</script></body></html>`;
   if (process.argv[2] === "preview") {
-    // Opaque iframe origin plus CSP keep source away from editor cookies/tokens
-    // and network requests. Escaping script terminators prevents HTML injection.
-    const script = javascript.replace(/<\/script/gi, "<\\/script");
-    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${policy}"><style>html,body,#root{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}*{box-sizing:border-box}</style></head><body><div id="root"></div><script>${script}</script></body></html>`;
     process.stdout.write(JSON.stringify({ html, channel }));
     return;
   }
   if (process.argv[2] !== "frames")
     throw new Error("Unknown animation runtime mode");
-  const { bundle } = await import("@remotion/bundler");
-  const { renderFrames } = await import("@remotion/renderer");
-  mkdirSync(request.directory, { recursive: true });
-  const entryPoint = join(request.directory, "compiled.js");
-  writeFileSync(entryPoint, javascript);
-  const serveUrl = await bundle({
-    entryPoint,
-    outDir: join(request.directory, "bundle"),
-    rootDir: root,
-    publicDir: null,
-    enableCaching: false,
-    ignoreRegisterRootWarning: true,
-    webpackOverride: (config) => ({
-      ...config,
-      // External source maps keep Remotion's error reporting functional without
-      // Webpack eval(), which would require weakening the document CSP.
-      devtool: "source-map",
-      resolve: {
-        ...config.resolve,
-        modules: [
-          join(root, "node_modules"),
-          ...(config.resolve?.modules || []),
-        ],
-      },
-    }),
-  });
-  // A fixed HTTP document policy is used before any composition JavaScript runs.
-  const index = join(serveUrl, "index.html");
-  writeFileSync(
-    index,
-    readFileSync(index, "utf8").replace(
-      /<head>/i,
-      `<head><meta http-equiv="Content-Security-Policy" content="${policy}"><link rel="icon" href="data:,">`,
-    ),
-  );
-  await renderFrames({
-    serveUrl,
+  // Reuse the installed, pinned Chromium driver, but never screenshot its DOM.
+  // Source executes only in a network-disabled opaque data document, not Node.
+  const { openBrowser } = await import("@remotion/renderer");
+  const browser = await openBrowser("chrome", {
     browserExecutable: request.browser,
-    composition: {
-      id: "Animation",
-      width: spec.width,
-      height: spec.height,
-      fps: spec.fps.numerator / spec.fps.denominator,
-      durationInFrames: spec.frames,
-      defaultProps: {},
-      props: {},
-    },
-    outputDir: request.frames,
-    imageFormat: "png",
-    imageSequencePattern: "frame-[frame].png",
-    concurrency: 1,
-    muted: true,
-    timeoutInMilliseconds: 15000,
     chromiumOptions: { gl: "angle" },
     logLevel: "error",
-    onStart: () =>
-      process.stdout.write(
-        JSON.stringify({ stage: "rendering", completed: 0 }) + "\n",
-      ),
-    onFrameUpdate: (completed) =>
-      process.stdout.write(
-        JSON.stringify({ stage: "rendering", completed }) + "\n",
-      ),
   });
+  const shutdown = async () => {
+    await browser.close({ silent: true });
+    process.exit(1);
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+  try {
+    const page = await browser.newPage({
+      context: () => null,
+      logLevel: "error",
+      indent: false,
+      pageIndex: 0,
+      onBrowserLog: null,
+      onLog: () => {},
+    });
+    await page._client().send("Network.enable");
+    await page._client().send("Network.setBlockedURLs", {
+      urls: ["http://*", "https://*", "file://*"],
+    });
+    await page.goto({
+      url: "data:text/html;base64," + Buffer.from(html).toString("base64"),
+      timeout: 30000,
+    });
+    const state = await page.evaluate(() => ({
+      error: window.__chromaError,
+      probe: window.__chromaFloat?.probe,
+    }));
+    if (state.error || !state.probe)
+      throw new Error(state.error || "Float renderer did not initialize");
+    mkdirSync(request.frames, { recursive: true });
+    writeFileSync(
+      join(request.frames, "gpu.json"),
+      JSON.stringify(state.probe),
+    );
+    // Bounded binary chunks avoid JSON-number arrays and whole-sequence RAM use.
+    for (const frame of request.frame_indices ||
+      Array.from({ length: spec.frames }, (_, i) => i)) {
+      const capture = await page.evaluate(
+        (f) => window.__chromaFloat.capture(f),
+        frame,
+      );
+      if (capture.bytes !== capture.width * capture.height * 16)
+        throw new Error("Float frame dimensions mismatch");
+      const path = join(request.frames, `frame-${frame}.f32`);
+      const fd = openSync(path, "w");
+      try {
+        for (let offset = 0; offset < capture.bytes; offset += 1048576) {
+          const data = await page.evaluate(
+            (o) => window.__chromaFloat.readChunk(o, 1048576),
+            offset,
+          );
+          writeSync(fd, Buffer.from(data, "base64"));
+        }
+      } finally {
+        closeSync(fd);
+      }
+      process.stdout.write(
+        JSON.stringify({ completed: frame + 1, frame }) + "\n",
+      );
+    }
+  } finally {
+    await browser.close({ silent: true });
+  }
 }
-
 main().catch(async (error) => {
-  const message = error.errors
-    ? (
-        await formatMessages(error.errors, { kind: "error", color: false })
-      ).join("\n")
-    : String(error.message || error);
-  process.stderr.write(message + "\n");
+  if (error.errors) {
+    const messages = await formatMessages(error.errors, {
+      kind: "error",
+      color: false,
+    });
+    process.stderr.write(messages.join("\n"));
+  } else process.stderr.write(String(error.stack || error));
   process.exitCode = 1;
 });

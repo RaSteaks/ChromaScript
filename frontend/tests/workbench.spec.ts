@@ -788,3 +788,34 @@ test("original pixel inspection stays scoped to the preview step", async ({
   await stage(page, "delivery");
   await expect(page.getByRole("alert")).not.toBeVisible();
 });
+
+test("blank WGSL scene starts without an example and opens the editor", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "新建项目", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "新建项目" });
+  await page
+    .getByLabel("项目名称", { exact: true })
+    .fill("空白创作 " + Date.now());
+  await dialog.getByRole("button", { name: "创建项目", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  const created = page.waitForResponse(
+    (r) => r.url().endsWith("/create_scene") && r.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "新建空白场景", exact: true }).click();
+  const response = await created;
+  expect(response.request().postDataJSON().template_id).toBeNull();
+  const value = await response.json();
+  expect(value.scene.parameters).toEqual([]);
+  await expect(
+    page.getByRole("heading", { name: "空白场景", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("实时预览已更新", { exact: true })).toBeVisible({
+    timeout: 20000,
+  });
+  await page.locator(".code-disclosure > summary").click();
+  await expect(page.getByLabel("WGSL 场景代码")).toHaveValue(
+    new RegExp("return vec4<f32>\\(0\\.0, 0\\.0, 0\\.0, 0\\.0\\)"),
+  );
+});

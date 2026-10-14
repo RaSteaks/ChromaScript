@@ -72,7 +72,7 @@ export function DeliveryDestination({
       </Field>
       <p className="panel-description">
         {variant === "animation"
-          ? "文件夹包含动画代码（TSX）、完整规格（JSON）、sRGB 缩略图和 MP4 视频，附带验证报告。"
+          ? "文件夹包含动画源码、完整规格、sRGB 缩略图和所选视频；浮点场景另含 ACEScg EXR 母版与 ZIP，附带验证报告。"
           : "文件夹包含场景代码（WGSL）、完整场景（JSON）、sRGB 缩略图和所选视频或图像序列，附带验证报告。"}
       </p>
     </section>

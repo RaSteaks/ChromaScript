@@ -22,7 +22,7 @@ def create_mcp(root: Path) -> MCPServer:
         log_level="WARNING",
         version="0.1.0",
         instructions=DOCUMENTS["workflow"]
-        + " Read chromascript://docs/scene before authoring shaders.",
+        + " Read chromascript://docs/scene before authoring WGSL or chromascript://docs/motion before authoring Three.js HDR animations. HDR masters and sRGB preview are separate.",
     )
 
     def register(name: str, model: type[BaseModel], description: str) -> None:
@@ -71,6 +71,10 @@ def create_mcp(root: Path) -> MCPServer:
     async def scene(scene_id: str) -> str:
         return await resource_call("get_scene", {"scene_id": scene_id})
 
+    @server.resource("chromascript://motion-scenes/{scene_id}")
+    async def motion_scene(scene_id: str) -> str:
+        return await resource_call("get_motion_scene", {"scene_id": scene_id})
+
     @server.resource("chromascript://jobs/{job_id}")
     async def job(job_id: str) -> str:
         return await resource_call("get_job", {"job_id": job_id})
@@ -98,5 +102,10 @@ def create_mcp(root: Path) -> MCPServer:
             + "\n"
             + DOCUMENTS["scene"]
         )
+
+    @server.prompt(name="create_hdr_animation")
+    def create_hdr_animation(description: str) -> str:
+        # Model authors receive the actual float contract, not legacy React guidance.
+        return f"Create this offline HDR animation: {description}\n" + DOCUMENTS["motion"]
 
     return server

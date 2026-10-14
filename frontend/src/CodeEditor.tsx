@@ -4,7 +4,8 @@ import { EditorView } from "@codemirror/view";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 
-// The editor loads its language support locally and consumes the workstation's
+// The shared editor supports float factories and SDR React/JSX, with local language support.
+// The editor consumes the workstation's
 // generated tokens. Tab leaves the editor so keyboard focus is never trapped.
 const theme = EditorView.theme(
   {
@@ -49,7 +50,7 @@ const extensions = [
   ),
   javascript({ jsx: true, typescript: true }),
   EditorView.contentAttributes.of({
-    "aria-label": "动画 TSX 代码",
+    "aria-label": "动画 TypeScript 代码",
     "aria-describedby": "motion-code-help",
   }),
 ];

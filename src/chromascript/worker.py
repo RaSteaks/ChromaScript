@@ -37,7 +37,7 @@ def run(root: Path, job_id: str) -> None:
     store = Store(root)
     job = store.get("job", job_id)
     if job["kind"] == "motion":
-        # Display-referred browser frames must bypass WGSL validation and ACES processing.
+        # Three.js owns float frame generation; both engines share ACES output processing.
         from .motion_worker import run_motion
 
         run_motion(root, job_id)

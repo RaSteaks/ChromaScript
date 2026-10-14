@@ -116,8 +116,25 @@ def test_mcp_schema_resources_prompts(tmp_path: Path):
                 "hlg",
             } == set(properties["gamma"]["enum"])
             assert set(properties["data_range"]["enum"]) == {"auto", "full", "limited"}
+            # HDR output selection is a strict shared model in MCP and HTTP/CLI.
+            motion = next(
+                t.input_schema for t in tools.tools if t.name == "chromascript.submit_motion_render"
+            )
+            output = motion["$defs"]["MotionOutput"]["properties"]
+            assert output["video"]["enum"] == ["none", "pq", "hlg", "srgb", "rec709"]
+            assert output["master_bit_depth"]["anyOf"][0]["enum"] == [16, 32]
+            assert {
+                "chromascript.render_motion_frame",
+                "chromascript.get_motion_delivery_options",
+            } <= {t.name for t in tools.tools}
+            guidance = await client.read_resource("chromascript://docs/motion")
+            assert "three-float-v1" in guidance.contents[0].text
+            hdr_prompt = await client.get_prompt(
+                "create_hdr_animation", {"description": "HDR light"}
+            )
+            assert "RGBA32F" in hdr_prompt.messages[0].content.text
             resources = await client.list_resource_templates()
-            assert len(resources.resource_templates) == 5
+            assert len(resources.resource_templates) == 6
             result = await client.read_resource("chromascript://docs/scene")
             assert "shade" in result.contents[0].text
             # Resource guidance must describe the same new contract as tool schemas.

@@ -4,6 +4,7 @@ import {
   Copy,
   Download,
   Film,
+  Plus,
   RefreshCw,
   Save,
   Square,
@@ -21,11 +22,14 @@ import type {
   MotionCapabilities,
   MotionReply,
   MotionSpec,
+  MotionOutput,
+  MotionDeliveryOptions,
   Project,
   SceneRecord,
 } from "./types";
 
 type Draft = {
+  engine: MotionSpec["engine"];
   name: string;
   code: string;
   width: string;
@@ -66,6 +70,7 @@ const stageLabel: Record<string, string> = {
 const text = (cause: unknown) =>
   cause instanceof Error ? cause.message : String(cause);
 const fromSpec = (spec: MotionSpec): Draft => ({
+  engine: spec.engine,
   name: spec.name,
   code: spec.code,
   width: String(spec.width),
@@ -90,15 +95,14 @@ function validate(draft: Draft | null): {
       !/^\d+$/.test(draft[key]) ||
       !Number.isSafeInteger(value) ||
       value < min ||
-      value > max ||
-      (key !== "frames" && value % 2)
+      value > max
     )
       return {
         spec: null,
         error:
           key === "frames"
             ? "帧数必须是 1–36000 的整数。"
-            : "画面宽、高必须是 16–4096 的偶数。",
+            : "画面宽、高必须是 16–4096 的整数。",
         field: key,
       };
   }
@@ -122,6 +126,7 @@ function validate(draft: Draft | null): {
   return {
     spec: {
       schema_version: 1,
+      engine: draft.engine,
       name: draft.name,
       code: draft.code,
       width: Number(draft.width),
@@ -134,7 +139,7 @@ function validate(draft: Draft | null): {
   };
 }
 
-/** An independent editing session preserves browser source and ACES source separately. */
+/** Source and delivery drafts survive navigation; only display copies are sRGB. */
 export function MotionWorkbench({
   active,
   onWorkspace,
@@ -151,8 +156,17 @@ export function MotionWorkbench({
   const [scenes, setScenes] = useState<SceneRecord[]>([]);
   const [scenePage, setScenePage] = useState(0);
   const [sceneTotal, setSceneTotal] = useState(0);
+  const [blankEngine, setBlankEngine] =
+    useState<MotionSpec["engine"]>("remotion-sdr-v1");
   const [templates, setTemplates] = useState<Template[]>([]);
   const [caps, setCaps] = useState<MotionCapabilities | null>(null);
+  const [output, setOutput] = useState<MotionOutput>({
+    master_bit_depth: 32,
+    video: "pq",
+  });
+  const [outputError, setOutputError] = useState("");
+  const [outputOptions, setOutputOptions] =
+    useState<MotionDeliveryOptions | null>(null);
   const [destinationOptions, setDestinationOptions] =
     useState<Capability["delivery_export"]>();
   const [destination, setDestination] = useState<string | null>(null);
@@ -224,6 +238,7 @@ export function MotionWorkbench({
       call<Page<Project>>("list_projects", { limit: 200 }),
       call<{ items: Template[] }>("list_motion_templates"),
       call<MotionCapabilities>("get_motion_capabilities"),
+
       call<NonNullable<Capability["delivery_export"]>>(
         "get_delivery_export_options",
       ),
@@ -245,10 +260,18 @@ export function MotionWorkbench({
         if (templateReply.status === "fulfilled")
           setTemplates(templateReply.value.items);
         else failures.push(text(templateReply.reason));
-        if (capabilities.status === "fulfilled") setCaps(capabilities.value);
+        if (
+          capabilities.status === "fulfilled" &&
+          capabilities.value.contract === "motion-dual-v1"
+        )
+          setCaps(capabilities.value);
         else {
           setCaps(null);
-          failures.push(text(capabilities.reason));
+          failures.push(
+            capabilities.status === "rejected"
+              ? text(capabilities.reason)
+              : "请重启本地服务以启用 HDR/SDR 动画工作流。",
+          );
         }
         if (paths.status === "fulfilled") setDestinationOptions(paths.value);
         else failures.push(text(paths.reason));
@@ -266,6 +289,35 @@ export function MotionWorkbench({
       stopped = true;
     };
   }, [active, refresh]);
+
+  const engine = draft?.engine;
+  useEffect(() => {
+    setOutputOptions(null);
+    setOutputError("");
+    if (!engine) return;
+    let cancelled = false;
+    void call<MotionDeliveryOptions>("get_motion_delivery_options", { engine })
+      .then((reply) => {
+        if (cancelled) return;
+        if (reply.contract !== "motion-dual-v1" || reply.engine !== engine)
+          throw new Error("动画输出服务版本不匹配，请重启服务。");
+        setOutputOptions(reply);
+        setOutput((old) =>
+          reply.videos.some((v) => v.value === old.video) &&
+          (engine === "three-float-v1"
+            ? old.master_bit_depth !== null
+            : old.master_bit_depth === null)
+            ? old
+            : reply.default,
+        );
+      })
+      .catch((cause) => {
+        if (!cancelled) setOutputError(text(cause));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [engine, refresh]);
 
   useEffect(() => {
     if (!active || !projectId || !caps) return;
@@ -367,11 +419,12 @@ export function MotionWorkbench({
     );
     if (reply) select(reply);
   }
-  async function create(templateId: string) {
+  async function create(templateId: string | null = null) {
     const reply = await run("创建动画", () =>
       call<MotionReply>("create_motion_scene", {
         project_id: projectId,
         template_id: templateId,
+        ...(templateId === null ? { engine: blankEngine } : {}),
       }),
     );
     if (reply) {
@@ -412,11 +465,20 @@ export function MotionWorkbench({
     }
   }
   async function render() {
-    if (!saved || dirty || !valid.spec) return;
+    if (
+      !saved ||
+      dirty ||
+      !valid.spec ||
+      outputOptions?.engine !== valid.spec.engine ||
+      !outputOptions?.videos.find((item) => item.value === output.video)
+        ?.available
+    )
+      return;
     const args = {
       scene_id: saved.record.id,
       expected_revision_id: saved.revision_id,
       export_directory: directory,
+      output,
     };
     const recipe = JSON.stringify(args);
     if (submission.current?.recipe !== recipe)
@@ -451,6 +513,8 @@ export function MotionWorkbench({
     }
   }
   const video = artifacts.find((item) => item.kind === "video");
+  const archive = artifacts.find((item) => item.kind === "master-archive");
+  const thumbnail = artifacts.find((item) => item.kind === "preview-image");
   const report = artifacts.find((item) => item.kind === "report");
   const otherSelected =
     saved && !scenes.some((scene) => scene.id === saved.record.id)
@@ -465,7 +529,8 @@ export function MotionWorkbench({
             动画代码
           </h1>
           <p className="panel-description">
-            在左侧写代码，右侧查看动画。保存后即可在本机导出视频。
+            支持 HDR 浮点场景与 SDR 网页动画，统一使用 sRGB
+            预览；按源类型选择母版与视频输出。
           </p>
         </div>
         <span className={"save-state " + (dirty ? "unsaved" : "")}>
@@ -534,7 +599,7 @@ export function MotionWorkbench({
             }}
           >
             <option value="" disabled>
-              {scenes.length ? "选择动画" : "还没有动画，请从模板创建"}
+              {scenes.length ? "选择动画" : "还没有动画，可新建空白动画"}
             </option>
             {otherSelected && (
               <option value={otherSelected.id}>{otherSelected.name}</option>
@@ -547,19 +612,27 @@ export function MotionWorkbench({
           </select>
         </Field>
         <div className="motion-template-actions">
-          {templates.map((template) => (
-            <Button
-              key={template.id}
-              className="outline"
-              disabled={!projectId || !!pending}
-              onClick={() =>
-                guard("创建新动画", () => void create(template.id))
+          <Field label="空白动画类型" id="motion-blank-engine">
+            <select
+              id="motion-blank-engine"
+              value={blankEngine}
+              disabled={!!pending}
+              onChange={(event) =>
+                setBlankEngine(event.target.value as MotionSpec["engine"])
               }
             >
-              {template.id === "three" ? <Box size={15} /> : <Film size={15} />}
-              新建{template.id === "three" ? "三维" : "文字"}动画
-            </Button>
-          ))}
+              <option value="remotion-sdr-v1">SDR 网页</option>
+              <option value="three-float-v1">浮点 HDR / SDR</option>
+            </select>
+          </Field>
+          <Button
+            className="primary"
+            disabled={!projectId || !!pending}
+            onClick={() => guard("新建空白动画", () => void create())}
+          >
+            <Plus size={15} />
+            新建空白动画
+          </Button>
           <Button
             aria-label="刷新动画列表与连接"
             disabled={!!pending}
@@ -574,6 +647,28 @@ export function MotionWorkbench({
           </Button>
         </div>
       </div>
+      <details className="technical-note">
+        <summary>示例模板（可选）</summary>
+        <p>
+          这些示例只提供初始代码。通过 MCP
+          创作时，可以直接创建空白动画或传入源码。
+        </p>
+        <div className="motion-template-actions">
+          {templates.map((template) => (
+            <Button
+              key={template.id}
+              className="outline"
+              disabled={!projectId || !!pending}
+              onClick={() =>
+                guard("创建新动画", () => void create(template.id))
+              }
+            >
+              {template.id === "three" ? <Box size={15} /> : <Film size={15} />}
+              新建{template.name}
+            </Button>
+          ))}
+        </div>
+      </details>
       {sceneTotal > pageSize && (
         <div className="pagination">
           <Button
@@ -612,8 +707,8 @@ export function MotionWorkbench({
           <h2>打开或新建一个动画</h2>
           <p>
             {scenes.length
-              ? "在上方选择已保存的动画，或从文字、三维模板新建。"
-              : "这个项目还没有动画。用上方的按钮从文字或三维模板新建。"}
+              ? "在上方打开已保存的动画，或新建空白动画；示例模板可选。"
+              : "这个项目还没有动画。选择渲染类型后点击“新建空白动画”，即可通过代码或 MCP 开始创作。"}
           </p>
         </div>
       )}
@@ -626,7 +721,11 @@ export function MotionWorkbench({
             >
               <div className="section-heading">
                 <h2>动画代码</h2>
-                <span className="tiny-label">Animation.tsx</span>
+                <span className="tiny-label">
+                  {draft.engine === "remotion-sdr-v1"
+                    ? "Animation.tsx · SDR"
+                    : "Animation.ts · HDR 浮点"}
+                </span>
               </div>
               <Field
                 label="动画名称"
@@ -647,8 +746,9 @@ export function MotionWorkbench({
                 onComposing={setComposing}
               />
               <p id="motion-code-help" className="technical-note">
-                导出默认 React 组件。用 useCurrentFrame() 驱动动画；Three.js
-                场景使用 ThreeCanvas。Tab 键可离开编辑器。
+                {draft.engine === "remotion-sdr-v1"
+                  ? "SDR 网页动画：默认导出 React 组件，用 useCurrentFrame() 驱动时间；支持 DOM、SVG 与 ThreeCanvas。Tab 键可离开编辑器。"
+                  : "浮点场景：默认导出工厂并返回 scene、camera、update。RGB 为线性 Rec.709，允许超过 1；母版转换为 ACEScg，视频可选 HDR 或 SDR。"}
               </p>
               <div className="motion-save-actions">
                 <Button
@@ -677,7 +777,7 @@ export function MotionWorkbench({
               <details className="technical-note">
                 <summary>代码约定与可用依赖</summary>
                 <p>
-                  可导入 {caps?.imports.join("、")}
+                  可导入 {caps?.engines[draft.engine].imports.join("、")}
                   。依赖均在本地安装，不支持网络资源或任意文件导入。避免使用
                   Date.now()、随机数或 useFrame() 累加动画；每一帧应由帧号决定。
                 </p>
@@ -718,7 +818,7 @@ export function MotionWorkbench({
                         type="number"
                         min={key === "frames" ? 1 : 16}
                         max={key === "frames" ? 36000 : 4096}
-                        step={key === "frames" ? 1 : 2}
+                        step={1}
                         value={draft[key]}
                         aria-invalid={valid.field === key}
                         onChange={(event) => change(key, event.target.value)}
@@ -747,10 +847,66 @@ export function MotionWorkbench({
           </div>
           <section className="motion-export" aria-label="动画视频导出">
             <div>
-              <h2>本地视频导出</h2>
+              <h2>动画导出</h2>
               <p className="panel-description">
-                MP4 · H.264 · sRGB · 8-bit · 无音频。透明背景合成到黑色。
+                {draft.engine === "remotion-sdr-v1"
+                  ? "SDR 网页源为 8-bit sRGB，可输出 sRGB 或 Rec.709 视频。"
+                  : "保留 ACEScg EXR 浮点母版，可输出 SDR sRGB/Rec.709 或 HDR PQ/HLG 视频；预览始终为 sRGB。"}
               </p>
+            </div>
+            <Notice text={outputError} error />
+            {/* Shared server discovery owns output choices; changing delivery never changes the preview. */}
+            <div className="frame-settings">
+              {draft.engine === "three-float-v1" && (
+                <Field label="EXR 母版精度" id="motion-master-depth">
+                  <select
+                    id="motion-master-depth"
+                    value={output.master_bit_depth ?? 32}
+                    disabled={!!pending || !outputOptions}
+                    onChange={(event) => {
+                      // Capture before a discovery response rerenders the controlled select.
+                      const depth = Number(event.currentTarget.value) as
+                        16 | 32;
+                      setOutput((old) => ({ ...old, master_bit_depth: depth }));
+                    }}
+                  >
+                    {(outputOptions?.master_bit_depths || [16, 32]).map(
+                      (depth) => (
+                        <option key={depth} value={depth}>
+                          {depth}-bit {depth === 32 ? "Float" : "Half"} · ACEScg
+                        </option>
+                      ),
+                    )}
+                  </select>
+                </Field>
+              )}
+              <Field
+                label="视频输出"
+                id="motion-hdr-video"
+                hint="视频要求偶数尺寸；可选格式由当前源类型决定。"
+              >
+                <select
+                  id="motion-hdr-video"
+                  value={output.video}
+                  disabled={!!pending || !outputOptions}
+                  onChange={(event) => {
+                    const video = event.currentTarget
+                      .value as MotionOutput["video"];
+                    setOutput((old) => ({ ...old, video }));
+                  }}
+                >
+                  {(outputOptions?.videos || []).map((item) => (
+                    <option
+                      key={item.value}
+                      value={item.value}
+                      disabled={!item.available}
+                    >
+                      {item.label}
+                      {!item.available ? " · 本机缺少编码器" : ""}
+                    </option>
+                  ))}
+                </select>
+              </Field>
             </div>
             <DeliveryDestination
               onPickingChange={setDirectoryPicking}
@@ -773,19 +929,31 @@ export function MotionWorkbench({
                   !valid.spec ||
                   !!pending ||
                   !caps?.render_available ||
-                  !directory.trim()
+                  !directory.trim() ||
+                  outputOptions?.engine !== draft.engine ||
+                  !outputOptions?.videos.find(
+                    (item) => item.value === output.video,
+                  )?.available ||
+                  (output.video !== "none" &&
+                    !!valid.spec &&
+                    (valid.spec.width % 2 !== 0 || valid.spec.height % 2 !== 0))
                 }
                 onClick={() => void render()}
               >
                 <Download size={15} />
-                导出 MP4
+                导出动画
               </Button>
               <span>
                 {dirty
                   ? "请先保存当前动画。"
                   : !caps?.render_available
                     ? "本地导出需要 Chrome、FFmpeg 和动画依赖。"
-                    : "后台渲染使用已保存版本，可继续编辑。"}
+                    : output.video !== "none" &&
+                        valid.spec &&
+                        (valid.spec.width % 2 !== 0 ||
+                          valid.spec.height % 2 !== 0)
+                      ? "视频要求偶数尺寸；浮点场景可选择仅导出 EXR。"
+                      : "后台渲染使用已保存版本，可继续编辑。"}
               </span>
             </div>
           </section>
@@ -879,11 +1047,23 @@ export function MotionWorkbench({
             </div>
             <progress aria-label="动画导出进度" value={job.progress} max={1} />
             <Notice text={job.error?.message || ""} error />
+            {thumbnail && (
+              <img
+                className="preview-image"
+                src={artifactUrl(thumbnail.id)}
+                alt="导出母版的 sRGB 预览"
+              />
+            )}
             <div className="motion-artifact-actions">
               {video && (
                 <a href={artifactUrl(video.id, true)} className="button">
                   <Download size={15} />
-                  下载 MP4
+                  下载视频 MP4
+                </a>
+              )}
+              {archive && (
+                <a href={artifactUrl(archive.id, true)} className="button">
+                  下载 ACEScg 母版
                 </a>
               )}
               {report && (

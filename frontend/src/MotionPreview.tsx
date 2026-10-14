@@ -197,7 +197,11 @@ export function MotionPreview({
     <section className="motion-preview-panel" aria-label="动画实时预览">
       <div className="section-heading">
         <h2>实时预览</h2>
-        <span className="tiny-label">Remotion Player</span>
+        <span className="tiny-label">
+          {spec?.engine === "remotion-sdr-v1"
+            ? "Remotion · SDR"
+            : "ACES · sRGB"}
+        </span>
       </div>
       <div className="motion-preview-surface" aria-busy={pending}>
         {pictures.map((picture) => (
@@ -297,7 +301,9 @@ export function MotionPreview({
       />
       <Notice text={error} error />
       <p className="technical-note">
-        本地浏览器画面 · sRGB 8-bit。此工作区不生成 ACEScg 浮点母版。
+        {spec?.engine === "remotion-sdr-v1"
+          ? "SDR 网页画面 · sRGB 8-bit。保留网页图层与原始动画代码。"
+          : "GPU 浮点场景 · ACES sRGB 预览。独立保存 ACEScg 母版，支持 HDR 和 SDR 交付。"}
       </p>
     </section>
   );

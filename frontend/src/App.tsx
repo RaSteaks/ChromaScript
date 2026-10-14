@@ -69,7 +69,7 @@ const MotionWorkbench = lazy(async () => ({
   default: (await import("./MotionWorkbench")).MotionWorkbench,
 }));
 const STEP_HELP: Record<WorkflowStep, string> = {
-  scene: "先选择项目，再打开已有场景或从模板创建画面。",
+  scene: "先选择项目，再打开已有场景或新建空白场景；示例模板可选。",
   preview: "设置画面规格，调整参数或代码，即时查看草稿效果。",
   delivery:
     "沿用预览中的画面规格，选择一个或多个交付格式。下拉选项会自动联动。",
@@ -650,7 +650,7 @@ export default function App() {
       setNameError("");
     }
   }
-  async function createScene(templateId: string) {
+  async function createScene(templateId: string | null = null) {
     if (!projectId) {
       setProjectModal(true);
       return;
@@ -945,7 +945,7 @@ export default function App() {
           {offline
             ? "服务未连接"
             : tab === "motion"
-              ? "Remotion · Three.js · 本地渲染"
+              ? "Remotion / Three.js · HDR / SDR 本地渲染"
               : caps
                 ? caps.gpu.backend_type + " · " + caps.gpu.device
                 : "连接本地服务…"}
@@ -1091,7 +1091,7 @@ export default function App() {
                     ))}
                     {!scenes.length && (
                       <p className="empty-small">
-                        选择右侧模板，创建第一个场景。
+                        点击右侧“新建空白场景”，或选择一个示例模板。
                       </p>
                     )}
                   </div>
@@ -1111,14 +1111,22 @@ export default function App() {
                 </aside>
                 <section className="template-panel" aria-label="场景模板">
                   <div className="section-heading">
-                    <h3>从模板开始</h3>
-                    <small>{templates.length} 种画面</small>
+                    <h3>新建场景</h3>
+                    <Button
+                      className="primary"
+                      disabled={!!pending}
+                      onClick={() => void createScene()}
+                    >
+                      <Plus size={15} />
+                      新建空白场景
+                    </Button>
                   </div>
                   <p className="panel-description">
                     {projectId
-                      ? "点击模板会在当前项目中创建新场景，并进入编辑与预览。"
-                      : "先新建项目，再选择一个模板作为画面起点。"}
+                      ? "直接新建空白场景后，可通过代码或 MCP 添加内容。下方模板仅提供示例起点。"
+                      : "先新建项目，再从空白场景开始；也可以选择示例模板。"}
                   </p>
+                  <h4>示例模板（可选）</h4>
                   <div className="template-list">
                     {templates.map((t, i) => (
                       <Button
@@ -1154,7 +1162,7 @@ export default function App() {
               <div className="workflow-empty">
                 <FileImage size={28} />
                 <h3>{sceneId ? "正在载入场景…" : "先选择一个场景"}</h3>
-                <p>创建项目并选择模板，或打开已有场景。</p>
+                <p>创建项目后新建空白场景，或打开已有场景。</p>
                 <Button className="primary" onClick={() => setStep("scene")}>
                   前往选择场景
                   <ChevronRight size={15} />
@@ -1323,7 +1331,7 @@ export default function App() {
                           <p>
                             {draft
                               ? "渲染关键帧，查看经过 ACES 显示变换的结果。"
-                              : "创建项目，选择模板，然后调整颜色与运动。"}
+                              : "创建项目，从空白场景或可选示例开始编辑。"}
                           </p>
                         </div>
                       )}
@@ -2273,7 +2281,7 @@ export default function App() {
               </Button>
               <h2>模型创作流程</h2>
               <ol>
-                <li>查询能力与模板，创建场景。</li>
+                <li>查询能力，直接创建空白场景或传入源码；模板可选。</li>
                 <li>编译代码，渲染关键帧与运动预览。</li>
                 <li>查看图像，检查原始 ACEScg 数值。</li>
                 <li>修改参数，提交多版本交付。</li>
@@ -2337,7 +2345,7 @@ export default function App() {
         </span>
         <span>
           {tab === "motion" ? (
-            "浏览器渲染 · sRGB 8-bit"
+            "HDR / SDR 动画 · sRGB 预览"
           ) : (
             <>ACES 2.0 · {caps?.color.sha256.slice(0, 12) || "配置加载中"}</>
           )}{" "}
