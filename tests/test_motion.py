@@ -3,6 +3,7 @@
 import hashlib
 import json
 import subprocess
+import time
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,7 @@ from chromascript.images import read_image
 from chromascript.models import Rational
 from chromascript.motion import MotionOutput, MotionSpec, motion_environment, templates
 from chromascript.motion_color import decode_float_frame
+from chromascript.motion_render import render_float_frames
 from chromascript.operations import REGISTRY, execute
 from chromascript.service import Service
 from chromascript.worker import run
@@ -318,6 +320,26 @@ def test_model_frame_preview_is_transient_and_has_hdr_statistics(tmp_path):
     assert result["images"][0]["mime_type"] == "image/png"
     assert not service.store.list("job") and not service.store.list("artifact")
     assert not service.store.list("motion_revision")
+
+
+@pytest.mark.integration
+def test_float_transport_waits_for_each_consumed_frame(tmp_path):
+    # A deliberately slower consumer must not allow Node to accumulate RGBA32F
+    # files while EXR readback/hash verification is still using the current frame.
+    spec = templates()["radiance"].model_copy(update={"width": 16, "height": 16, "frames": 3})
+    (tmp_path / "frame-99.f32").write_bytes(b"interrupted disposable transport")
+    received = []
+
+    def accept(index, path):
+        time.sleep(0.15)
+        assert list(tmp_path.glob("frame-*.f32")) == [path]
+        assert path.stat().st_size == 16 * 16 * 16
+        assert decode_float_frame(path.read_bytes(), 16, 16)[..., :3].max() > 1
+        received.append(index)
+
+    gpu = render_float_frames(spec, tmp_path, [0, 1, 2], accept)
+    assert gpu["format"] == "RGBA32F" and received == [0, 1, 2]
+    assert not list(tmp_path.glob("frame-*.f32"))
 
 
 @pytest.mark.integration

@@ -32,8 +32,13 @@ DOCUMENTS = {
         "inspect_frame/sample_pixels on master-frame artifacts, get_artifact(include_image=true) "
         "on preview-image, and download master-archive/sequence-manifest/report/video artifacts. "
         "cancel_job/resume_job are explicit; retry reuses checksummed EXRs and rejects runtime "
-        "or OCIO drift. Bundles contain Animation.ts, specification/snapshot, EXRs, master ZIP, "
-        "sRGB thumbnail, optional HDR MP4 and verification report. Rendering is local/offline. "
+        "or OCIO drift. New float jobs render one EXR sequence directly in a resumable directory "
+        "on the frozen export volume and publish by rename; workspace retains metadata/logs only. "
+        "Bundles contain Animation.ts, specification/snapshot, EXRs, sRGB thumbnail, optional MP4 "
+        "and verification report. master-archive is a virtual ZIP64 download (representation=zip-stream, "
+        "size_bytes=null, local_path=null); HTTP streams it without a server-side ZIP. export_artifact "
+        "writes that ZIP to the explicit CLI/MCP destination. Interrupted downloads restart from zero. "
+        "Rendering is local/offline; historical files/snapshots are not migrated. "
         "SDR templates title/sdr-three use remotion-sdr-v1 and default-export React components, with useCurrentFrame/useVideoConfig and optional ThreeCanvas. Allow imports react, react/jsx-runtime, remotion, @remotion/three, @react-three/fiber, three. Historical records missing an engine are read as SDR without changing source/revision. SDR supports DOM/SVG, sRGB preview, and sRGB/Rec.709 H.264 video; no ACES display transform, native HDR, or float-master claim. Float sources may also render SDR through the ACES view. Select the engine explicitly for new source; do not reinterpret screenshot data as native float HDR."
     ),
     # Code and picker contracts apply identically to browser, MCP and CLI clients.

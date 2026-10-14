@@ -19,6 +19,7 @@ import psutil
 from pydantic import ValidationError
 
 from .appearance import ColorAppearanceRequest, resolve_color
+from .artifacts import archive_members, artifact_path, stream_zip
 from .color import color_info, transform
 from .desktop import choose_directory, directory_picker_available, open_directory
 from .encoding import available_encoders, pixel_format_info, probe
@@ -938,14 +939,19 @@ class Service(MotionOperations):
     @operation("Read artifact metadata; bounded PNGs can be returned as native MCP images.")
     def get_artifact(self, artifact_id: str, include_image: bool = False) -> dict[str, Any]:
         a = self.store.get("artifact", artifact_id)
-        path = self.store.file(a["relative_path"])
+        path = artifact_path(self.store, a)
+        virtual = a.get("representation", "file") == "zip-stream"
+        if virtual:
+            archive_members(self.store, a)
+        elif not path.exists():
+            raise ChromaError("artifact_missing", "成果文件已移动或删除，请检查交付目录。")
         result: dict[str, Any] = {
             "artifact": a,
             "resource_uri": f"chromascript://artifacts/{artifact_id}",
-            "local_path": str(path),
+            "local_path": None if virtual else str(path),
         }
         # Return usable local/media references without placing bearer secrets in URLs.
-        if path.is_file():
+        if path.is_file() or virtual:
             from .runtime import endpoint
 
             try:
@@ -955,7 +961,10 @@ class Service(MotionOperations):
             except ChromaError:
                 pass
         if include_image:
-            if a["mime_type"] != "image/png" or a["size_bytes"] > 8 * 1024**2:
+            if (
+                a["mime_type"] != "image/png" or a["size_bytes"] is None
+                or a["size_bytes"] > 8 * 1024**2
+            ):
                 raise ChromaError("image_preview", "Select a bounded PNG preview")
             result["images"] = [
                 {"mime_type": "image/png", "data": base64.b64encode(path.read_bytes()).decode()}
@@ -967,19 +976,35 @@ class Service(MotionOperations):
             result["text"] = path.read_text()
         return result
 
-    @operation("Copy a managed artifact to any writable destination without overwriting files.")
+    @operation(
+        "Copy a managed artifact or stream its on-demand ZIP to a writable destination without overwriting files.",
+        serialized=False,
+    )
     def export_artifact(self, artifact_id: str, destination: str) -> dict[str, Any]:
         a = self.store.get("artifact", artifact_id)
-        source = self.store.file(a["relative_path"])
+        source = artifact_path(self.store, a)
+        virtual = a.get("representation", "file") == "zip-stream"
+        members = archive_members(self.store, a) if virtual else []
         raw_target = Path(destination).expanduser()
         if not raw_target.is_absolute() or "\x00" in destination:
             raise ChromaError("export_directory", "请输入导出目标的绝对路径。")
         target = resolve_export_directory(str(raw_target.parent)) / raw_target.name
-        if target.exists():
+        if target.exists() or target.is_symlink():
             raise ChromaError("file_exists", "Choose a new destination")
         target.parent.mkdir(parents=True, exist_ok=True)
+        created = False
         try:
-            if source.is_dir():
+            if virtual:
+                # No daemon-side cache: the explicit user-selected output is the ZIP.
+                with target.open("xb") as dst:
+                    created = True
+                    chunks = stream_zip(members)
+                    try:
+                        for chunk in chunks:
+                            dst.write(chunk)
+                    finally:
+                        chunks.close()
+            elif source.is_dir():
                 shutil.copytree(source, target)
             else:
                 # Exclusive creation keeps a concurrently created file intact too.
@@ -987,16 +1012,22 @@ class Service(MotionOperations):
                     shutil.copyfileobj(src, dst)
         except FileExistsError as exc:
             raise ChromaError("file_exists", "Choose a new destination") from exc
+        except ChromaError:
+            if created:
+                target.unlink(missing_ok=True)
+            raise
         except OSError as exc:
+            if created:
+                target.unlink(missing_ok=True)
             raise ChromaError("export_failed", "导出写入失败，请检查磁盘空间和目录权限。") from exc
-        return {"destination": str(target), "directory": str(target if source.is_dir() else target.parent), "artifact_id": artifact_id}
+        return {"destination": str(target), "directory": str(target if source.is_dir() and not virtual else target.parent), "artifact_id": artifact_id}
 
     @operation("Inspect original image range, storage depth, negative/high values, and alpha.")
     def inspect_frame(self, artifact_id: str) -> dict[str, Any]:
         a = self.store.get("artifact", artifact_id)
         if not a["mime_type"].startswith("image/"):
             raise ChromaError("image_required", "Select an individual image artifact")
-        pixels, metadata = read_image(self.store.file(a["relative_path"]))
+        pixels, metadata = read_image(artifact_path(self.store, a))
         rgb = pixels[..., :3]
         return {
             "metadata": metadata,
@@ -1014,7 +1045,7 @@ class Service(MotionOperations):
         a = self.store.get("artifact", artifact_id)
         if not a["mime_type"].startswith("image/") or not 1 <= len(points) <= 4096:
             raise ChromaError("pixel_samples", "Select an image and 1..4096 points")
-        pixels, metadata = read_image(self.store.file(a["relative_path"]))
+        pixels, metadata = read_image(artifact_path(self.store, a))
         values = []
         for point in points:
             if len(point) != 2 or not (
@@ -1037,8 +1068,8 @@ class Service(MotionOperations):
             self.store.get("artifact", first_artifact_id),
             self.store.get("artifact", second_artifact_id),
         )
-        a, am = read_image(self.store.file(aa["relative_path"]))
-        b, bm = read_image(self.store.file(bb["relative_path"]))
+        a, am = read_image(artifact_path(self.store, aa))
+        b, bm = read_image(artifact_path(self.store, bb))
         first_space = (
             aa["metadata"].get("color_space")
             or am.get("chromascript:color_space")
@@ -1063,7 +1094,7 @@ class Service(MotionOperations):
     @operation("Inspect actual video streams, decoded frame count, timebase and color metadata.")
     def probe_media(self, artifact_id: str) -> dict[str, Any]:
         a = self.store.get("artifact", artifact_id)
-        return {"probe": probe(self.store.file(a["relative_path"]))}
+        return {"probe": probe(artifact_path(self.store, a))}
 
     @operation("Read the completed delivery verification report.")
     def validate_delivery_output(self, job_id: str) -> dict[str, Any]:
@@ -1074,7 +1105,7 @@ class Service(MotionOperations):
         ]
         if not artifacts:
             raise ChromaError("report_pending", "The job has not produced a report yet")
-        return json.loads(self.store.file(artifacts[0]["relative_path"]).read_text())
+        return json.loads(artifact_path(self.store, artifacts[0]).read_text())
 
     @operation(
         "Submit multiple resolutions/frame rates as idempotent, separately tracked batch jobs."

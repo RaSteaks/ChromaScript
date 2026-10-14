@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const allowed = new Set(["three"]);
@@ -128,9 +129,22 @@ async function compile(spec, mode, channel, display, maxDimension) {
 }
 
 async function main() {
-  const chunks = [];
-  for await (const chunk of process.stdin) chunks.push(chunk);
-  const request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  // Frame mode keeps stdin open for consumption acknowledgements. Preview still
+  // accepts the original JSON-to-EOF protocol used by transient compilation.
+  let input = null;
+  let lines = null;
+  let request;
+  if (process.argv[2] === "frames") {
+    input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+    lines = input[Symbol.asyncIterator]();
+    const first = await lines.next();
+    if (first.done) throw new Error("Missing float render request");
+    request = JSON.parse(first.value);
+  } else {
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  }
   const spec = request.spec || request;
   const channel = randomUUID();
   const result = await compile(
@@ -220,12 +234,24 @@ async function main() {
       process.stdout.write(
         JSON.stringify({ completed: frame + 1, frame }) + "\n",
       );
+      // Python acknowledges only after durable EXR verification (or transient
+      // preview consumption) and transport removal. Never accumulate raw frames.
+      const acknowledgement = await lines.next();
+      if (
+        acknowledgement.done ||
+        JSON.parse(acknowledgement.value).accepted !== frame
+      )
+        throw new Error("Float frame consumption was not acknowledged");
     }
   } finally {
+    input.close();
     await browser.close({ silent: true });
   }
 }
 main().catch(async (error) => {
+  // A failed compile/browser launch must close the ACK input rather than keep
+  // Node alive waiting on Python's intentionally open transport.
+  process.stdin.destroy();
   if (error.errors) {
     const messages = await formatMessages(error.errors, {
       kind: "error",

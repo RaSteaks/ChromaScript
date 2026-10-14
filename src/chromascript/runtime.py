@@ -72,7 +72,13 @@ def call(
         headers={"Authorization": "Bearer " + info["token"]},
         # Native selection is user-paced and writes nothing. Allow the same
         # dialog lifetime on CLI/MCP as on the browser transport.
-        timeout=330 if name.removeprefix("chromascript.") == "choose_export_directory" else 60,
+        # User-selected local copies/ZIPs may outlast a request timeout; exclusive
+        # destination creation prevents a retry from overwriting the first export.
+        timeout=(
+            httpx.Timeout(60, read=None)
+            if name.removeprefix("chromascript.") == "export_artifact"
+            else 330 if name.removeprefix("chromascript.") == "choose_export_directory" else 60
+        ),
     )
     data = response.json()
     if not response.is_success:

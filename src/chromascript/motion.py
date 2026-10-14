@@ -17,7 +17,7 @@ from pydantic import Field
 from .color import color_info, output_metadata
 from .encoding import available_encoders
 from .errors import ChromaError
-from .exports import bundle_name
+from .exports import DESTINATION_LAYOUT, bundle_name
 from .exports import export_directory as resolve_export_directory
 from .models import Job, Model, Rational, RenderSettings
 from .motion_color import display_shader
@@ -213,6 +213,8 @@ def motion_identity() -> dict[str, Any]:
         Path(__file__),
         Path(__file__).with_name("motion_worker.py"),
         Path(__file__).with_name("motion_render.py"),
+        Path(__file__).with_name("artifacts.py"),
+        Path(__file__).with_name("exports.py"),
         Path(__file__).with_name("encoding.py"),
         Path(__file__).with_name("images.py"),
     ]:
@@ -347,6 +349,7 @@ class MotionOperations:
             ).model_dump(),
             "videos": choices,
             "scene_linear_master": floating,
+            "master_archive": "zip-stream" if floating else None,
             "preview": "sRGB SDR; independent of delivery",
         }
 
@@ -573,13 +576,35 @@ class MotionOperations:
             encoder = "libx265" if output.video in {"pq", "hlg"} else "libx264"
             if encoder not in available_encoders():
                 raise ChromaError("motion_encoder", f"本机 FFmpeg 缺少 {encoder}。")
-        # Budget raw transport, EXR, archive and both destination copies on one volume.
-        required = spec.width * spec.height * 16 * spec.frames * 5 + 64 * 1024**2
-        if shutil.disk_usage(self.store.root).free < required:
-            raise ChromaError("disk_space", "没有足够空间存储动画帧，请缩短动画或降低分辨率。")
         destination = resolve_export_directory(
             export_directory if export_directory is not None else str(self.store.root / "exports")
         )
+        if floating:
+            # Budget one EXR sequence on its actual volume, plus one RGBA32F
+            # transport and conservative video/EXR overhead. CRF size is an estimate;
+            # ENOSPC at runtime retains completed frames for recovery.
+            pixels = spec.width * spec.height
+            master_bytes = pixels * 4 * (output.master_bit_depth or 32) // 8 * spec.frames
+            video_bytes = pixels * 4 * spec.frames if output.video != "none" else 0
+            required = master_bytes + master_bytes // 10 + video_bytes + pixels * 16 + 64 * 1024**2
+            volume = destination
+            while not volume.exists():
+                volume = volume.parent
+            metadata_bytes = 16 * 1024**2
+            same_volume = volume.stat().st_dev == self.store.root.stat().st_dev
+            if (
+                shutil.disk_usage(volume).free < required + (metadata_bytes if same_volume else 0)
+                or shutil.disk_usage(self.store.root).free < metadata_bytes
+            ):
+                raise ChromaError(
+                    "disk_space", "导出盘没有足够空间存储单份动画母版和视频。",
+                    destination=str(destination), required_bytes=required,
+                )
+        else:
+            # The screenshot engine retains its existing workspace recovery layout.
+            required = spec.width * spec.height * 16 * spec.frames * 5 + 64 * 1024**2
+            if shutil.disk_usage(self.store.root).free < required:
+                raise ChromaError("disk_space", "没有足够空间存储动画帧，请缩短动画或降低分辨率。")
         snapshot = {
             "engine": spec.engine,
             "output": output.model_dump(),
@@ -591,6 +616,7 @@ class MotionOperations:
             "runtime": motion_identity(),
             "export_directory": str(destination),
             "export_root": str(destination),  # Freeze this selection, never a global allowlist.
+            **({"storage_layout": DESTINATION_LAYOUT} if floating else {}),
         }
         digest = hashlib.sha256(canonical(snapshot).encode()).hexdigest()
         stamp = now()

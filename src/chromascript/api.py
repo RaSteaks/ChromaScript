@@ -5,21 +5,47 @@ from __future__ import annotations
 import json
 import os
 import secrets
+from collections.abc import Generator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.types import Receive, Scope, Send
 
+from .artifacts import archive_members, artifact_path, stream_zip
 from .dispatcher import Dispatcher
 from .errors import ChromaError
 from .mcp_server import create_mcp
 from .operations import REGISTRY, catalogue, execute
 from .service import Service
+
+
+class ArchiveResponse(StreamingResponse):
+    """Always close the bounded ZIP generator, including ASGI disconnect/cancellation."""
+
+    def __init__(self, chunks: Generator[bytes, None, None], name: str):
+        self.chunks = chunks
+        super().__init__(
+            chunks, media_type="application/zip",
+            headers={
+                "Content-Disposition": f"attachment; filename*=utf-8''{quote(name)}",
+                "Accept-Ranges": "none",
+                "Cache-Control": "no-store",
+            },
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # No producer thread/queue continues reading the sequence after download ends.
+            self.chunks.close()
 
 
 def create_app(root: Path, port: int = 8765, export_roots: list[Path] | None = None) -> FastAPI:
@@ -123,10 +149,18 @@ def create_app(root: Path, port: int = 8765, export_roots: list[Path] | None = N
         register(name)
 
     @app.get("/api/artifacts/{artifact_id}")
-    def artifact_file(artifact_id: str, download: bool = False):
+    def artifact_file(artifact_id: str, request: Request, download: bool = False):
         try:
             artifact = service.store.get("artifact", artifact_id)
-            path = service.store.file(artifact["relative_path"])
+            if artifact.get("representation", "file") == "zip-stream":
+                if request.headers.get("range"):
+                    return JSONResponse(
+                        {"error": {"code": "archive_range", "message": "按需 ZIP 不支持断点下载，请重新下载。"}},
+                        status_code=416,
+                    )
+                members = archive_members(service.store, artifact)
+                return ArchiveResponse(stream_zip(members), artifact["name"])
+            path = artifact_path(service.store, artifact)
             if not path.is_file():
                 raise ChromaError(
                     "sequence_directory", "Export this image sequence or read its manifest"

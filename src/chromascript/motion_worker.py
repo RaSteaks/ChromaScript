@@ -8,14 +8,14 @@ import time
 import traceback
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
 from .color import color_info, render_output, transform
 from .encoding import check_image_metadata, check_probe, encode
 from .errors import ChromaError
-from .exports import bundle_name, publish_bundle
+from .exports import DESTINATION_LAYOUT, RenderBundle, bundle_name, motion_bundle, publish_bundle
 from .images import file_hash, read_image, resize_srgb, write_image
 from .models import Artifact
 from .motion import MotionOutput, MotionSpec, motion_identity
@@ -43,7 +43,8 @@ def run_motion(root: Path, job_id: str) -> None:
     start = time.monotonic()
     artifacts = list(job["artifacts"])
     directory = store.file(f"jobs/{job_id}/output")
-    directory.mkdir(parents=True, exist_ok=True)
+    direct = snapshot.get("storage_layout") == DESTINATION_LAYOUT
+    bundle: RenderBundle | None = None
 
     def progress(stage: str, amount: float, completed: int | None = None) -> None:
         def update(current: dict[str, Any]) -> dict[str, Any]:
@@ -62,19 +63,25 @@ def run_motion(root: Path, job_id: str) -> None:
 
         store.update("job", job_id, update)
 
-    def artifact(path: Path, kind: str, mime: str, metadata: dict[str, Any] | None = None) -> None:
-        # Store resolves symlinked macOS temporary/workspace roots once.
-        relative = str(path.relative_to(store.root))
-        aid = hashlib.sha256((job_id + relative).encode()).hexdigest()[:32]
+    def artifact(
+        path: Path, kind: str, mime: str, metadata: dict[str, Any] | None = None,
+        *, representation: Literal["file", "zip-stream"] = "file",
+    ) -> None:
+        # Bundle-relative IDs survive the staging-directory rename unchanged.
+        relative = str(path.relative_to(directory if direct else store.root))
+        suffix = representation if representation != "file" else ""
+        aid = hashlib.sha256((job_id + relative + suffix).encode()).hexdigest()[:32]
         value = Artifact(
             id=aid,
             project_id=job["project_id"],
             job_id=job_id,
-            name=path.name,
+            name="ACEScg-masters.zip" if representation == "zip-stream" else path.name,
             kind=kind,
             relative_path=relative,
+            storage="delivery" if direct else "workspace",
+            representation=representation,
             mime_type=mime,
-            size_bytes=path.stat().st_size,
+            size_bytes=None if representation == "zip-stream" else path.stat().st_size,
             created_at=now(),
             metadata=metadata or {},
         )
@@ -83,17 +90,56 @@ def run_motion(root: Path, job_id: str) -> None:
             artifacts.append(aid)
         store.update("job", job_id, lambda current: {**current, "artifacts": artifacts})
 
+    def finish() -> None:
+        store.update(
+            "job", job_id,
+            lambda current: {
+                **current,
+                "status": "completed" if current["status"] != "cancelled" else "cancelled",
+                "stage": "completed" if current["status"] != "cancelled" else "cancelled",
+                "progress": 1,
+                "export_completed": current["status"] != "cancelled",
+                "elapsed_seconds": time.monotonic() - start,
+                "updated_at": now(),
+            },
+        )
+        if bundle is not None:
+            try:
+                bundle.discard_transport()
+            except (OSError, ChromaError) as exc:
+                # Publication is already durable; a small leftover transport must
+                # not turn a verified delivery into a failed render.
+                print(f"Retained disposable render state: {exc}", flush=True)
+        print(f"Completed HDR animation {job_id}", flush=True)
+
     try:
         if hashlib.sha256(canonical(snapshot).encode()).hexdigest() != job["snapshot_hash"]:
             raise ChromaError("snapshot_corrupt", "动画快照校验失败。")
         if snapshot["runtime"] != motion_identity():
             raise ChromaError("runtime_changed", "动画运行环境已改变，请重新提交任务。")
+        if snapshot["color_configuration"] != color_info():
+            raise ChromaError("config_changed", "OCIO 配置已改变，请重新提交。")
         spec = MotionSpec.model_validate(snapshot["scene"])
         # Recovery may trust only the frozen destination, never a mutated job pointer.
         destination = Path(snapshot["export_directory"]) / bundle_name(spec.name, job_id)
         if str(destination) != job.get("export_path"):
             raise ChromaError("snapshot_corrupt", "动画导出位置与冻结快照不一致。")
         settings = spec.settings()
+        if direct:
+            bundle = motion_bundle(job, snapshot)
+            directory, published = bundle.prepare()
+            if published:
+                artifact(
+                    directory / "masters", "master-archive", "application/zip",
+                    {"frames": spec.frames, "color_space": "ACEScg", "on_demand": True},
+                    representation="zip-stream",
+                )
+                progress("exporting", 0.98, spec.frames)
+                finish()
+                return
+        else:
+            # Historical snapshots retain their original workspace/copy layout.
+            directory.mkdir(parents=True, exist_ok=True)
         source = directory / "Animation.ts"
         source.write_text(spec.code, encoding="utf-8")
         description = directory / "animation.json"
@@ -107,9 +153,7 @@ def run_motion(root: Path, job_id: str) -> None:
         master_depth = output.master_bit_depth
         if master_depth is None:
             raise ChromaError("motion_output", "浮点场景缺少母版精度。")
-        if snapshot["color_configuration"] != color_info():
-            raise ChromaError("config_changed", "OCIO 配置已改变，请重新提交。")
-        work = store.file(f"jobs/{job_id}/motion")
+        work = bundle.work if bundle is not None else store.file(f"jobs/{job_id}/motion")
         masters = directory / "masters"
         masters.mkdir(exist_ok=True)
         manifest_file = masters / "sequence.json"
@@ -122,6 +166,10 @@ def run_motion(root: Path, job_id: str) -> None:
             path = masters / f"{i:08d}.exr"
             if not path.is_file() or entries.get(str(i), {}).get("sha256") != file_hash(path):
                 todo.append(i)
+        if direct and len(todo) < spec.frames and not (work / "gpu-verified.json").is_file():
+            # A fresh GPU probe cannot prove which backend produced existing
+            # masters. Missing recovery identity must never certify a mixed cache.
+            raise ChromaError("gpu_changed", "母版缓存缺少已验证的 GPU 身份，请重新提交任务。")
         preset = builtins()[f"exr-{output.master_bit_depth}-zip"]
 
         def accept_frame(index: int, raw: Path) -> None:
@@ -169,7 +217,6 @@ def run_motion(root: Path, job_id: str) -> None:
                     "preset": preset.model_dump(),
                 },
             )
-            raw.unlink()  # This disposable transport buffer is recoverable from the master.
             progress("rendering", 0.7 * len(entries) / spec.frames, len(entries))
 
         progress("rendering", 0)
@@ -216,19 +263,16 @@ def run_motion(root: Path, job_id: str) -> None:
                 "scene_linear_master": False,
             },
         )
-        # A single ZIP is downloadable without per-frame HTTP requests; its EXRs
-        # retain native AP1 chromaticities and straight-alpha declarations.
-        archive = directory / "ACEScg-masters.zip"
-        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as bundle:
-            for path in [*paths, manifest_file]:
-                bundle.write(path, f"masters/{path.name}")
-                progress("packaging", 0.72)
-        artifact(
-            archive,
-            "master-archive",
-            "application/zip",
-            {"frames": spec.frames, "color_space": "ACEScg"},
-        )
+        archive = None
+        if bundle is None:
+            # Preserve the legacy layout only for its frozen snapshots. New jobs
+            # register a virtual archive after publication and never store a ZIP.
+            archive = directory / "ACEScg-masters.zip"
+            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as legacy_zip:
+                for path in [*paths, manifest_file]:
+                    legacy_zip.write(path, f"masters/{path.name}")
+                    progress("packaging", 0.72)
+            artifact(archive, "master-archive", "application/zip", {"frames": spec.frames})
         verification: dict[str, Any] = {
             "passed": True,
             "scene_linear_master": True,
@@ -248,11 +292,14 @@ def run_motion(root: Path, job_id: str) -> None:
                 }[output.video]
             ]
             video = directory / f"animation-{output.video}.mp4"
+            # Keep encoder logs/partials outside the published payload. The final
+            # video moves on the same export volume, without another data copy.
+            encoded_video = work / video.name if bundle is not None else video
             progress("encoding", 0.75)
             info = encode(
                 preset,
                 settings,
-                video,
+                encoded_video,
                 (render_output(read_image(path)[0], preset.color.output, False) for path in paths),
                 lambda count: progress("encoding", 0.75 + 0.2 * count / spec.frames),
             )
@@ -264,6 +311,8 @@ def run_motion(root: Path, job_id: str) -> None:
                     verification=video_verification,
                 )
             verification["video"] = video_verification
+            if encoded_video != video:
+                encoded_video.replace(video)
             artifact(video, "video", "video/mp4", {"verification": video_verification})
         report = directory / "verification.json"
         report.write_text(
@@ -291,31 +340,26 @@ def run_motion(root: Path, job_id: str) -> None:
         )
         artifact(report, "report", "application/json")
         progress("exporting", 0.98)
-        publish_bundle(
-            {
-                **{p.name: p for p in (source, description, frozen, thumbnail, archive, report)},
-                **({video.name: video} if video else {}),
-                **{f"masters/{p.name}": p for p in [*paths, manifest_file]},
-            },
-            destination,
-            Path(snapshot["export_root"]),
-            {"job_id": job_id, "snapshot_sha256": job["snapshot_hash"]},
-            lambda: progress("exporting", 0.98),
-        )
-        store.update(
-            "job",
-            job_id,
-            lambda current: {
-                **current,
-                "status": "completed" if current["status"] != "cancelled" else "cancelled",
-                "stage": "completed" if current["status"] != "cancelled" else "cancelled",
-                "progress": 1,
-                "export_completed": current["status"] != "cancelled",
-                "elapsed_seconds": time.monotonic() - start,
-                "updated_at": now(),
-            },
-        )
-        print(f"Completed HDR animation {job_id}", flush=True)
+        files = {
+            **{p.name: p for p in (source, description, frozen, thumbnail, report)},
+            **({video.name: video} if video else {}),
+            **({archive.name: archive} if archive else {}),
+            **{f"masters/{p.name}": p for p in [*paths, manifest_file]},
+        }
+        if bundle is not None:
+            bundle.publish(files, lambda: progress("exporting", 0.98))
+            artifact(
+                directory / "masters", "master-archive", "application/zip",
+                {"frames": spec.frames, "color_space": "ACEScg", "on_demand": True},
+                representation="zip-stream",
+            )
+        else:
+            publish_bundle(
+                files, destination, Path(snapshot["export_root"]),
+                {"job_id": job_id, "snapshot_sha256": job["snapshot_hash"]},
+                lambda: progress("exporting", 0.98),
+            )
+        finish()
     except BaseException as exc:
         traceback.print_exc()
         error = (

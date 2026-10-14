@@ -105,7 +105,9 @@ const fmt = (value: number) =>
   Number.isFinite(value)
     ? new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value)
     : "—";
-const bytes = (value: number) => {
+const bytes = (value: number | null) => {
+  // A generated download has no stored file size; do not label it as zero bytes.
+  if (value === null) return "按需生成";
   // Small manifests should report their real size instead of rounding to zero MiB.
   if (value >= 1024 ** 3) return fmt(value / 1024 ** 3) + " GiB";
   if (value >= 1024 ** 2) return fmt(value / 1024 ** 2) + " MiB";

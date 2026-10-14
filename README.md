@@ -49,7 +49,9 @@ HDR 浮点代码仅导入 `three`，默认导出同步 `createScene({width,heigh
 
 本地创作源码可放在 `workspace/authored/`，使用本地 `workspace/tsconfig.json` 指向 `frontend` 的 TypeScript 设置与已安装的 Three 类型声明。工作区不纳入 Git 或前端应用构建。
 
-MCP/CLI 使用 `get_motion_delivery_options` 发现输出，`render_motion_frame` 检查未保存草稿的 sRGB 图片和原始浮点范围，`submit_motion_render` 的 `output` 为 `{"master_bit_depth":32,"video":"pq"}`（video 可选 none/pq/hlg）。导出包含逐帧 EXR、母版 ZIP、源码、快照、缩略图、可选 HDR 视频与验证报告；`inspect_frame` / `sample_pixels` 可检查原始母版。重试验证缓存哈希与运行环境，复用完整 EXR；不伪造 HDR 峰值元数据。
+MCP/CLI 使用 `get_motion_delivery_options` 发现输出，`render_motion_frame` 检查未保存草稿的 sRGB 图片和原始浮点范围，`submit_motion_render` 的 `output` 为 `{"master_bit_depth":32,"video":"pq"}`（video 可选 none/pq/hlg）。浮点动画直接在导出盘的任务临时目录生成逐帧 EXR、源码、快照、缩略图、可选视频与验证报告，验证后原地发布；workspace 不再复制母版。失败或中断保留已验证帧，重试校验帧哈希和冻结的 GPU/运行环境/色彩配置。`inspect_frame` / `sample_pixels` 可检查导出目录中的原始母版。
+
+“下载 ACEScg 母版 ZIP”在下载时流式打包，不在服务端保存 ZIP；浏览器下载位置会保存用户请求的归档。MCP/CLI 可通过 `export_artifact` 将同一虚拟 `master-archive` 写入指定文件。流式 ZIP 不支持断点下载，中断后需重新开始。旧任务文件和快照保留不迁移；升级改变运行时指纹后，旧任务若要继续渲染需重新提交。
 
 模型/CLI 使用 `list_motion_templates`、`create_motion_scene`、`get_motion_scene`、`update_motion_scene`、`compile_motion_preview`、`submit_motion_render` 等共享操作，例如 `chromascript call list_motion_templates`。`get_documentation` 的 `motion` 主题提供完整调用约定。
 

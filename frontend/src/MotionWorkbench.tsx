@@ -173,10 +173,16 @@ export function MotionWorkbench({
   const [destinationError, setDestinationError] = useState("");
   const [directoryPicking, setDirectoryPicking] = useState(false);
   const [saved, setSaved] = useState<MotionReply | null>(null);
+  const savedRef = useRef(saved);
+  savedRef.current = saved;
   const [draft, setDraft] = useState<Draft | null>(null);
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const [composing, setComposing] = useState(false);
+  const composingRef = useRef(false);
+  const [syncError, setSyncError] = useState("");
+  const [syncPaused, setSyncPaused] = useState(false);
+  const [externalRevision, setExternalRevision] = useState("");
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
   const [pending, setPending] = useState("");
@@ -201,6 +207,120 @@ export function MotionWorkbench({
     !!saved &&
     JSON.stringify(draft) !== JSON.stringify(fromSpec(saved.scene));
   const directory = destination ?? destinationOptions?.default_directory ?? "";
+  const savedId = saved?.record.id;
+
+  useEffect(() => {
+    if (!active || !savedId || pending || composing || syncPaused) return;
+    let stopped = false;
+    let reading = false;
+    let halted = false;
+    let failures = 0;
+    let generation = 0;
+    let rescan = false;
+    let timer: number | undefined;
+    let controller: AbortController | undefined;
+
+    const poll = async () => {
+      if (stopped || reading || document.hidden || busy.current) return;
+      const baseline = savedRef.current;
+      if (!baseline || baseline.record.id !== savedId) return;
+      reading = true;
+      rescan = false;
+      const requestGeneration = generation;
+      const abort = new AbortController();
+      controller = abort;
+      let delay = 1000;
+      const isCurrent = () =>
+        !stopped &&
+        !abort.signal.aborted &&
+        requestGeneration === generation &&
+        !document.hidden &&
+        !busy.current &&
+        !composingRef.current &&
+        savedRef.current?.record.id === savedId &&
+        savedRef.current.record.project_id === projectId &&
+        savedRef.current.revision_id === baseline.revision_id;
+      try {
+        const reply = await call<MotionReply>(
+          "get_motion_scene",
+          { scene_id: savedId },
+          AbortSignal.any([abort.signal, AbortSignal.timeout(10000)]),
+        );
+        // Recheck the live baseline, not the state captured by an old render.
+        // A save, selection, IME session or hidden tab invalidates this read.
+        const currentSaved = savedRef.current;
+        if (!isCurrent() || !currentSaved) return;
+        failures = 0;
+        setSyncError("");
+        // A delayed library read may contain the old name even after the editor
+        // accepts a revision. Repair only this selected record, without discovery.
+        setScenes((old) =>
+          old.some(
+            (item) =>
+              item.id === savedId && item.revision_id !== reply.revision_id,
+          )
+            ? old.map((item) => (item.id === savedId ? reply.record : item))
+            : old,
+        );
+        if (reply.revision_id === currentSaved.revision_id) return;
+        const currentDraft = draftRef.current;
+        if (
+          currentDraft &&
+          JSON.stringify(currentDraft) !==
+            JSON.stringify(fromSpec(currentSaved.scene))
+        ) {
+          // Keep the original expected_revision_id: adopting a remote baseline
+          // under a local draft would allow a later save to silently overwrite it.
+          setExternalRevision(reply.revision_id);
+          setConflict(true);
+          return;
+        }
+        savedRef.current = reply;
+        draftRef.current = fromSpec(reply.scene);
+        setSaved(reply);
+        setDraft(draftRef.current);
+        setExternalRevision("");
+        setConflict(false);
+        setStatus("已同步外部更新。");
+      } catch (cause) {
+        // Suspension is cancellation, while a timeout is a genuine failed read.
+        // Sync owns its feedback and never clears explicit save/conflict errors.
+        if (!isCurrent()) return;
+        failures += 1;
+        halted = failures >= 3;
+        delay = failures === 1 ? 2000 : 4000;
+        setSyncError(
+          (halted
+            ? "自动同步已暂停，代码和草稿已保留。请使用上方连接按钮重新连接。"
+            : "暂时无法同步动画，代码和草稿已保留，将自动重试。") +
+            " " +
+            text(cause),
+        );
+        if (halted) setSyncPaused(true);
+      } finally {
+        reading = false;
+        if (!stopped && !halted && !document.hidden)
+          timer = window.setTimeout(() => void poll(), rescan ? 0 : delay);
+      }
+    };
+    const visibility = () => {
+      generation += 1;
+      window.clearTimeout(timer);
+      controller?.abort();
+      rescan = !document.hidden;
+      // If a suspended read is still settling, its finally schedules this scan;
+      // otherwise read immediately on return. Never overlap active requests.
+      if (rescan) void poll();
+    };
+    document.addEventListener("visibilitychange", visibility);
+    void poll();
+    return () => {
+      stopped = true;
+      controller?.abort();
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", visibility);
+    };
+  }, [active, savedId, projectId, pending, composing, syncPaused, refresh]);
 
   const run = useCallback(
     async <T,>(
@@ -408,9 +528,14 @@ export function MotionWorkbench({
     else action();
   }
   function select(reply: MotionReply) {
+    savedRef.current = reply;
+    draftRef.current = fromSpec(reply.scene);
     setSaved(reply);
-    setDraft(fromSpec(reply.scene));
+    setDraft(draftRef.current);
     setConflict(false);
+    setExternalRevision("");
+    setSyncError("");
+    setSyncPaused(false);
     setError("");
   }
   async function open(sceneId: string) {
@@ -435,7 +560,15 @@ export function MotionWorkbench({
     }
   }
   function change(key: keyof Draft, value: string) {
-    setDraft((old) => (old ? { ...old, [key]: value } : old));
+    // Protect edits immediately, even if a background read settles before React
+    // commits the input event. The same reference also guards late save replies.
+    if (!draftRef.current) return;
+    draftRef.current = { ...draftRef.current, [key]: value };
+    setDraft(draftRef.current);
+  }
+  function compose(value: boolean) {
+    composingRef.current = value;
+    setComposing(value);
   }
   async function save() {
     if (!saved || !valid.spec || !draft) return;
@@ -448,10 +581,15 @@ export function MotionWorkbench({
       }),
     );
     if (reply) {
+      savedRef.current = reply;
       setSaved(reply);
       // Editing may continue while saving. A late acknowledgement never replaces newer text.
-      if (draftRef.current === captured) setDraft(fromSpec(reply.scene));
+      if (draftRef.current === captured) {
+        draftRef.current = fromSpec(reply.scene);
+        setDraft(draftRef.current);
+      }
       setConflict(false);
+      setExternalRevision("");
       setRefresh((old) => old + 1);
       setStatus("动画已保存。");
     }
@@ -522,7 +660,13 @@ export function MotionWorkbench({
       : null;
 
   return (
-    <main hidden={!active} className="workbench motion-workbench">
+    <main
+      hidden={!active}
+      className="workbench motion-workbench"
+      // IME protects metadata and canvas fields as well as the code editor.
+      onCompositionStartCapture={() => compose(true)}
+      onCompositionEndCapture={() => compose(false)}
+    >
       <div className="workbench-context">
         <div className="context-title">
           <h1 ref={heading} tabIndex={-1}>
@@ -562,6 +706,8 @@ export function MotionWorkbench({
               // clearing its list would not trigger a new project-dependent fetch.
               if (id === projectId) return;
               guard("切换项目", () => {
+                savedRef.current = null;
+                draftRef.current = null;
                 setProjectId(id);
                 setSaved(null);
                 setDraft(null);
@@ -639,6 +785,7 @@ export function MotionWorkbench({
             onClick={() => {
               void run("重新连接", async () => {
                 await connect();
+                setSyncPaused(false);
                 setRefresh((old) => old + 1);
               });
             }}
@@ -743,7 +890,7 @@ export function MotionWorkbench({
               <CodeEditor
                 value={draft.code}
                 onChange={(code) => change("code", code)}
-                onComposing={setComposing}
+                onComposing={compose}
               />
               <p id="motion-code-help" className="technical-note">
                 {draft.engine === "remotion-sdr-v1"
@@ -773,6 +920,14 @@ export function MotionWorkbench({
                   </Button>
                 )}
               </div>
+              <Notice
+                text={
+                  externalRevision
+                    ? "检测到外部更新，已保留未保存修改。可复制代码，或载入最新版本。"
+                    : ""
+                }
+              />
+              <Notice text={syncError} error />
               <Notice text={valid.error} error />
               <details className="technical-note">
                 <summary>代码约定与可用依赖</summary>
@@ -1062,8 +1217,10 @@ export function MotionWorkbench({
                 </a>
               )}
               {archive && (
+                // Native downloads stream to the browser's chosen location;
+                // never fetch an entire EXR archive into an in-memory Blob.
                 <a href={artifactUrl(archive.id, true)} className="button">
-                  下载 ACEScg 母版
+                  下载 ACEScg 母版 ZIP
                 </a>
               )}
               {report && (
@@ -1083,6 +1240,12 @@ export function MotionWorkbench({
                   <OpenExportFolder directory={job.export_path} />
                 )}
             </div>
+            {archive?.representation === "zip-stream" && (
+              <p className="panel-description">
+                母版 ZIP
+                在下载时生成，不额外占用导出盘空间；下载中断后需重新开始。
+              </p>
+            )}
             {job.export_completed && (
               <p className="mono motion-path">{job.export_path}</p>
             )}

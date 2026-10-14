@@ -28,7 +28,10 @@ def create_mcp(root: Path) -> MCPServer:
     def register(name: str, model: type[BaseModel], description: str) -> None:
         async def invoke(request):
             info = endpoint(root)
-            async with httpx.AsyncClient(timeout=60) as client:
+            # Large explicit local exports must not time out while their exclusive
+            # destination is still being written by the shared service.
+            timeout = httpx.Timeout(60, read=None) if name == "export_artifact" else httpx.Timeout(60)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
                     info["url"] + "/api/operations/" + name,
                     # Keep nested explicit-field intent identical to direct HTTP.

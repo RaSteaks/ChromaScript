@@ -452,8 +452,12 @@ class Artifact(Model):
     name: str
     kind: str
     relative_path: str
+    # Delivery paths are relative to the frozen job bundle, never caller-supplied roots.
+    storage: Literal["workspace", "delivery"] = "workspace"
+    representation: Literal["file", "zip-stream"] = "file"
     mime_type: str
-    size_bytes: int
+    # Virtual ZIPs have no stored size; do not report an estimate as actual bytes.
+    size_bytes: int | None
     created_at: str
     metadata: dict[str, Any] = Field(default_factory=dict)
 

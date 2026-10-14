@@ -24,6 +24,9 @@ def render_float_frames(
     expected_gpu: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     directory.mkdir(parents=True, exist_ok=True)
+    # Interrupted transport is disposable, unlike the independently verified EXRs.
+    for raw in directory.glob("frame-*.f32"):
+        raw.unlink()
     log_path = directory / "renderer.log"
     with log_path.open("w") as log:
         process = subprocess.Popen(
@@ -46,9 +49,9 @@ def render_float_frames(
                         "browser": browser_executable(),
                         "frame_indices": indices,
                     }
-                )
+                ) + "\n"
             )
-            process.stdin.close()
+            process.stdin.flush()
             received: set[int] = set()
             # A stalled shader/source must not occupy a worker forever. Successful
             # frame progress resets the deadline; total sequence length is unrestricted.
@@ -76,9 +79,16 @@ def render_float_frames(
                         and json.loads((directory / "gpu.json").read_text()) != expected_gpu
                     ):
                         raise ChromaError("gpu_changed", "GPU 后端已改变，请重新提交任务。")
-                    on_frame(frame, directory / f"frame-{frame}.f32")
+                    raw = directory / f"frame-{frame}.f32"
+                    on_frame(frame, raw)
+                    raw.unlink(missing_ok=True)
+                    # Backpressure covers EXR write/readback/hash verification,
+                    # not just Node's file write or stdout pipe buffering.
+                    process.stdin.write(canonical({"accepted": frame}) + "\n")
+                    process.stdin.flush()
                     received.add(frame)
                     deadline = time.monotonic() + 60
+            process.stdin.close()
             if process.wait(timeout=10) or received != set(indices):
                 raise ChromaError("motion_render", log_path.read_text()[-6000:] or "浮点帧不完整。")
             probe = json.loads((directory / "gpu.json").read_text())

@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import type { MotionReply } from "../src/types";
 
 async function showExamples(page: Page) {
@@ -466,7 +466,7 @@ test("project discovery loading and failure never masquerade as an empty workspa
 test("HDR delivery choices preserve the sRGB preview and export half-float masters", async ({
   page,
 }) => {
-  await setup(page);
+  const { call } = await setup(page);
   const picture = page.locator("iframe[title='动画画面']");
   const source = await picture.getAttribute("srcdoc");
   await page.getByLabel("EXR 母版精度", { exact: true }).selectOption("16");
@@ -482,7 +482,7 @@ test("HDR delivery choices preserve the sRGB preview and export half-float maste
     exact: true,
   });
   await expect(
-    results.getByRole("link", { name: "下载 ACEScg 母版", exact: true }),
+    results.getByRole("link", { name: "下载 ACEScg 母版 ZIP", exact: true }),
   ).toBeVisible({ timeout: 60000 });
   await expect(
     results.getByRole("link", { name: "下载视频 MP4", exact: true }),
@@ -496,6 +496,45 @@ test("HDR delivery choices preserve the sRGB preview and export half-float maste
   const report = await (await page.request.get(href!)).json();
   expect(report.verification.master_bit_depth).toBe(16);
   expect(report.verification.scene_linear_master).toBe(true);
+  // A native ZIP download must leave the completed EXR directory unchanged;
+  // neither the UI nor the daemon should materialize another archive cache.
+  const masterLink = results.getByRole("link", {
+    name: "下载 ACEScg 母版 ZIP",
+    exact: true,
+  });
+  const archiveUrl = await masterLink.getAttribute("href");
+  const archiveId = archiveUrl!.split("/").at(-1)!.split("?")[0];
+  const description = await call<{
+    artifact: {
+      job_id: string;
+      representation: string;
+      size_bytes: number | null;
+    };
+    local_path: string | null;
+  }>("get_artifact", { artifact_id: archiveId });
+  expect(description.artifact.representation).toBe("zip-stream");
+  expect(description.artifact.size_bytes).toBeNull();
+  expect(description.local_path).toBeNull();
+  const delivery = await call<{ job: { export_path: string } }>("get_job", {
+    job_id: description.artifact.job_id,
+  });
+  const before = readdirSync(delivery.job.export_path, { recursive: true });
+  expect(before.filter((name) => String(name).endsWith(".exr"))).toHaveLength(
+    12,
+  );
+  expect(before.some((name) => String(name).endsWith(".zip"))).toBe(false);
+  await expect(results).toContainText("母版 ZIP 在下载时生成");
+  const downloading = page.waitForEvent("download");
+  await masterLink.click();
+  const download = await downloading;
+  expect(await download.failure()).toBeNull();
+  expect(download.suggestedFilename()).toBe("ACEScg-masters.zip");
+  expect(readFileSync((await download.path())!).subarray(0, 4)).toEqual(
+    Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+  );
+  expect(readdirSync(delivery.job.export_path, { recursive: true })).toEqual(
+    before,
+  );
 });
 
 // Compare actual GPU display pixels against the CPU OCIO path used for exported
@@ -673,7 +712,7 @@ for (const template of ["title", "sdr-three"]) {
       results.getByRole("link", { name: "下载视频 MP4", exact: true }),
     ).toBeVisible({ timeout: 60000 });
     await expect(
-      results.getByRole("link", { name: "下载 ACEScg 母版", exact: true }),
+      results.getByRole("link", { name: "下载 ACEScg 母版 ZIP", exact: true }),
     ).toHaveCount(0);
     const url = await results
       .getByRole("link", { name: "下载验证报告", exact: true })

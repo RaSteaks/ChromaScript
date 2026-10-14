@@ -199,7 +199,10 @@ export type Artifact = {
   name: string;
   kind: string;
   mime_type: string;
-  size_bytes: number;
+  // Historical files remain workspace-backed; virtual ZIPs have no stored byte size.
+  size_bytes: number | null;
+  storage?: "workspace" | "delivery";
+  representation?: "file" | "zip-stream";
   metadata: Record<string, unknown>;
   job_id: string;
   relative_path: string;
@@ -261,5 +264,6 @@ export type MotionDeliveryOptions = {
   default: MotionOutput;
   contract: "motion-dual-v1";
   master_bit_depths: (16 | 32)[];
+  master_archive?: "zip-stream" | null;
   videos: { value: MotionOutput["video"]; label: string; available: boolean }[];
 };
