@@ -429,6 +429,28 @@ class AudioOperations:
             return self._save_audio(project_id, name, path, {"source": "synthesis", **metadata})
 
     @operation(
+        "Read project-specific local audio storage and production rules before creating sound. Returns absolute source/managed directories, format requirements and the attach-to-timeline workflow."
+    )
+    def get_audio_guidelines(self, project_id: str) -> dict[str, Any]:
+        from .documentation import DOCUMENTS
+
+        self._audio_project(project_id)
+        # Suggested authoring paths are not created by discovery. Only import/
+        # synthesis owns immutable managed files and their database/artifact IDs.
+        return {
+            "project_id": project_id,
+            "source_directory": str(self.store.root / "audio-sources" / project_id),
+            "managed_directory": str(self.store.root / "audio"),
+            "managed_filename": "<asset_id>.wav",
+            "sample_rate": RATE,
+            "channels": CHANNELS,
+            "sample_format": "signed 32-bit little-endian integer PCM",
+            "max_asset_seconds": MAX_SECONDS,
+            "max_input_bytes": MAX_INPUT_BYTES,
+            "documentation": DOCUMENTS["audio"],
+        }
+
+    @operation(
         "List a project's immutable audio assets and revisioned timeline. Asset IDs also identify playable/exportable WAV artifacts."
     )
     def get_project_audio(self, project_id: str) -> dict[str, Any]:

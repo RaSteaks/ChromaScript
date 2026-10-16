@@ -1057,6 +1057,7 @@ export function MotionWorkbench({
             </section>
             <div className="motion-preview-column">
               <MotionPreview
+                projectId={projectId}
                 spec={valid.spec}
                 sceneId={saved!.record.id}
                 active={active}

@@ -250,7 +250,7 @@ export function ProjectAudio({
           <div className="project-audio">
             <p className="panel-description">
               音轨用于此项目的所有新交付任务。视频包含混音，图像序列附带
-              WAV；编辑预览暂不播放音轨。
+              WAV；保存音轨后，点击预览播放即可同步听见声音。
             </p>
             <div className="status-line" aria-live="polite">
               {pending || (!loaded && !error ? "正在读取音频…" : status)}

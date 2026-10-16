@@ -19,7 +19,10 @@ test("project audio import, synthesis, drafts, conflicts and accessibility", asy
   });
   await page.goto("/");
   await page.getByLabel("当前项目", { exact: true }).selectOption(project.id);
-  await page.getByRole("button", { name: "项目音频", exact: true }).click();
+  // WebKit does not focus buttons on a pointer click; begin from keyboard focus
+  // so the existing restoration assertion tests a real prior focus target.
+  await page.getByRole("button", { name: "项目音频", exact: true }).focus();
+  await page.getByRole("button", { name: "项目音频", exact: true }).press("Enter");
   const dialog = page.getByRole("dialog", { name: "项目音频", exact: true });
   await expect(
     dialog.getByText("当前没有音轨，交付将保持静音。"),

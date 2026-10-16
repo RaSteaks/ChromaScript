@@ -7,6 +7,7 @@ import {
   StepBack,
   StepForward,
 } from "lucide-react";
+import { PreviewAudio, type PreviewAudioHandle } from "./PreviewAudio";
 import { call } from "./api";
 import { Button, Notice } from "./components";
 import type { MotionSpec } from "./types";
@@ -23,17 +24,23 @@ type Picture = {
 export function MotionPreview({
   spec,
   sceneId,
+  projectId,
   active,
   composing,
 }: {
   spec: MotionSpec | null;
   sceneId: string;
+  projectId: string;
   active: boolean;
   composing: boolean;
 }) {
+  const audio = useRef<PreviewAudioHandle>(null);
   const [pictures, setPictures] = useState<Picture[]>([]);
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<{
+    message: string;
+    channel?: string;
+  } | null>(null);
   const [retry, setRetry] = useState(0);
   const [frame, setFrame] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -45,6 +52,10 @@ export function MotionPreview({
   const accepted = pictures.find((picture) => picture.ready);
   const command = useCallback((type: string, value?: number) => {
     const picture = current.current.find((item) => item.ready);
+    if (picture && type === "seek" && value !== undefined) {
+      const spec: MotionSpec = JSON.parse(picture.recipe);
+      audio.current?.seek((value * spec.fps.denominator) / spec.fps.numerator);
+    }
     if (picture)
       windows.current
         .get(picture.channel)
@@ -58,7 +69,7 @@ export function MotionPreview({
     setPictures([]);
     setFrame(0);
     setPlaying(false);
-    setError("");
+    setError(null);
     failed.current.clear();
   }, [sceneId]);
 
@@ -74,7 +85,7 @@ export function MotionPreview({
     const abort = new AbortController();
     const timer = window.setTimeout(async () => {
       setPending(true);
-      setError("");
+      setError(null);
       command("pause");
       try {
         const reply = await call<{ html: string; channel: string }>(
@@ -94,7 +105,9 @@ export function MotionPreview({
           ]);
       } catch (cause) {
         if (!cancelled) {
-          setError(cause instanceof Error ? cause.message : String(cause));
+          setError({
+            message: cause instanceof Error ? cause.message : String(cause),
+          });
           setPending(false);
         }
       }
@@ -115,7 +128,9 @@ export function MotionPreview({
         old.filter((picture) => picture.channel !== candidate.channel),
       );
       setPending(false);
-      setError("预览启动超时，已保留上一版画面。请检查代码后重新编译。");
+      setError({
+        message: "预览启动超时，已保留上一版画面。请检查代码后重新编译。",
+      });
     }, 15000);
     return () => window.clearTimeout(timer);
   }, [pictures]);
@@ -134,8 +149,13 @@ export function MotionPreview({
       )
         return;
       if (data.type === "error") {
-        failed.current.add(data.channel);
-        setError(String(data.value));
+        // Reject broken candidates, but keep a mounted renderer's channel alive:
+        // a later seek can recover from a frame-specific GPU/runtime failure.
+        if (!picture.ready) failed.current.add(data.channel);
+        setError({
+          message: String(data.value),
+          channel: picture.ready ? data.channel : undefined,
+        });
         setPending(false);
         setPlaying(false);
         if (!picture.ready)
@@ -152,7 +172,7 @@ export function MotionPreview({
             .map((item) => ({ ...item, ready: true })),
         );
         setPending(false);
-        setError("");
+        setError(null);
         setPlaying(false);
         windows.current.get(data.channel)?.contentWindow?.postMessage(
           {
@@ -169,8 +189,12 @@ export function MotionPreview({
         Number.isInteger(data.value) &&
         data.value >= 0 &&
         data.value < picture.frames
-      )
+      ) {
         setFrame(data.value);
+        // Only an acknowledged rendered frame clears this picture's error;
+        // playback of a retained picture must not hide a new draft's failure.
+        setError((old) => (old?.channel === data.channel ? null : old));
+      }
       if (
         picture.ready &&
         data.type === "playing" &&
@@ -192,6 +216,13 @@ export function MotionPreview({
   }, [active, command]);
 
   const stale = !!accepted && accepted.recipe !== recipe;
+  // Retained pictures keep their own rational rate when a replacement draft fails.
+  const acceptedSpec: MotionSpec | null = accepted
+    ? JSON.parse(accepted.recipe)
+    : null;
+  const rate = acceptedSpec
+    ? acceptedSpec.fps.numerator / acceptedSpec.fps.denominator
+    : 1;
   const maxFrame = (accepted?.frames || spec?.frames || 1) - 1;
   return (
     <section className="motion-preview-panel" aria-label="动画实时预览">
@@ -234,9 +265,11 @@ export function MotionPreview({
         {pending
           ? "正在编译草稿…"
           : error
-            ? accepted
-              ? "当前草稿未能预览；上一版可用画面已保留。"
-              : "当前草稿未能预览，请检查下方错误。"
+            ? error.channel
+              ? "当前帧未能预览；可拖动时间线重试，或重新编译。"
+              : accepted
+                ? "当前草稿未能预览；上一版可用画面已保留。"
+                : "当前草稿未能预览，请检查下方错误。"
             : stale
               ? "显示上一版画面，等待当前草稿编译。"
               : accepted
@@ -245,7 +278,10 @@ export function MotionPreview({
       </div>
       <div className="motion-playback">
         <Button
-          onClick={() => command(playing ? "pause" : "play")}
+          onClick={() => {
+            if (!playing) audio.current?.unlock();
+            command(playing ? "pause" : "play");
+          }}
           disabled={!accepted}
           aria-label={playing ? "暂停动画" : "播放动画"}
         >
@@ -299,7 +335,18 @@ export function MotionPreview({
           command("seek", Number(event.target.value));
         }}
       />
-      <Notice text={error} error />
+      <PreviewAudio
+        key={`${projectId}:${sceneId}`}
+        ref={audio}
+        projectId={projectId}
+        active={active}
+        playing={playing && !!accepted && !error?.channel}
+        frameDuration={1 / rate}
+        seconds={frame / rate}
+        duration={(maxFrame + 1) / rate}
+        clockKey={`${sceneId}:${accepted?.channel}`}
+      />
+      <Notice text={error?.message || ""} error />
       <p className="technical-note">
         {spec?.engine === "remotion-sdr-v1"
           ? "SDR 网页画面 · sRGB 8-bit。保留网页图层与原始动画代码。"

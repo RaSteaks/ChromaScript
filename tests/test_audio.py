@@ -278,6 +278,12 @@ def test_mcp_audio_calls_use_shared_daemon(tmp_path, monkeypatch):
                 )
                 wav = http.get("/api/artifacts/" + asset["id"], headers={"Range": "bytes=0-43"})
                 assert wav.status_code == 206 and wav.content[:4] == b"RIFF"
+                guidelines = await mcp.call_tool(
+                    "chromascript.get_audio_guidelines", {"request": {"project_id": pid}}
+                )
+                assert not guidelines.is_error
+                assert guidelines.structured_content["sample_rate"] == 48000
+                assert guidelines.structured_content["managed_directory"] == str(tmp_path / "audio")
                 doc = await mcp.read_resource("chromascript://docs/audio")
                 assert "create_audio" in doc.contents[0].text
 
@@ -407,3 +413,25 @@ def test_low_video_fps_does_not_certify_truncated_audio(audio_project, tmp_path)
             lambda n: None,
             audio_path=service.store.file(asset["relative_path"]),
         )
+
+
+def test_project_audio_guidelines_paths_and_transport(audio_project, monkeypatch):
+    service, project, asset = audio_project
+    result = execute(service, "get_audio_guidelines", {"project_id": project})
+    # Discovery is read-only and identifies the actual managed file convention.
+    assert result["managed_directory"] == str(service.store.root / "audio")
+    assert result["source_directory"] == str(service.store.root / "audio-sources" / project)
+    assert not (service.store.root / "audio-sources").exists()
+    assert service.get_artifact(asset["id"])["local_path"] == str(
+        service.store.root / "audio" / f"{asset['id']}.wav"
+    )
+    assert "1.001" in result["documentation"]
+    assert "COMPLETE clips array" in result["documentation"]
+    assert "Web live WGSL and animation previews" in result["documentation"]
+    monkeypatch.setattr("chromascript.cli.call", lambda root, op, args: execute(service, op, args))
+    reply = CliRunner().invoke(
+        app, ["call", "get_audio_guidelines", "--arguments", '{"project_id":"' + project + '"}']
+    )
+    assert reply.exit_code == 0 and "source_directory" in reply.stdout
+    with pytest.raises(ChromaError, match="does not exist"):
+        execute(service, "get_audio_guidelines", {"project_id": "missing"})

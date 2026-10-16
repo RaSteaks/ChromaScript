@@ -104,6 +104,96 @@ for (const suspendedAudio of [false, true]) {
   });
 }
 
+for (const width of [1440, 390]) {
+  test(`HDR GPU errors preserve timeline dragging and recover on a rendered frame (${width}px)`, async ({
+    page,
+  }) => {
+    await setup(page);
+    await page.setViewportSize({ width, height: 1000 });
+    const preview = page.getByRole("region", { name: "动画实时预览" });
+    const timeline = page.getByLabel("动画时间线", { exact: true });
+    const body = page.frameLocator("iframe[title='动画画面']").locator("body");
+    const failNextRender = async () => {
+      // Inject one driver error after startup so the real bridge exercises its
+      // draw/catch/pause path; subsequent frames still use the actual GPU renderer.
+      await body.evaluate(() => {
+        const gl = document.querySelector("canvas")!.getContext("webgl2")!;
+        const getError = gl.getError.bind(gl);
+        gl.getError = () => {
+          gl.getError = getError;
+          return gl.INVALID_OPERATION;
+        };
+      });
+    };
+    await failNextRender();
+    await timeline.fill("7");
+    await expect(preview.getByRole("alert")).toContainText(
+      "HDR GPU 渲染失败。",
+    );
+    await expect(body).toHaveAttribute("data-frame", "0");
+    await expect(timeline).toHaveValue("0");
+    await expect(preview.getByRole("status")).toContainText("可拖动时间线重试");
+
+    // Exercise a pointer drag, not just programmatic range input, after failure.
+    await timeline.scrollIntoViewIfNeeded();
+    const track = (await timeline.boundingBox())!;
+    await page.mouse.move(track.x + 8, track.y + track.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(
+      track.x + track.width * 0.75,
+      track.y + track.height / 2,
+      {
+        steps: 8,
+      },
+    );
+    await page.mouse.up();
+    await expect(timeline).not.toHaveValue("0");
+    await expect(body).toHaveAttribute(
+      "data-frame",
+      await timeline.inputValue(),
+    );
+    await expect(preview.getByRole("alert")).not.toBeVisible();
+
+    // Keyboard seeking and playback must recover repeatedly on the same iframe.
+    await failNextRender();
+    await timeline.fill("4");
+    await expect(preview.getByRole("alert")).toContainText(
+      "HDR GPU 渲染失败。",
+    );
+    await timeline.focus();
+    await page.keyboard.press("Home");
+    await expect(timeline).toHaveValue("0");
+    await expect(body).toHaveAttribute("data-frame", "0");
+    await expect(preview.getByRole("alert")).not.toBeVisible();
+    await failNextRender();
+    await page.getByRole("button", { name: "播放动画", exact: true }).click();
+    await expect(preview.getByRole("alert")).toContainText(
+      "HDR GPU 渲染失败。",
+    );
+    await page.getByRole("button", { name: "播放动画", exact: true }).click();
+    await expect(body).not.toHaveAttribute("data-frame", "0");
+    await expect(preview.getByRole("alert")).not.toBeVisible();
+    await page.getByRole("button", { name: "暂停动画", exact: true }).click();
+
+    // Frames from the retained picture cannot clear a different draft's failure.
+    await editCode(page, "export default function {");
+    await expect(preview.getByRole("alert")).toContainText("Expected");
+    await timeline.fill("5");
+    await expect(timeline).toHaveValue("5");
+    await expect(body).toHaveAttribute("data-frame", "5");
+    await expect(preview.getByRole("alert")).toContainText("Expected");
+    await editCode(
+      page,
+      "export default function Broken() { throw new Error('candidate-check'); }",
+    );
+    await expect(preview.getByRole("alert")).toContainText("candidate-check");
+    await timeline.fill("6");
+    await expect(timeline).toHaveValue("6");
+    await expect(body).toHaveAttribute("data-frame", "6");
+    await expect(preview.getByRole("alert")).toContainText("candidate-check");
+  });
+}
+
 test("HDR editing, seeking, recovery and actual local video export", async ({
   page,
 }) => {

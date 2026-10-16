@@ -29,6 +29,7 @@ import {
   Workflow,
 } from "lucide-react";
 import { artifactUrl, call, connect } from "./api";
+import { PreviewAudio, type PreviewAudioHandle } from "./PreviewAudio";
 import { ProjectAudio } from "./ProjectAudio";
 import { WorkflowNav, WORKFLOW, type WorkflowStep } from "./WorkflowNav";
 import { DeliveryEditor } from "./DeliveryEditor";
@@ -583,6 +584,8 @@ export default function App() {
     Number(frame) >= 0 &&
     Number(frame) <= 10_000_000;
   const [fpsNumerator, fpsDenominator] = fps.split("/").map(Number);
+  // Resume the shared audio graph inside the same user gesture as visual playback.
+  const previewAudio = useRef<PreviewAudioHandle>(null);
   const live = useLivePreview(
     sceneId,
     draft && !settingsError && validLiveFrame
@@ -1390,6 +1393,19 @@ export default function App() {
                         <Button onClick={live.retry}>重试实时预览</Button>
                       </>
                     )}
+                    {liveEnabled && (
+                      <PreviewAudio
+                        key={`${projectId}:${sceneId}`}
+                        ref={previewAudio}
+                        projectId={projectId}
+                        active={live.active}
+                        playing={livePlaying && !live.error}
+                        seconds={Number(frame) / frameRate}
+                        duration={Number(frames) / frameRate}
+                        frameDuration={1 / frameRate}
+                        clockKey={sceneId}
+                      />
+                    )}
                     <div className="frame-strip">
                       {liveEnabled ? (
                         <>
@@ -1401,7 +1417,10 @@ export default function App() {
                             disabled={
                               !live.active || !!live.error || Number(frames) < 2
                             }
-                            onClick={() => setLivePlaying((value) => !value)}
+                            onClick={() => {
+                              if (!livePlaying) previewAudio.current?.unlock();
+                              setLivePlaying((value) => !value);
+                            }}
                           >
                             {livePlaying ? (
                               <Pause size={14} />

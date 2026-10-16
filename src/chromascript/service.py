@@ -114,7 +114,11 @@ class Service(MotionOperations, AudioOperations):
                       "storage": "signed 32-bit PCM WAV", "max_asset_seconds": 600,
                       "max_input_bytes": 128 * 1024**2,
                       "waveforms": ["sine", "triangle", "noise"],
-                      "timeline": "project-wide; frozen by each delivery; previews are silent"},
+                      "timeline": "project-wide; frozen by each delivery; web previews synchronize saved tracks",
+                      "guidelines_operation": "chromascript.get_audio_guidelines",
+                      "documentation_resource": "chromascript://docs/audio",
+                      "managed_directory": str(self.store.root / "audio"),
+                      "web_preview_audio": True},
             "encoders": sorted(available_encoders()),
             "resolutions": RESOLUTIONS,
             "frame_rates": FRAME_RATES,
@@ -168,7 +172,7 @@ class Service(MotionOperations, AudioOperations):
             "note": "压缩体积和速度取决于画面；视频编码另需磁盘空间。",
         }
 
-    @operation("Read scene, animation, color, delivery, or model workflow documentation.")
+    @operation("Read scene, animation, audio storage/production, color, delivery, or model workflow documentation.")
     def get_documentation(self, topic: str = "workflow") -> dict[str, Any]:
         from .documentation import DOCUMENTS
 

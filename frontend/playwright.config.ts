@@ -6,8 +6,8 @@ export default defineConfig({
   timeout: 45000,
   use: {
     baseURL: process.env.CHROMASCRIPT_URL || "http://127.0.0.1:8765",
-    browserName: "chromium",
-    channel: "chrome",
+    // Use WebKit for browser checks; do not launch Google Chrome.
+    browserName: "webkit",
     viewport: { width: 1440, height: 1000 },
     trace: "retain-on-failure",
   },

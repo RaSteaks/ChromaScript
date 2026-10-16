@@ -22,7 +22,7 @@ def create_mcp(root: Path) -> MCPServer:
         log_level="WARNING",
         version="0.1.0",
         instructions=DOCUMENTS["workflow"]
-        + " Read chromascript://docs/scene before authoring WGSL or chromascript://docs/motion before authoring Three.js HDR animations. HDR masters and sRGB preview are separate.",
+        + " Read chromascript://docs/scene before authoring WGSL or chromascript://docs/motion before authoring Three.js HDR animations. HDR masters and sRGB preview are separate. Before creating audio, call chromascript.get_audio_guidelines(project_id) and read chromascript://docs/audio for local storage and production rules.",
     )
 
     def register(name: str, model: type[BaseModel], description: str) -> None:
