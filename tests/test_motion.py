@@ -386,7 +386,8 @@ def test_legacy_sdr_revisions_open_without_migration_or_source_changes(tmp_path)
     assert opened["scene"]["code"] == saved["scene"]["code"]
     assert "engine" not in service.store.get("motion_revision", saved["revision_id"])["scene"]
     options = service.get_motion_delivery_options("remotion-sdr-v1")
-    assert {v["value"] for v in options["videos"]} == {"srgb", "rec709"}
+    # ProRes sRGB is available without exposing HDR for screenshot sources.
+    assert {v["value"] for v in options["videos"]} == {"srgb", "rec709", "prores-hq-srgb"}
     with pytest.raises(ChromaError, match="SDR"):
         service.submit_motion_render(
             opened["record"]["id"], opened["revision_id"], "reject-hdr", output=MotionOutput()

@@ -22,7 +22,13 @@ from .errors import ChromaError
 from .exports import DESTINATION_LAYOUT, RenderBundle, bundle_name, motion_bundle, publish_bundle
 from .images import file_hash, read_image, resize_srgb, write_image
 from .models import Artifact
-from .motion import MotionOutput, MotionSpec, motion_identity, resolve_motion_output
+from .motion import (
+    MotionOutput,
+    MotionSpec,
+    motion_identity,
+    motion_video_preset,
+    resolve_motion_output,
+)
 from .motion_color import decode_float_frame
 from .motion_render import iter_float_frames, render_float_frames
 from .motion_sources import source_hash, write_sources
@@ -294,15 +300,9 @@ def run_motion(root: Path, job_id: str) -> None:
         video = None
         info = None
         if output.video != "none":
-            preset = builtins()[
-                {
-                    "pq": "hdr-pq",
-                    "hlg": "hdr-hlg",
-                    "srgb": "h264-srgb-preview",
-                    "rec709": "h264-review",
-                }[output.video]
-            ]
-            video = directory / f"animation-{output.video}.mp4"
+            preset = motion_video_preset(output.video)
+            # File extension and MIME follow the frozen encoding, including MOV.
+            video = directory / f"animation-{output.video}.{preset.container}"
             # Keep encoder logs/partials outside the published payload. The final
             # video moves on the same export volume, without another data copy.
             encoded_video = work / video.name if bundle is not None else video
@@ -354,7 +354,7 @@ def run_motion(root: Path, job_id: str) -> None:
             verification["video"] = video_verification
             if encoded_video != video:
                 encoded_video.replace(video)
-            artifact(video, "video", "video/mp4", {"verification": video_verification})
+            artifact(video, "video", "video/quicktime" if preset.container == "mov" else "video/mp4", {"verification": video_verification})
         artifact(
             thumbnail,
             "preview-image",

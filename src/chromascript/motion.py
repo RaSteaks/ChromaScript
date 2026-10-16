@@ -21,10 +21,11 @@ from .encoding import available_encoders
 from .errors import ChromaError
 from .exports import DESTINATION_LAYOUT, bundle_name, volume_identity
 from .exports import export_directory as resolve_export_directory
-from .models import Job, Model, MotionRate, MotionRenderSettings
+from .models import ColorPipeline, DeliveryPreset, Job, Model, MotionRate, MotionRenderSettings
 from .motion_color import display_shader
 from .motion_sources import source_hash, validate_sources
 from .operations import operation
+from .presets import builtins
 from .store import Store, canonical, identifier, now
 
 FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
@@ -37,7 +38,11 @@ IMPORTS = ["three"]
 class MotionOutput(Model):
     # None opts into direct video encoding; historical EXR defaults stay unchanged.
     master_bit_depth: Literal[16, 32] | None = 32
-    video: Literal["none", "pq", "hlg", "srgb", "rec709"] = "none"
+    # Codec and transfer are explicit together; legacy values retain their meaning.
+    video: Literal[
+        "none", "pq", "hlg", "srgb", "rec709",
+        "prores-hq-srgb", "prores-hq-pq", "prores-hq-hlg",
+    ] = "none"
     # Spatial supersampling is independent of preview resolution and source precision.
     render_scale: Literal[1, 2, 4] = 2
 
@@ -50,6 +55,41 @@ class MotionOutput(Model):
         return value
 
 
+def motion_video_preset(video: str) -> DeliveryPreset:
+    """One encoding contract for discovery, submission and both motion workers."""
+    presets = builtins()
+    prores_spaces: dict[str, Literal["sRGB", "PQ", "HLG"]] = {
+        "prores-hq-srgb": "sRGB", "prores-hq-pq": "PQ", "prores-hq-hlg": "HLG",
+    }
+    if video in prores_spaces:
+        # Keep legacy ProRes presets intact. HQ is opaque 10-bit 4:2:2 in MOV;
+        # its codec does not choose the display transform or imply source precision.
+        return DeliveryPreset.model_validate({
+            **presets["prores-3"].model_dump(),
+            "id": f"motion-{video}",
+            "name": f"Apple ProRes 422 HQ · {prores_spaces[video]}",
+            "color": ColorPipeline(output=prores_spaces[video]).model_dump(),
+        })
+    ids = {"pq": "hdr-pq", "hlg": "hdr-hlg", "srgb": "h264-srgb-preview", "rec709": "h264-review"}
+    if video not in ids:
+        raise ChromaError("motion_output", "请选择有效的视频输出。")
+    return presets[ids[video]]
+
+
+def prores_hq_frame_bits(width: int, height: int) -> int:
+    """Plan progressive, opaque prores_ks HQ from its compressed macroblock target."""
+    # FFmpeg 7.1 proresenc_kostya.c: HQ br_tab and prores_mb_limits. Each
+    # macroblock covers 16x16 pixels, including partial edge blocks. This is
+    # a planning target, not a guaranteed size or a forced encoder bitrate.
+    # https://ffmpeg.org/doxygen/7.1/proresenc__kostya_8c_source.html
+    blocks = ((width + 15) // 16) * ((height + 15) // 16)
+    bits_per_block = next(
+        (bits for limit, bits in ((1620, 1566), (2700, 1216), (6075, 1070)) if blocks <= limit),
+        950,
+    )
+    return blocks * bits_per_block
+
+
 def resolve_motion_output(engine: MotionEngine, output: MotionOutput | None) -> MotionOutput:
     """Estimate and submission agree on engine-specific master defaults."""
     floating = engine == "three-float-v1"
@@ -57,7 +97,7 @@ def resolve_motion_output(engine: MotionEngine, output: MotionOutput | None) -> 
         MotionOutput() if floating else MotionOutput(master_bit_depth=None, video="srgb")
     )
     if not floating and (
-        output.master_bit_depth is not None or output.video not in {"srgb", "rec709"}
+        output.master_bit_depth is not None or output.video not in {"srgb", "rec709", "prores-hq-srgb"}
     ):
         raise ChromaError(
             "motion_output",
@@ -241,7 +281,7 @@ def motion_environment() -> dict[str, Any]:
                 "scene_linear_master": False,
             },
         },
-        "output": "HDR and SDR templates; engine-specific EXR/PQ/HLG/sRGB/Rec.709 delivery",
+        "output": "HDR and SDR templates; engine-specific EXR, H.264, HEVC and ProRes 422 HQ MOV delivery",
         "preview": "sRGB: OCIO ACES view for float scenes; native sRGB for SDR scenes",
         "source_precision": "engine-specific: RGBA32F float or 8-bit sRGB screenshot",
         "specification": {
@@ -398,6 +438,22 @@ class MotionOperations:
                 }
                 for v in ("pq", "hlg")
             ]
+        # The menu comes from the same registry exposed to HTTP, CLI and MCP.
+        # Encoder presence enables selection; only a decoded file verifies delivery.
+        for transfer in (["srgb", "pq", "hlg"] if floating else ["srgb"]):
+            value = f"prores-hq-{transfer}"
+            preset = motion_video_preset(value)
+            encoding = output_metadata(preset.color.output)
+            if not floating:
+                # A wider codec stores the screenshot without an ACES display view.
+                encoding = {**encoding, "output_transform": None, "source": "browser sRGB"}
+            choices.append({
+                "value": value,
+                "label": f"Apple ProRes 422 HQ · MOV · {'sRGB' if transfer == 'srgb' else transfer.upper() + ' · 1000 nits'}",
+                "available": preset.codec in encoders,
+                "reason": "" if preset.codec in encoders else "本机缺少 prores_ks 编码器",
+                "color_encoding": encoding,
+            })
         return {
             "contract": "motion-dual-v1",
             "engine": engine,
@@ -659,14 +715,23 @@ class MotionOperations:
         video = pixels * 4 * settings.frames if output.video != "none" else 0
         video_only = floating and output.master_bit_depth is None
         video_planning_bps = None
-        if video_only:
-            # CRF output has no known size in advance. Plan at 0.2 bits/pixel/frame
+        prores = output.video.startswith("prores-hq-")
+        if video_only or prores:
+            # Encoded size is unknown in advance. H.264/HEVC plan at 0.2 bits/pixel/frame
             # (at least 8 Mb/s), with 20% margin; this is NOT an encoder rate cap.
             # Exact rational duration avoids rounding fractional frame rates.
             rate = settings.fps
-            video_planning_bps = max(8_000_000, (pixels * rate.numerator + 5 * rate.denominator - 1) // (5 * rate.denominator))
-            numerator = video_planning_bps * settings.frames * rate.denominator * 6
-            video = (numerator + 40 * rate.numerator - 1) // (40 * rate.numerator)
+            if prores:
+                # Stored float/16-bit buffers are not compressed ProRes frames.
+                # Count encoded macroblocks instead; margin covers slice headers
+                # and rate variation. Keep total bytes independent of rounded fps.
+                frame_bits = prores_hq_frame_bits(settings.width, settings.height)
+                video_planning_bps = (frame_bits * rate.numerator + rate.denominator - 1) // rate.denominator
+                video = (frame_bits * settings.frames * 6 + 39) // 40
+            else:
+                video_planning_bps = max(8_000_000, (pixels * rate.numerator + 5 * rate.denominator - 1) // (5 * rate.denominator))
+                numerator = video_planning_bps * settings.frames * rate.denominator * 6
+                video = (numerator + 40 * rate.numerator - 1) // (40 * rate.numerator)
             video += 16 * 1024**2  # Muxing/index allowance; runtime monitors free space.
         auxiliary = (64 if floating else 128) * 1024**2
         audio_bytes = 0
@@ -689,7 +754,7 @@ class MotionOperations:
         destination_sufficient = destination_free >= destination_required
         workspace_sufficient = workspace_free >= workspace_required
         return {
-            "basis": "streaming-video-budget-v1" if video_only else "uncompressed-budget-v1", "engine": engine,
+            "basis": "prores-hq-compressed-budget-v1" if prores else "streaming-video-budget-v1" if video_only else "uncompressed-budget-v1", "engine": engine,
             "video_planning_bps": video_planning_bps,
             "settings": settings.model_dump(), "output": output.model_dump(),
             "export_directory": str(destination), "checked_at": now(),
@@ -711,7 +776,9 @@ class MotionOperations:
                 "母版体积按宽 × 高 × RGBA 四通道 × 每通道字节数 × 总帧数计算；ZIP 实际体积取决于画面。",
                 "空间预算含 10% 母版余量、中间帧、可选视频及音频和辅助文件，不是压缩后体积承诺。",
                 "超采样只增加中间数据，不放大最终母版。母版 ZIP 按需下载，不预留第二份序列。",
-            ]) + [
+            ]) + ([
+                "ProRes 按 prores_ks HQ 的压缩宏块目标码率规划视频预算，另加 20% 余量和封装开销；实际大小取决于画面，不按未压缩帧体积估算。",
+            ] if prores else []) + [
                 "这是全新任务的空间预算，不扣除已有缓存；不会预留磁盘空间，提交时重新检查。",
             ],
         }
@@ -748,9 +815,9 @@ class MotionOperations:
                 raise ChromaError("video_color_tags", video_tag_issue("Rec.709") or "缺少精确 Gamma 标签")
             if spec.width % 2 or spec.height % 2:
                 raise ChromaError(
-                    "motion_dimensions", "H.264/HEVC 4:2:0 要求偶数宽高；EXR 可使用奇数尺寸。"
+                    "motion_dimensions", "动画视频交付要求偶数宽高；EXR 可使用奇数尺寸。"
                 )
-            encoder = "libx265" if output.video in {"pq", "hlg"} else "libx264"
+            encoder = motion_video_preset(output.video).codec
             if encoder not in available_encoders():
                 raise ChromaError("motion_encoder", f"本机 FFmpeg 缺少 {encoder}。")
         destination = resolve_export_directory(

@@ -691,7 +691,8 @@ for (const template of ["title", "sdr-three"]) {
     );
     const video = page.getByLabel("视频输出", { exact: true });
     await expect(video).toHaveValue("srgb");
-    await expect(video.locator("option")).toHaveCount(2);
+    // SDR adds ProRes sRGB while HDR choices stay limited to float sources.
+    await expect(video.locator("option")).toHaveCount(3);
     const timeline = page.getByLabel("动画时间线", { exact: true });
     await page.getByRole("button", { name: "播放动画", exact: true }).click();
     await expect(timeline).not.toHaveValue("0");

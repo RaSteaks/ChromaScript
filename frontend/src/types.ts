@@ -274,7 +274,16 @@ export type MotionCapabilities = {
 export type MotionOutput = {
   // null selects direct encoding without an EXR sequence.
   master_bit_depth: 16 | 32 | null;
-  video: "none" | "pq" | "hlg" | "srgb" | "rec709";
+  // Values freeze codec and transfer together across HTTP, CLI and MCP.
+  video:
+    | "none"
+    | "pq"
+    | "hlg"
+    | "srgb"
+    | "rec709"
+    | "prores-hq-srgb"
+    | "prores-hq-pq"
+    | "prores-hq-hlg";
   render_scale?: 1 | 2 | 4;
 };
 export type MotionDeliveryOptions = {

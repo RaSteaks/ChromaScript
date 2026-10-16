@@ -21,10 +21,16 @@ from .errors import ChromaError
 from .exports import DESTINATION_LAYOUT, RenderBundle, bundle_name, motion_bundle, publish_bundle
 from .images import file_hash, resize_srgb, write_image
 from .models import Artifact
-from .motion import FRONTEND, MotionOutput, MotionSpec, browser_executable, motion_identity
+from .motion import (
+    FRONTEND,
+    MotionOutput,
+    MotionSpec,
+    browser_executable,
+    motion_identity,
+    motion_video_preset,
+)
 from .motion import SDR_RUNTIME as RUNTIME
 from .motion_sources import source_hash, write_sources
-from .presets import builtins
 from .store import Store, canonical, now
 
 
@@ -33,7 +39,7 @@ def browser_pixels(path: Path, spec: MotionSpec, render_scale: int = 1) -> np.nd
         if image.size != (spec.width * render_scale, spec.height * render_scale):
             raise ChromaError("motion_frame", "浏览器帧的实际尺寸与动画规格不一致。")
         pixels = np.asarray(image.convert("RGBA"), dtype=np.float32) / 255.0
-    # H.264 has no alpha. Composite the display-referred source on black in
+    # SDR video outputs are opaque. Composite the display-referred source on black in
     # linear sRGB light; never apply an ACES view to an already-rendered screenshot.
     rgb = pixels[..., :3]
     linear = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
@@ -222,7 +228,7 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
             {"frame": 0, "color_space": "sRGB", "engine": "remotion", "scene_linear_master": False},
         )
 
-        preset = builtins()["h264-srgb-preview" if output.video == "srgb" else "h264-review"]
+        preset = motion_video_preset(output.video)
 
         # SDR conversion changes display encoding only; never apply an ACES view
         # to a browser screenshot or represent it as a scene-linear HDR master.
@@ -230,11 +236,12 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
             pixels = browser_pixels(path, spec, output.render_scale)
             return (
                 pixels
-                if output.video == "srgb"
+                if preset.color.output == "sRGB"
                 else transform(pixels, "Gamma 2.4 Encoded Rec.709", source="sRGB")
             )
 
-        video = directory / "animation.mp4"
+        # ProRes changes the container, never the screenshot's source precision.
+        video = directory / f"animation.{preset.container}"
         encoded_video = work / video.name if bundle is not None else video
         progress("encoding", 0.75)
         info = encode(
@@ -267,7 +274,7 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
         artifact(
             video,
             "video",
-            "video/mp4",
+            "video/quicktime" if preset.container == "mov" else "video/mp4",
             {"engine": "remotion", "verification": verification, "source_precision": "8-bit"},
         )
         report = directory / "verification.json"

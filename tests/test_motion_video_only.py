@@ -71,7 +71,11 @@ def transport(monkeypatch):
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("video,transfer", [("pq", "smpte2084"), ("hlg", "arib-std-b67"), ("srgb", "iec61966-2-1")])
+@pytest.mark.parametrize("video,transfer", [
+    ("pq", "smpte2084"), ("hlg", "arib-std-b67"), ("srgb", "iec61966-2-1"),
+    ("prores-hq-pq", "smpte2084"), ("prores-hq-hlg", "arib-std-b67"),
+    ("prores-hq-srgb", "iec61966-2-1"),
+])
 def test_direct_video_actual_codec_color_rate_and_single_pass(tmp_path, monkeypatch, transport, video, transfer):
     service, job, bundle = make_job(tmp_path, video, scale=2)
     encoder = motion_worker.encode
@@ -106,7 +110,13 @@ def test_direct_video_actual_codec_color_rate_and_single_pass(tmp_path, monkeypa
     stream = next(s for s in report["probe"]["streams"] if s["codec_type"] == "video")
     assert stream["color_transfer"] == transfer
     assert stream["r_frame_rate"] == "30000/1001"
-    assert stream["pix_fmt"] == ("yuv420p" if video == "srgb" else "yuv420p10le")
+    # Decode evidence, including HQ profile and MOV MIME, must match the new choice.
+    if video.startswith("prores-"):
+        assert (stream["codec_name"], stream["profile"], stream["pix_fmt"]) == ("prores", "HQ", "yuv422p10le")
+        assert (bundle.target / f"animation-{video}.mov").is_file()
+        assert next(a for a in result["artifacts"] if a["kind"] == "video")["mime_type"] == "video/quicktime"
+    else:
+        assert stream["pix_fmt"] == ("yuv420p" if video == "srgb" else "yuv420p10le")
     assert report["gpu"]["format"] == "RGBA32F"
 
 

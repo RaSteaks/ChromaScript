@@ -124,7 +124,11 @@ def test_mcp_schema_resources_prompts(tmp_path: Path):
                 t.input_schema for t in tools.tools if t.name == "chromascript.submit_motion_render"
             )
             output = motion["$defs"]["MotionOutput"]["properties"]
-            assert output["video"]["enum"] == ["none", "pq", "hlg", "srgb", "rec709"]
+            # ProRes retains its transfer selection in the shared strict schema.
+            assert output["video"]["enum"] == [
+                "none", "pq", "hlg", "srgb", "rec709",
+                "prores-hq-srgb", "prores-hq-pq", "prores-hq-hlg",
+            ]
             assert output["master_bit_depth"]["anyOf"][0]["enum"] == [16, 32]
             assert {
                 "chromascript.render_motion_frame",
