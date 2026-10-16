@@ -17,7 +17,7 @@ from pydantic import Field
 from .color import color_info, output_metadata
 from .encoding import available_encoders
 from .errors import ChromaError
-from .exports import DESTINATION_LAYOUT, bundle_name
+from .exports import DESTINATION_LAYOUT, bundle_name, volume_identity
 from .exports import export_directory as resolve_export_directory
 from .models import Job, Model, Rational, RenderSettings
 from .motion_color import display_shader
@@ -617,6 +617,8 @@ class MotionOperations:
             "export_directory": str(destination),
             "export_root": str(destination),  # Freeze this selection, never a global allowlist.
             **({"storage_layout": DESTINATION_LAYOUT} if floating else {}),
+            # Persist the volume identity so remounts cannot redirect a frozen job.
+            "destination_volume": volume_identity(destination),
         }
         digest = hashlib.sha256(canonical(snapshot).encode()).hexdigest()
         stamp = now()

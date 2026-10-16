@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import os
 import re
 import shutil
+import struct
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Callable
+from uuid import UUID
 
 from .errors import ChromaError
 from .images import file_hash
@@ -51,6 +56,56 @@ def export_directory(value: str) -> Path:
         return path
     except (OSError, ValueError, RuntimeError) as exc:
         raise ChromaError("export_directory", str(exc)) from exc
+
+
+def _volume_uuid(path: Path) -> str | None:
+    """Read macOS's persistent filesystem UUID without a Disk Arbitration service."""
+    if sys.platform != "darwin":
+        return None
+    # Darwin sys/attr.h: five attribute groups, ATTR_VOL_UUID | ATTR_VOL_INFO.
+    # getattrlist returns a uint32 length followed by the requested 16 UUID bytes.
+    # This local syscall is also cheap enough for per-frame recovery checks.
+    request = ctypes.create_string_buffer(struct.pack("=HHIIIII", 5, 0, 0, 0x80040000, 0, 0, 0))
+    result = ctypes.create_string_buffer(20)
+    get_attributes = ctypes.CDLL(None, use_errno=True).getattrlist
+    get_attributes.argtypes = [
+        ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ulong,
+    ]
+    get_attributes.restype = ctypes.c_int
+    if get_attributes(os.fsencode(path), request, result, len(result), 0) != 0:
+        error = ctypes.get_errno()
+        if error in {errno.ENOTSUP, errno.ENOSYS}:
+            return None
+        raise OSError(error, os.strerror(error), str(path))
+    if struct.unpack_from("=I", result.raw)[0] != len(result):
+        raise OSError("invalid volume UUID response")
+    value = UUID(bytes=result.raw[4:20])
+    # Filesystems without a UUID may return zero; never treat that as a shared ID.
+    return str(value) if value.int else None
+
+
+def volume_identity(destination: Path) -> dict[str, Any]:
+    """Freeze persistent volume identity, independent of directories and remounts."""
+    anchor = destination
+    while not anchor.exists():
+        anchor = anchor.parent
+    device = anchor.stat().st_dev
+    try:
+        uuid = _volume_uuid(anchor)
+        # The nearest existing ancestor changes when rendering creates folders.
+        # Freeze the volume boundary instead. APFS firmlinks can share st_dev
+        # across distinct system/data UUIDs, so also stop at that UUID boundary.
+        while anchor.parent != anchor and anchor.parent.stat().st_dev == device:
+            if uuid is not None and _volume_uuid(anchor.parent) != uuid:
+                break
+            anchor = anchor.parent
+    except OSError as exc:
+        raise ChromaError("export_volume_unavailable", "无法读取导出磁盘身份，请检查磁盘后重试。") from exc
+    # Do not freeze st_dev alongside a UUID: device renumbering must not change
+    # the snapshot hash of an otherwise identical idempotent submission.
+    if uuid is not None:
+        return {"anchor": str(anchor), "uuid": uuid}
+    return {"anchor": str(anchor), "device": device}
 
 
 def bundle_name(scene_name: str, job_id: str) -> str:
@@ -97,10 +152,11 @@ def _existing_bundle(target: Path, identity: dict[str, str]) -> bool:
 class RenderBundle:
     """One resumable render on the selected volume, published by directory rename."""
 
-    def __init__(self, target: Path, root: Path, identity: dict[str, str]):
+    def __init__(self, target: Path, root: Path, identity: dict[str, str], volume: dict[str, Any] | None = None):
         self.target = target
         self.root = root
         self.identity = identity
+        self.volume = volume
         self.staging = target.parent / f".chromascript-{identity['job_id']}.partial"
         self.output = self.staging / "output"
         self.work = self.staging / "motion"
@@ -108,9 +164,37 @@ class RenderBundle:
 
     def _check_parent(self) -> None:
         # Reads also check the frozen path, but do not require write permission.
+        self.check_volume()
         parent = self.target.parent
         if parent.resolve() != parent or not parent.is_relative_to(self.root):
             raise ChromaError("export_directory_changed", "导出路径发生变化，请检查目录后重新提交。")
+
+    def check_volume(self) -> None:
+        # Never fall back to local storage when an external disk disappears or is
+        # replaced. Legacy device-only snapshots cannot safely infer a missing UUID;
+        # preserve their strict check, and leave snapshots without volume data alone.
+        if self.volume is not None:
+            try:
+                anchor = Path(self.volume["anchor"])
+                if anchor.resolve() != anchor:
+                    raise OSError("destination device changed")
+                device = anchor.stat().st_dev
+                if "uuid" in self.volume:
+                    if _volume_uuid(anchor) != self.volume["uuid"]:
+                        raise OSError("destination volume changed")
+                elif device != self.volume["device"]:
+                    raise OSError("destination device changed")
+                current = self.target.parent
+                while not current.exists():
+                    current = current.parent
+                # st_dev only checks today's mount boundary, including nested mounts.
+                if current.stat().st_dev != device:
+                    raise OSError("destination device changed")
+                if "uuid" in self.volume and current != anchor:
+                    if _volume_uuid(current) != self.volume["uuid"]:
+                        raise OSError("destination volume changed")
+            except OSError as exc:
+                raise ChromaError("export_volume_unavailable", "导出磁盘不可用或已更换；请恢复原磁盘后重试，必要时重新提交。") from exc
 
     def _check_identity(self, path: Path) -> dict[str, Any]:
         try:
@@ -237,6 +321,7 @@ def motion_bundle(job: dict[str, Any], snapshot: dict[str, Any]) -> RenderBundle
         target,
         Path(snapshot["export_root"]),
         {"job_id": job["id"], "snapshot_sha256": job["snapshot_hash"]},
+        snapshot.get("destination_volume"),
     )
 
 
