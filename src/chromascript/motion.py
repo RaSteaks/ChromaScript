@@ -12,15 +12,18 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field
+import psutil
+from pydantic import Field, field_validator, model_validator
 
-from .color import color_info, output_metadata
+from .audio import audio_sample_window, freeze_audio, read_timeline
+from .color import color_info, output_metadata, video_tag_issue
 from .encoding import available_encoders
 from .errors import ChromaError
 from .exports import DESTINATION_LAYOUT, bundle_name, volume_identity
 from .exports import export_directory as resolve_export_directory
-from .models import Job, Model, Rational, RenderSettings
+from .models import Job, Model, MotionRate, MotionRenderSettings
 from .motion_color import display_shader
+from .motion_sources import source_hash, validate_sources
 from .operations import operation
 from .store import Store, canonical, identifier, now
 
@@ -32,8 +35,37 @@ IMPORTS = ["three"]
 
 
 class MotionOutput(Model):
+    # None opts into direct video encoding; historical EXR defaults stay unchanged.
     master_bit_depth: Literal[16, 32] | None = 32
-    video: Literal["none", "pq", "hlg", "srgb", "rec709"] = "pq"
+    video: Literal["none", "pq", "hlg", "srgb", "rec709"] = "none"
+    # Spatial supersampling is independent of preview resolution and source precision.
+    render_scale: Literal[1, 2, 4] = 2
+
+    @field_validator("render_scale", mode="before")
+    @classmethod
+    def integer_scale(cls, value: Any) -> Any:
+        # Literal equality alone accepts True and 2.0; the public contract is integer-only.
+        if type(value) is not int:
+            raise ValueError("render_scale must be the integer 1, 2 or 4")
+        return value
+
+
+def resolve_motion_output(engine: MotionEngine, output: MotionOutput | None) -> MotionOutput:
+    """Estimate and submission agree on engine-specific master defaults."""
+    floating = engine == "three-float-v1"
+    output = output or (
+        MotionOutput() if floating else MotionOutput(master_bit_depth=None, video="srgb")
+    )
+    if not floating and (
+        output.master_bit_depth is not None or output.video not in {"srgb", "rec709"}
+    ):
+        raise ChromaError(
+            "motion_output",
+            "SDR 网页源码支持 sRGB/Rec.709 视频，不能生成原生 HDR 或 ACEScg 浮点母版。",
+        )
+    if floating and output.master_bit_depth is None and output.video == "none":
+        raise ChromaError("motion_output", "仅视频模式需要选择视频格式；或选择 EXR 母版精度。")
+    return output
 
 
 class MotionSpec(Model):
@@ -44,18 +76,29 @@ class MotionSpec(Model):
         max_length=200_000,
         description="For three-float-v1: Three.js factory returning scene/camera/update; linear Rec.709 float RGB converts to ACEScg. For remotion-sdr-v1: default React TSX component using useCurrentFrame; display-referred sRGB screenshot.",
     )
-    width: int = Field(default=1920, ge=16, le=4096)
-    height: int = Field(default=1080, ge=16, le=4096)
-    frames: int = Field(default=150, ge=1, le=36_000)
-    fps: Rational = Field(default_factory=lambda: Rational(numerator=30))
+    # Extra modules belong to this revision; code remains the backward-compatible entry.
+    files: dict[str, str] = Field(
+        default_factory=dict,
+        max_length=128,
+        description="Relative TS/TSX/JS/JSX chapter paths mapped to source; import them from code.",
+    )
+    width: int = Field(default=1920, ge=1, le=2_147_483_647, strict=True)
+    height: int = Field(default=1080, ge=1, le=2_147_483_647, strict=True)
+    frames: int = Field(default=150, ge=1, le=2_147_483_647, strict=True)
+    fps: MotionRate = Field(default_factory=MotionRate)
 
-    def settings(self) -> RenderSettings:
-        return RenderSettings(
+    @model_validator(mode="after")
+    def valid_sources(self) -> MotionSpec:
+        validate_sources(self.code, self.files)
+        return self
+
+    def settings(self) -> MotionRenderSettings:
+        return MotionRenderSettings(
             width=self.width, height=self.height, frames=self.frames, fps=self.fps, samples=1
         )
 
 
-def blank_motion(engine: MotionEngine = "remotion-sdr-v1") -> MotionSpec:
+def blank_motion(engine: MotionEngine = "three-float-v1") -> MotionSpec:
     """An empty runnable contract, without example objects, text, lights or animation."""
     if engine == "remotion-sdr-v1":
         code = """// An empty SDR composition. Add React, SVG or ThreeCanvas content here.
@@ -172,6 +215,12 @@ def motion_environment() -> dict[str, Any]:
             shutil.which("node") and all(packages.values()) and browser_executable()
         ),
         "imports": IMPORTS,
+        "source_modules": {
+            "field": "files", "max_files": 128, "max_total_characters": 2_000_000,
+            "extensions": [".ts", ".tsx", ".js", ".jsx"],
+            "resolution": "relative virtual paths only; explicit extension or extensionless/index",
+            "entry": {"three-float-v1": "Animation.ts", "remotion-sdr-v1": "Animation.tsx"},
+        },
         "contract": "motion-dual-v1",
         "engines": {
             "three-float-v1": {
@@ -195,6 +244,12 @@ def motion_environment() -> dict[str, Any]:
         "output": "HDR and SDR templates; engine-specific EXR/PQ/HLG/sRGB/Rec.709 delivery",
         "preview": "sRGB: OCIO ACES view for float scenes; native sRGB for SDR scenes",
         "source_precision": "engine-specific: RGBA32F float or 8-bit sRGB screenshot",
+        "specification": {
+            "integer_max": 2_147_483_647,
+            "custom_dimensions": True,
+            "custom_rational_fps": True,
+            "limits": "Actual GPU, memory, storage and encoder capabilities; no silent resizing",
+        },
         "color_configuration": color_info(),
     }
 
@@ -207,7 +262,10 @@ def motion_identity() -> dict[str, Any]:
         FRONTEND / "motion" / "preview.tsx",
         Path(__file__).with_name("motion_sdr_worker.py"),
         FRONTEND / "motion" / "float-runtime.mjs",
+        FRONTEND / "motion" / "source-modules.mjs",
+        Path(__file__).with_name("motion_sources.py"),
         Path(__file__).with_name("motion_color.py"),
+        Path(__file__).with_name("models.py"),
         Path(__file__).with_name("color.py"),
         FRONTEND / "package-lock.json",
         Path(__file__),
@@ -322,7 +380,8 @@ class MotionOperations:
             else []
         )
         choices += [
-            {"value": v, "label": label, "available": "libx264" in encoders}
+            {"value": v, "label": label, "available": "libx264" in encoders and v != "rec709",
+             "reason": video_tag_issue("Rec.709") if v == "rec709" else "" if "libx264" in encoders else "本机缺少编码器"}
             for v, label in [
                 ("srgb", "SDR · sRGB · H.264"),
                 ("rec709", "SDR · Rec.709 / Gamma 2.4 · H.264"),
@@ -334,6 +393,7 @@ class MotionOperations:
                     "value": v,
                     "label": f"HEVC Main10 · {v.upper()} · 1000 nits",
                     "available": "libx265" in encoders,
+                    "reason": "" if "libx265" in encoders else "本机缺少编码器",
                     "color_encoding": output_metadata(v.upper()),
                 }
                 for v in ("pq", "hlg")
@@ -342,6 +402,7 @@ class MotionOperations:
             "contract": "motion-dual-v1",
             "engine": engine,
             "master_bit_depths": [16, 32] if floating else [],
+            "video_only": True,
             "master_color_space": "ACEScg" if floating else None,
             "alpha": "straight" if floating else "composited on black",
             "default": (
@@ -351,6 +412,8 @@ class MotionOperations:
             "scene_linear_master": floating,
             "master_archive": "zip-stream" if floating else None,
             "preview": "sRGB SDR; independent of delivery",
+            "render_scales": [1, 2, 4],
+            "direct_to_destination": True,
         }
 
     @operation(
@@ -384,10 +447,49 @@ class MotionOperations:
     )
     def get_motion_scene(self, scene_id: str, revision_id: str | None = None) -> dict[str, Any]:
         record, spec, rid = self._motion_scene(scene_id, revision_id)
-        return {"record": record, "scene": spec.model_dump(), "revision_id": rid}
+        return {
+            "record": record, "scene": spec.model_dump(), "revision_id": rid,
+            "color_review": self._motion_color_review(spec, rid),
+        }
+
+    def _motion_color_review(self, spec: MotionSpec, rid: str) -> dict[str, Any]:
+        # An attestation applies to one immutable revision, never inferred from HDR pixels.
+        try:
+            review = self.store.get("motion_color_review", rid)
+        except ChromaError as exc:
+            if exc.as_dict()["code"] != "not_found":
+                raise
+            review = None
+        digest = source_hash(spec.code, spec.files)
+        if review and review.get("source_sha256") == digest:
+            return review
+        return {
+            "status": "unreviewed" if spec.engine == "three-float-v1" else "not_applicable",
+            "source_sha256": digest,
+        }
+
+    @operation("Record an explicit reviewer attestation of the scene-linear source contract for one saved animation revision; this is not automatic shader certification.")
+    def record_motion_color_review(
+        self, scene_id: str, expected_revision_id: str, reviewer: str, notes: str
+    ) -> dict[str, Any]:
+        record, spec, rid = self._motion_scene(scene_id)
+        self._motion_project(record["project_id"], True)
+        if rid != expected_revision_id:
+            raise ChromaError("revision_conflict", "动画修订已改变，请重新审核最新源码。")
+        if spec.engine != "three-float-v1":
+            raise ChromaError("motion_review", "SDR 网页源不适用场景线性源码审核。")
+        if not 1 <= len(reviewer.strip()) <= 120 or not 1 <= len(notes.strip()) <= 4000:
+            raise ChromaError("motion_review", "请填写审核人（1–120 字）和审核依据（1–4000 字）。")
+        self.store.put("motion_color_review", rid, {
+            "id": rid, "scene_id": scene_id, "status": "reviewed",
+            "source_sha256": source_hash(spec.code, spec.files),
+            "reviewer": reviewer.strip(), "notes": notes.strip(), "reviewed_at": now(),
+            "basis": "explicit reviewer attestation; not automatic semantic verification",
+        })
+        return self.get_motion_scene(scene_id)
 
     @operation(
-        "Create a blank animation by default (SDR unless engine is specified), or provide an optional template_id or full spec. No template is required."
+        "Create a blank float animation by default, or provide an explicit SDR engine, optional template_id or full spec. No template is required."
     )
     def create_motion_scene(
         self,
@@ -399,7 +501,7 @@ class MotionOperations:
         self._motion_project(project_id, True)
         if spec is None:
             if template_id is None:
-                spec = blank_motion(engine or "remotion-sdr-v1")
+                spec = blank_motion(engine or "three-float-v1")
             else:
                 if template_id not in templates():
                     raise ChromaError(
@@ -529,8 +631,93 @@ class MotionOperations:
             result["color_configuration"] = color_info()
             return result
 
+    @operation("Estimate animation master/intermediate/video/audio disk budgets and current destination/workspace free space without rendering or creating files. ZIP size is content-dependent. Pass project_id to include its current soundtrack.")
+    def estimate_motion_render(
+        self,
+        settings: MotionRenderSettings,
+        engine: MotionEngine = "three-float-v1",
+        output: MotionOutput | None = None,
+        export_directory: str | None = None,
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        output = resolve_motion_output(engine, output)
+        destination = resolve_export_directory(
+            export_directory if export_directory is not None else str(self.store.root / "exports")
+        )
+        volume = destination
+        while not volume.exists():
+            volume = volume.parent
+        floating = engine == "three-float-v1"
+        pixels = settings.width * settings.height
+        # One final RGBA sequence lives on the export volume. Spatial sampling
+        # enlarges only the transient raster, never the delivered master geometry.
+        master_frame = pixels * 4 * (output.master_bit_depth or 0) // 8 if floating else 0
+        master = master_frame * settings.frames
+        overhead = (master + 9) // 10
+        intermediate = (pixels * 16 * output.render_scale**2 if floating else
+                        pixels * 4 * output.render_scale**2 * settings.frames)
+        video = pixels * 4 * settings.frames if output.video != "none" else 0
+        video_only = floating and output.master_bit_depth is None
+        video_planning_bps = None
+        if video_only:
+            # CRF output has no known size in advance. Plan at 0.2 bits/pixel/frame
+            # (at least 8 Mb/s), with 20% margin; this is NOT an encoder rate cap.
+            # Exact rational duration avoids rounding fractional frame rates.
+            rate = settings.fps
+            video_planning_bps = max(8_000_000, (pixels * rate.numerator + 5 * rate.denominator - 1) // (5 * rate.denominator))
+            numerator = video_planning_bps * settings.frames * rate.denominator * 6
+            video = (numerator + 40 * rate.numerator - 1) // (40 * rate.numerator)
+            video += 16 * 1024**2  # Muxing/index allowance; runtime monitors free space.
+        auxiliary = (64 if floating else 128) * 1024**2
+        audio_bytes = 0
+        if project_id is not None:
+            self._motion_project(project_id)
+            if read_timeline(self.store, project_id)["timeline"]["clips"]:
+                # Use the same rational-frame-to-sample boundary as the actual WAV mix.
+                audio_bytes = audio_sample_window(settings)[0] * 8 + 44
+        # A delivery retains the WAV and also muxes its audio into the movie.
+        # Budget another PCM-sized allowance for that stream, especially for
+        # long, low-frame-rate clips whose pixel-only video budget is tiny.
+        if output.video != "none":
+            video += audio_bytes
+        workspace_required = 16 * 1024**2
+        same_volume = volume.stat().st_dev == self.store.root.stat().st_dev
+        destination_required = master + overhead + intermediate + video + audio_bytes + auxiliary
+        destination_required += workspace_required if same_volume else 0
+        destination_free = shutil.disk_usage(volume).free
+        workspace_free = destination_free if same_volume else shutil.disk_usage(self.store.root).free
+        destination_sufficient = destination_free >= destination_required
+        workspace_sufficient = workspace_free >= workspace_required
+        return {
+            "basis": "streaming-video-budget-v1" if video_only else "uncompressed-budget-v1", "engine": engine,
+            "video_planning_bps": video_planning_bps,
+            "settings": settings.model_dump(), "output": output.model_dump(),
+            "export_directory": str(destination), "checked_at": now(),
+            "master_frame_bytes": master_frame, "master_uncompressed_bytes": master,
+            "master_overhead_budget_bytes": overhead, "intermediate_budget_bytes": intermediate,
+            "video_budget_bytes": video, "audio_bytes": audio_bytes,
+            "auxiliary_budget_bytes": auxiliary, "workspace_required_bytes": workspace_required,
+            "destination_required_bytes": destination_required,
+            "destination_free_bytes": destination_free, "workspace_free_bytes": workspace_free,
+            "same_volume": same_volume, "destination_sufficient": destination_sufficient,
+            "workspace_sufficient": workspace_sufficient,
+            "sufficient": destination_sufficient and workspace_sufficient,
+            "compressed_master_bytes": None,
+            "notes": ([
+                "仅视频逐帧渲染并编码，不写入 EXR，也不缓存整段浮点序列。",
+                "视频预算按规划码率和时长估算并加 20% 余量；不是体积上限或编码码率，实际大小取决于画面。",
+                "中间数据仅按一帧计算；渲染期间检查剩余空间。中断后重新执行会从头渲染。",
+            ] if video_only else [
+                "母版体积按宽 × 高 × RGBA 四通道 × 每通道字节数 × 总帧数计算；ZIP 实际体积取决于画面。",
+                "空间预算含 10% 母版余量、中间帧、可选视频及音频和辅助文件，不是压缩后体积承诺。",
+                "超采样只增加中间数据，不放大最终母版。母版 ZIP 按需下载，不预留第二份序列。",
+            ]) + [
+                "这是全新任务的空间预算，不扣除已有缓存；不会预留磁盘空间，提交时重新检查。",
+            ],
+        }
+
     @operation(
-        "Queue engine-specific animation rendering: float EXR plus HDR/SDR videos, or SDR screenshot video. Freeze source, rational rate, runtime, color and output settings."
+        "Queue engine-specific animation rendering: float EXR with optional HDR/SDR video, direct float video (master_bit_depth=null), or SDR screenshot video. Freeze source, rational rate, runtime, color and output settings."
     )
     def submit_motion_render(
         self,
@@ -555,23 +742,13 @@ class MotionOperations:
                 "motion_unavailable",
                 "本地浮点渲染需要动画依赖和 Chrome；请运行 ./install.sh 并安装 Chrome。",
             )
-        floating = spec.engine == "three-float-v1"
-        output = output or (
-            MotionOutput() if floating else MotionOutput(master_bit_depth=None, video="srgb")
-        )
-        if not floating and (
-            output.master_bit_depth is not None or output.video not in {"srgb", "rec709"}
-        ):
-            raise ChromaError(
-                "motion_output",
-                "SDR 网页源码支持 sRGB/Rec.709 视频，不能生成原生 HDR 或 ACEScg 浮点母版。",
-            )
-        if floating and output.master_bit_depth is None:
-            raise ChromaError("motion_output", "浮点场景需要选择 16/32-bit EXR 母版精度。")
+        output = resolve_motion_output(spec.engine, output)
         if output.video != "none":
+            if output.video == "rec709":
+                raise ChromaError("video_color_tags", video_tag_issue("Rec.709") or "缺少精确 Gamma 标签")
             if spec.width % 2 or spec.height % 2:
                 raise ChromaError(
-                    "motion_dimensions", "HEVC 4:2:0 要求偶数宽高；EXR 可使用奇数尺寸。"
+                    "motion_dimensions", "H.264/HEVC 4:2:0 要求偶数宽高；EXR 可使用奇数尺寸。"
                 )
             encoder = "libx265" if output.video in {"pq", "hlg"} else "libx264"
             if encoder not in available_encoders():
@@ -579,32 +756,21 @@ class MotionOperations:
         destination = resolve_export_directory(
             export_directory if export_directory is not None else str(self.store.root / "exports")
         )
-        if floating:
-            # Budget one EXR sequence on its actual volume, plus one RGBA32F
-            # transport and conservative video/EXR overhead. CRF size is an estimate;
-            # ENOSPC at runtime retains completed frames for recovery.
-            pixels = spec.width * spec.height
-            master_bytes = pixels * 4 * (output.master_bit_depth or 32) // 8 * spec.frames
-            video_bytes = pixels * 4 * spec.frames if output.video != "none" else 0
-            required = master_bytes + master_bytes // 10 + video_bytes + pixels * 16 + 64 * 1024**2
-            volume = destination
-            while not volume.exists():
-                volume = volume.parent
-            metadata_bytes = 16 * 1024**2
-            same_volume = volume.stat().st_dev == self.store.root.stat().st_dev
-            if (
-                shutil.disk_usage(volume).free < required + (metadata_bytes if same_volume else 0)
-                or shutil.disk_usage(self.store.root).free < metadata_bytes
-            ):
-                raise ChromaError(
-                    "disk_space", "导出盘没有足够空间存储单份动画母版和视频。",
-                    destination=str(destination), required_bytes=required,
-                )
-        else:
-            # The screenshot engine retains its existing workspace recovery layout.
-            required = spec.width * spec.height * 16 * spec.frames * 5 + 64 * 1024**2
-            if shutil.disk_usage(self.store.root).free < required:
-                raise ChromaError("disk_space", "没有足够空间存储动画帧，请缩短动画或降低分辨率。")
+        pixels = spec.width * spec.height
+        # Budget all simultaneous CPU copies plus GPU targets before allocating. The
+        # browser additionally checks its actual texture/renderbuffer/viewport limits.
+        working_bytes = pixels * (output.render_scale ** 2 * 96 + 96) + spec.frames * 1024
+        if working_bytes > psutil.virtual_memory().available * 0.7:
+            raise ChromaError("motion_memory", "当前可用内存不足；请降低超采样倍率、尺寸或释放内存。", required_bytes=working_bytes)
+        estimate = self.estimate_motion_render(
+            spec.settings(), spec.engine, output, str(destination), record["project_id"]
+        )
+        if not estimate["sufficient"]:
+            raise ChromaError(
+                "disk_space", "导出盘或工作区没有足够空间存储动画中间帧和交付文件。",
+                destination=str(destination), required_bytes=estimate["destination_required_bytes"],
+                estimate=estimate,
+            )
         snapshot = {
             "engine": spec.engine,
             "output": output.model_dump(),
@@ -616,10 +782,14 @@ class MotionOperations:
             "runtime": motion_identity(),
             "export_directory": str(destination),
             "export_root": str(destination),  # Freeze this selection, never a global allowlist.
-            **({"storage_layout": DESTINATION_LAYOUT} if floating else {}),
+            "storage_layout": DESTINATION_LAYOUT,
             # Persist the volume identity so remounts cannot redirect a frozen job.
             "destination_volume": volume_identity(destination),
+            "source_color_review": self._motion_color_review(spec, rid),
         }
+        # Both animation engines share the same immutable project audio contract.
+        if audio := freeze_audio(self.store, record["project_id"], spec.settings()):
+            snapshot["audio"] = audio
         digest = hashlib.sha256(canonical(snapshot).encode()).hexdigest()
         stamp = now()
         job = Job(

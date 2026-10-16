@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 import psutil
 
+from .audio import mix_audio
 from .color import color_info, output_metadata, render_output, transform
 from .encoding import check_image_metadata, check_probe, encode
 from .environment import runtime_identity
@@ -210,6 +211,12 @@ def run(root: Path, job_id: str) -> None:
 
         results = []
 
+        audio_path = directory / "audio.wav"
+        audio_info = mix_audio(store, snapshot.get("audio"), settings, audio_path)
+        if audio_info is not None:
+            artifact(audio_path, "audio", "audio/wav", audio_info)
+            bundle_files["audio.wav"] = audio_path
+
         def encoded_progress(output_id: str, position: int, count: int) -> None:
             progress(
                 f"encoding:{output_id}",
@@ -322,6 +329,7 @@ def run(root: Path, job_id: str) -> None:
                     target,
                     converted_frames(),
                     partial(encoded_progress, preset.id, output_index),
+                    **({"audio_path": audio_path} if audio_info is not None else {}),
                 )
                 result = {
                     "preset_id": preset.id,
@@ -380,6 +388,7 @@ def run(root: Path, job_id: str) -> None:
             "passed": all(r["passed"] for r in results),
             "settings": settings.model_dump(),
             "source_revision": job["revision_id"],
+            "audio": audio_info,
             "snapshot_sha256": job["snapshot_hash"],
             "color_configuration": snapshot["color_configuration"],
             "gpu": renderer.info,
@@ -392,7 +401,7 @@ def run(root: Path, job_id: str) -> None:
                 "HDR is numerically verified, not a calibrated display measurement",
                 "Float32 master cache is retained for resume and repeat exports",
                 "Peak RSS is sampled for the render worker; excludes the encoder process and GPU allocations",
-                "No audio, DCP or IMF",
+                "No DCP or IMF; project audio is delivered separately and muxed into video",
             ],
         }
         report_path = directory / "verification.json"

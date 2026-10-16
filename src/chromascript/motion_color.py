@@ -52,15 +52,21 @@ def display_shader() -> dict[str, Any]:
     }
 
 
-def decode_float_frame(data: bytes, width: int, height: int) -> np.ndarray:
-    if len(data) != width * height * 16:
+def decode_float_frame(data: bytes, width: int, height: int, render_scale: int = 1) -> np.ndarray:
+    if render_scale not in (1, 2, 4) or len(data) != width * height * render_scale**2 * 16:
         raise ChromaError("motion_frame", "浮点帧字节数与画面规格不符。")
-    pixels = np.frombuffer(data, dtype="<f4").reshape(height, width, 4).copy()
+    pixels = np.frombuffer(data, dtype="<f4").reshape(height * render_scale, width * render_scale, 4).copy()
     if not np.isfinite(pixels).all() or np.any((pixels[..., 3] < 0) | (pixels[..., 3] > 1)):
         raise ChromaError("motion_frame", "浮点帧包含非有限 RGB 或超出 0..1 的 Alpha。")
     # WebGL rows start at the bottom; normal blending accumulates associated RGB.
     # Unassociate in linear light before OCIO; zero-coverage RGB has no contribution.
     pixels = np.ascontiguousarray(pixels[::-1])
+    if render_scale > 1:
+        # Integrate associated radiance and coverage before unassociation or any
+        # display transform. Float64 accumulation avoids overflow in a finite HDR average.
+        pixels = pixels.reshape(height, render_scale, width, render_scale, 4).mean(
+            axis=(1, 3), dtype=np.float64
+        ).astype(np.float32)
     alpha = pixels[..., 3:4]
     pixels[..., :3] = np.divide(
         pixels[..., :3], alpha, out=np.zeros_like(pixels[..., :3]), where=alpha > 0

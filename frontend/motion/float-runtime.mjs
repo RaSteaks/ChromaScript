@@ -88,8 +88,23 @@ function main() {
     ? 960
     : config.maxDimension || Math.max(config.width, config.height);
   const scale = Math.min(1, limit / Math.max(config.width, config.height));
-  const width = Math.max(1, Math.round(config.width * scale));
-  const height = Math.max(1, Math.round(config.height * scale));
+  // Logical scene dimensions/time never change with preview or final sampling.
+  // Export uses an integer pixel grid; CPU integration filters associated light.
+  const renderScale = config.preview ? 1 : config.renderScale || 1;
+  const width = Math.max(1, Math.round(config.width * scale)) * renderScale;
+  const height = Math.max(1, Math.round(config.height * scale)) * renderScale;
+  const viewport = gl.getParameter(gl.MAX_VIEWPORT_DIMS);
+  const maxTarget = Math.min(
+    gl.getParameter(gl.MAX_TEXTURE_SIZE),
+    gl.getParameter(gl.MAX_RENDERBUFFER_SIZE),
+  );
+  if (
+    width > Math.min(maxTarget, viewport[0]) ||
+    height > Math.min(maxTarget, viewport[1])
+  )
+    throw new Error(
+      `当前 GPU 不支持 ${width} × ${height} 的采样尺寸；请降低超采样倍率或尺寸。`,
+    );
   renderer.setSize(width, height, false);
   renderer.domElement.style.cssText =
     "width:100%;height:100%;object-fit:contain;display:block";
@@ -101,6 +116,10 @@ function main() {
     frames: config.frames,
     fps: config.fps,
     frameRate: config.frameRate,
+    // Pixel-coordinate shaders may normalize gl_FragCoord using the actual
+    // raster, while geometry/layout continue to use logical width/height.
+    rasterWidth: width,
+    rasterHeight: height,
   });
   if (
     !scene?.scene?.isScene ||
@@ -156,7 +175,18 @@ function main() {
       fps: config.fps,
       width: config.width,
       height: config.height,
+      rasterWidth: width,
+      rasterHeight: height,
     });
+    // Source may customize shaders, but changing the global working primaries
+    // would silently invalidate the host's Rec.709-to-AP1 conversion boundary.
+    if (
+      !THREE.ColorManagement.enabled ||
+      THREE.ColorManagement.workingColorSpace !== THREE.LinearSRGBColorSpace
+    )
+      throw new Error(
+        "请保留 Three.js 线性 Rec.709 工作空间；其他输入颜色须先转换。",
+      );
     scene.scene.traverse((node) => {
       for (const m of Array.isArray(node.material)
         ? node.material
@@ -231,6 +261,12 @@ function main() {
       source_space: "Linear Rec.709 (sRGB)",
       alpha: "premultiplied",
       row_order: "bottom-up",
+      sampling: {
+        render_scale: renderScale,
+        width,
+        height,
+        spatial_samples: renderScale ** 2,
+      },
     },
   };
   window.__chromaFloat = bridge;

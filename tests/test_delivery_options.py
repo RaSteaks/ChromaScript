@@ -8,7 +8,8 @@ import pytest
 from chromascript.delivery import configured_output, delivery_options
 from chromascript.encoding import check_probe, encode
 from chromascript.errors import ChromaError
-from chromascript.models import DeliveryConfiguration, RenderSettings
+from chromascript.models import ColorPipeline, DeliveryConfiguration, RenderSettings
+from chromascript.operations import execute
 from chromascript.service import Service
 
 
@@ -16,6 +17,42 @@ def change(config, field, value):
     return DeliveryConfiguration.model_validate(
         delivery_options(config.model_copy(update={field: value}), field)["configuration"]
     )
+
+
+def test_new_project_default_delivery_uses_exact_srgb_video(tmp_path):
+    service = Service(tmp_path)
+    project = service.create_project("default delivery")["project"]["id"]
+    assert service.get_project(project)["color_pipeline"]["output"] == "sRGB"
+    scene = service.create_scene(project)
+    args = {
+        "scene_id": scene["record"]["id"],
+        "settings": RenderSettings(width=32, height=32, frames=1).model_dump(),
+        "idempotency_key": "default",
+    }
+    # Exercise the shared transport registry and inspect the frozen output, not its name.
+    job = execute(service, "submit_default_delivery", args)["job"]
+    assert execute(service, "submit_default_delivery", args)["job"]["id"] == job["id"]
+    output = service.store.get("snapshot", job["id"])["outputs"][0]
+    assert (output["codec"], output["profile"], output["color"]["output"]) == (
+        "prores_ks",
+        "3",
+        "sRGB",
+    )
+    assert service.preset("prores-3").color.output == "Rec.709"
+    service.set_color_pipeline(project, ColorPipeline(output="Rec.709"))
+    with pytest.raises(ChromaError) as error:
+        execute(service, "submit_default_delivery", {**args, "idempotency_key": "legacy"})
+    assert error.value.code == "video_color_tags"
+
+
+def test_clone_retains_implicit_legacy_pipeline(tmp_path):
+    service = Service(tmp_path)
+    project = service.create_project("legacy")["project"]["id"]
+    # Older projects have no persisted pipeline; cloning must not reinterpret their pixels.
+    with service.store.connect() as db:
+        db.execute("DELETE FROM records WHERE kind='pipeline' AND id=?", (project,))
+    assert service.get_project(project)["color_pipeline"]["output"] == "Rec.709"
+    assert service.clone_project(project, "copy")["color_pipeline"]["output"] == "Rec.709"
 
 
 def test_container_codec_and_alpha_linkage():
@@ -38,7 +75,7 @@ def test_hdr_depth_and_profile_update_in_both_directions():
     config = change(config, "color_output", "PQ")
     assert (config.profile, config.bit_depth, config.color_output) == ("main10", 10, "PQ")
     config = change(config, "bit_depth", 8)
-    assert (config.profile, config.color_output) == ("main", "Rec.709")
+    assert (config.profile, config.color_output) == ("main", "sRGB")
     config = change(config, "bit_depth", 10)
     assert config.profile == "main10"
 
@@ -53,7 +90,7 @@ def test_separate_gamut_gamma_choices_and_legacy_mapping():
     config = change(config, "gamma", "hlg")
     assert config.color_space == "Rec.2020" and configured_output(config).color.output == "HLG"
     config = change(config, "color_space", "Rec.709")
-    assert config.gamma == "gamma2.4"
+    assert config.gamma == "srgb"  # Exact native transfer tags are required for video.
     config = change(config, "gamma", "srgb")
     assert config.color_space == "Rec.709" and configured_output(config).color.output == "sRGB"
     config = change(config, "container", "exr")
@@ -370,6 +407,9 @@ def test_standard_color_description_separates_transfer_and_target(output, peak, 
         config = config.model_copy(update={"codec": "hevc"})
     elif output in {"ACEScg", "ACES2065-1"}:
         config = config.model_copy(update={"container": "exr"})
+    elif output == "Rec.709":
+        # DPX has a native numeric gamma field; NCLC video has no Gamma 2.4 code.
+        config = config.model_copy(update={"container": "dpx"})
     result = delivery_options(config, "color_output")
     description = result["color_encoding"]
     assert description == output_metadata(output)

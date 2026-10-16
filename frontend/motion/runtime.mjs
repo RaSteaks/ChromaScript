@@ -1,6 +1,6 @@
 // Source is compiled as browser code only. Never import/evaluate it in Node.
 import { build, formatMessages } from "esbuild";
-import ts from "typescript";
+import { sourceModules } from "./source-modules.mjs";
 import { randomUUID } from "node:crypto";
 import {
   readFileSync,
@@ -19,50 +19,14 @@ const allowed = new Set(["three"]);
 const policy =
   "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; media-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'";
 
-function validateImports(code) {
-  const source = ts.createSourceFile(
-    "Animation.ts",
-    code,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-  function check(specifier) {
-    if (
-      !specifier ||
-      !ts.isStringLiteral(specifier) ||
-      !allowed.has(specifier.text)
-    ) {
-      throw new Error(
-        `仅允许导入：${[...allowed].join(", ")}。动画在本地离线运行，不支持文件路径或网络模块。`,
-      );
-    }
-  }
-  function visit(node) {
-    if (
-      ts.isImportDeclaration(node) ||
-      (ts.isExportDeclaration(node) && node.moduleSpecifier)
-    )
-      check(node.moduleSpecifier);
-    if (ts.isCallExpression(node)) {
-      if (node.expression.kind === ts.SyntaxKind.ImportKeyword)
-        check(node.arguments[0]);
-      if (
-        ts.isIdentifier(node.expression) &&
-        node.expression.text === "require"
-      )
-        throw new Error("请使用静态 import；动画不允许 require()。");
-    }
-    // TypeScript import-equals can otherwise bypass ordinary ES import validation.
-    if (ts.isImportEqualsDeclaration(node))
-      throw new Error("请使用标准 ES import。");
-    ts.forEachChild(node, visit);
-  }
-  visit(source);
-}
-
-async function compile(spec, mode, channel, display, maxDimension) {
-  validateImports(spec.code);
+async function compile(
+  spec,
+  mode,
+  channel,
+  display,
+  maxDimension,
+  renderScale = 1,
+) {
   const config = {
     width: spec.width,
     height: spec.height,
@@ -73,6 +37,8 @@ async function compile(spec, mode, channel, display, maxDimension) {
     preview: mode === "preview",
     display,
     maxDimension,
+    // Final spatial sampling is frozen with output; preview uses a separate raster budget.
+    renderScale,
   };
   const entry = readFileSync(join(root, "motion/float-runtime.mjs"), "utf8");
   return build({
@@ -94,18 +60,10 @@ async function compile(spec, mode, channel, display, maxDimension) {
     define: { "process.env.NODE_ENV": '"production"' },
     logLevel: "silent",
     plugins: [
+      sourceModules(spec, allowed, root),
       {
         name: "local-animation",
         setup(plugin) {
-          plugin.onResolve({ filter: /^chromascript:scene$/ }, () => ({
-            path: "Animation.ts",
-            namespace: "scene",
-          }));
-          plugin.onLoad({ filter: /.*/, namespace: "scene" }, () => ({
-            contents: spec.code,
-            loader: "ts",
-            resolveDir: root,
-          }));
           plugin.onResolve({ filter: /^chromascript:config$/ }, () => ({
             path: "config",
             namespace: "config",
@@ -114,14 +72,6 @@ async function compile(spec, mode, channel, display, maxDimension) {
             contents: JSON.stringify(config),
             loader: "json",
           }));
-          plugin.onResolve({ filter: /.*/, namespace: "scene" }, (args) => {
-            if (!allowed.has(args.path))
-              return { errors: [{ text: `不允许导入 ${args.path}。` }] };
-            return plugin.resolve(args.path, {
-              resolveDir: root,
-              kind: args.kind,
-            });
-          });
         },
       },
     ],
@@ -153,6 +103,7 @@ async function main() {
     channel,
     request.display,
     request.max_dimension,
+    request.render_scale,
   );
   const script = result.outputFiles[0].text.replace(
     /<\/script/gi,
@@ -234,8 +185,8 @@ async function main() {
       process.stdout.write(
         JSON.stringify({ completed: frame + 1, frame }) + "\n",
       );
-      // Python acknowledges only after durable EXR verification (or transient
-      // preview consumption) and transport removal. Never accumulate raw frames.
+      // Python acknowledges after EXR verification, direct video encoding or
+      // preview consumption and transport removal. Never accumulate raw frames.
       const acknowledgement = await lines.next();
       if (
         acknowledgement.done ||

@@ -10,10 +10,10 @@ export const DEFAULT_DELIVERY: DeliveryConfiguration = {
   bit_depth: 8,
   sampling: "420",
   alpha_mode: "none",
-  // The server resolves this gamut/transfer pair and its legacy combined alias.
+  // Default video has exact native Rec.709 primaries and sRGB transfer tags.
   color_space: "Rec.709",
-  gamma: "gamma2.4",
-  color_output: "Rec.709",
+  gamma: "srgb",
+  color_output: "sRGB",
   data_range: "auto",
   compression: null,
   quality_mode: "crf",

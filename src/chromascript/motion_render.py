@@ -6,6 +6,8 @@ import json
 import selectors
 import subprocess
 import time
+from collections.abc import Generator
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,14 +17,14 @@ from .motion_color import display_shader
 from .store import canonical
 
 
-def render_float_frames(
+def iter_float_frames(
     spec: MotionSpec,
     directory: Path,
     indices: list[int],
-    on_frame: Callable[[int, Path], None],
     max_dimension: int | None = None,
     expected_gpu: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+    render_scale: int = 1,
+) -> Generator[tuple[int, Path], None, None]:
     directory.mkdir(parents=True, exist_ok=True)
     # Interrupted transport is disposable, unlike the independently verified EXRs.
     for raw in directory.glob("frame-*.f32"):
@@ -48,6 +50,7 @@ def render_float_frames(
                         "max_dimension": max_dimension,
                         "browser": browser_executable(),
                         "frame_indices": indices,
+                        "render_scale": render_scale,
                     }
                 ) + "\n"
             )
@@ -55,13 +58,14 @@ def render_float_frames(
             received: set[int] = set()
             # A stalled shader/source must not occupy a worker forever. Successful
             # frame progress resets the deadline; total sequence length is unrestricted.
-            deadline = time.monotonic() + 60
+            frame_timeout = 60 * render_scale**2
+            deadline = time.monotonic() + frame_timeout
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
                 while True:
                     if time.monotonic() > deadline:
                         raise ChromaError(
-                            "motion_timeout", "单帧浮点渲染超过 60 秒，请简化场景后重试。"
+                                "motion_timeout", f"单帧浮点渲染超过 {frame_timeout} 秒，请降低采样或简化场景后重试。"
                         )
                     if not selector.select(timeout=0.5):
                         continue
@@ -70,7 +74,10 @@ def render_float_frames(
                         break
                     event = json.loads(line)
                     frame = event.get("frame")
-                    if type(frame) is not int or frame not in indices or frame in received:
+                    # Exact order is required by direct video. Index lookup also
+                    # avoids a linear membership scan for every frame of long clips.
+                    if (type(frame) is not int or len(received) >= len(indices)
+                            or frame != indices[len(received)] or frame in received):
                         raise ChromaError("motion_frames", "浮点渲染器返回了无效帧索引。")
                     # A resumed sequence must not mix frames from different GPU
                     # backends even if the browser binary and source are unchanged.
@@ -80,19 +87,23 @@ def render_float_frames(
                     ):
                         raise ChromaError("gpu_changed", "GPU 后端已改变，请重新提交任务。")
                     raw = directory / f"frame-{frame}.f32"
-                    on_frame(frame, raw)
-                    raw.unlink(missing_ok=True)
-                    # Backpressure covers EXR write/readback/hash verification,
-                    # not just Node's file write or stdout pipe buffering.
+                    # Yield keeps Node waiting for ACK until EXR verification or
+                    # direct video encoding consumes the frame. Close also removes
+                    # the current transport on cancellation/encoder failure.
+                    try:
+                        yield frame, raw
+                    finally:
+                        raw.unlink(missing_ok=True)
+                    # Backpressure covers the consumer (EXR verification or video
+                    # encoding), not just Node's file write or pipe buffering.
                     process.stdin.write(canonical({"accepted": frame}) + "\n")
                     process.stdin.flush()
                     received.add(frame)
-                    deadline = time.monotonic() + 60
+                    deadline = time.monotonic() + frame_timeout
             process.stdin.close()
             if process.wait(timeout=10) or received != set(indices):
                 raise ChromaError("motion_render", log_path.read_text()[-6000:] or "浮点帧不完整。")
-            probe = json.loads((directory / "gpu.json").read_text())
-            return probe
+
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -101,3 +112,28 @@ def render_float_frames(
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+            for pipe in (process.stdin, process.stdout):
+                if pipe is not None and not pipe.closed:
+                    pipe.close()
+            # A failed capture may leave a partial transport before yielding it.
+            for raw in directory.glob("frame-*.f32"):
+                raw.unlink(missing_ok=True)
+
+
+def render_float_frames(
+    spec: MotionSpec,
+    directory: Path,
+    indices: list[int],
+    on_frame: Callable[[int, Path], None],
+    max_dimension: int | None = None,
+    expected_gpu: dict[str, Any] | None = None,
+    render_scale: int = 1,
+) -> dict[str, Any]:
+    # Keep the callback API for previews and resumable EXRs; streaming video
+    # consumes the same verified transport lazily without an extra render pass.
+    with closing(iter_float_frames(
+        spec, directory, indices, max_dimension, expected_gpu, render_scale
+    )) as frames:
+        for index, raw in frames:
+            on_frame(index, raw)
+    return json.loads((directory / "gpu.json").read_text())

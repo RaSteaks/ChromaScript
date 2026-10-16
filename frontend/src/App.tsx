@@ -29,6 +29,7 @@ import {
   Workflow,
 } from "lucide-react";
 import { artifactUrl, call, connect } from "./api";
+import { ProjectAudio } from "./ProjectAudio";
 import { WorkflowNav, WORKFLOW, type WorkflowStep } from "./WorkflowNav";
 import { DeliveryEditor } from "./DeliveryEditor";
 import { DeliveryDestination } from "./DeliveryDestination";
@@ -983,6 +984,7 @@ export default function App() {
               <h1>{draft?.name || "尚未选择场景"}</h1>
             </div>
             <div className="context-actions">
+              <ProjectAudio key={projectId} projectId={projectId} disabled={!!pending} />
               <span className={"save-state " + (dirty ? "unsaved" : "")}>
                 {dirty
                   ? "未保存"

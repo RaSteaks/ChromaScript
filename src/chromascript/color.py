@@ -234,6 +234,16 @@ def tags(output: str) -> dict[str, str]:
     }
 
 
+def video_tag_issue(output: str, container: str | None = None) -> str | None:
+    """Only exact standardized video color identifiers satisfy delivery policy."""
+    space, gamma = OUTPUT_ENCODINGS[output]
+    if space in {"ACEScg", "ACES2065-1", "ACEScct"} or gamma in {"gamma2.4", "gamma2.6"}:
+        return "此色域/Gamma 没有精确的标准视频标签；请选择 sRGB、Gamma 2.2、PQ 或 HLG，场景素材请保存 EXR。"
+    if container == "mxf" and gamma == "srgb":
+        return "当前 MXF 写入器无法保留 sRGB 传递函数标签；请选择 Gamma 2.2、PQ/HLG 或其他封装。"
+    return None
+
+
 def output_metadata(output: str) -> dict[str, Any]:
     """Describe the encoded samples, independently of a container's limited tag vocabulary."""
     space, gamma = OUTPUT_ENCODINGS[output]
@@ -290,6 +300,7 @@ def output_metadata(output: str) -> dict[str, Any]:
         "gamma": gamma,
         "output_transform": output,
         "reference": "scene" if scene_referred else "display",
+        "exact_video_tags_available": video_tag_issue(output) is None,
         "resolve_input_color_space": "ACES (AP1)" if scene_log else space,
         # Video tag vocabularies do not independently describe these power curves.
         # Even Rec.709/BT.709 convention requires checking the intended Gamma 2.4.

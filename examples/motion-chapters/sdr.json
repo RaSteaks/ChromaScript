@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "engine": "remotion-sdr-v1",
+  "name": "双章节联合渲染 · SDR",
+  "code": "import {Sequence, useVideoConfig} from \"remotion\";\nimport Intro from \"./chapters/intro\";\nimport Ending from \"./chapters/ending\";\nexport default function Animation() {\n  // Sequence supplies chapter-local frames; the composition keeps one rational timebase.\n  const {durationInFrames} = useVideoConfig();\n  const split = Math.floor(durationInFrames / 2);\n  return <><Sequence durationInFrames={split}><Intro /></Sequence>\n    <Sequence from={split}><Ending /></Sequence></>;\n}",
+  "files": {
+    "chapters/intro.tsx": "import {AbsoluteFill} from \"remotion\";\nexport default function Intro() {return <AbsoluteFill style={{background:\"red\"}}/>;}",
+    "chapters/ending.jsx": "import {AbsoluteFill} from \"remotion\";\nexport default function Ending() {return <AbsoluteFill style={{background:\"lime\"}}/>;}"
+  },
+  "width": 1280,
+  "height": 720,
+  "frames": 150,
+  "fps": {
+    "schema_version": 1,
+    "numerator": 30000,
+    "denominator": 1001
+  }
+}

@@ -1,3 +1,5 @@
+import { MotionStorageEstimate } from "./MotionStorageEstimate";
+import { ProjectAudio } from "./ProjectAudio";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
@@ -10,8 +12,8 @@ import {
   Square,
 } from "lucide-react";
 import { ApiError, artifactUrl, call, connect } from "./api";
-import { Button, Field, Modal, Notice } from "./components";
-import { CodeEditor } from "./CodeEditor";
+import { Button, Field, Modal, Notice, Textarea } from "./components";
+import { MotionSourceEditor, sourceFilesError } from "./MotionSourceEditor";
 import { DeliveryDestination } from "./DeliveryDestination";
 import { OpenExportFolder } from "./ExportFolders";
 import { MotionPreview } from "./MotionPreview";
@@ -24,6 +26,7 @@ import type {
   MotionSpec,
   MotionOutput,
   MotionDeliveryOptions,
+  MotionVerification,
   Project,
   SceneRecord,
 } from "./types";
@@ -32,6 +35,7 @@ type Draft = {
   engine: MotionSpec["engine"];
   name: string;
   code: string;
+  files: Record<string, string>;
   width: string;
   height: string;
   frames: string;
@@ -40,6 +44,8 @@ type Draft = {
 type Page<T> = { items: T[]; total: number };
 type Template = { id: string; name: string; spec: MotionSpec };
 const pageSize = 20;
+// FFmpeg's integer rational boundary; physical GPU/codec limits are checked at render.
+const specificationMax = 2147483647;
 const rates = [
   "24/1",
   "25/1",
@@ -73,6 +79,7 @@ const fromSpec = (spec: MotionSpec): Draft => ({
   engine: spec.engine,
   name: spec.name,
   code: spec.code,
+  files: spec.files ?? {},
   width: String(spec.width),
   height: String(spec.height),
   frames: String(spec.frames),
@@ -89,8 +96,8 @@ function validate(draft: Draft | null): {
     return { spec: null, error: "请输入 1–120 字的动画名称。", field: "name" };
   for (const key of ["width", "height", "frames"] as const) {
     const value = Number(draft[key]);
-    const max = key === "frames" ? 36000 : 4096;
-    const min = key === "frames" ? 1 : 16;
+    const max = specificationMax;
+    const min = 1;
     if (
       !/^\d+$/.test(draft[key]) ||
       !Number.isSafeInteger(value) ||
@@ -100,9 +107,7 @@ function validate(draft: Draft | null): {
       return {
         spec: null,
         error:
-          key === "frames"
-            ? "帧数必须是 1–36000 的整数。"
-            : "画面宽、高必须是 16–4096 的整数。",
+          "尺寸和帧数须为 1–2147483647 的整数；实际导出受硬件和编码器限制。",
         field: key,
       };
   }
@@ -110,25 +115,32 @@ function validate(draft: Draft | null): {
   if (
     !/^\d+\/\d+$/.test(draft.fps) ||
     numerator < 1 ||
-    numerator > 240000 ||
+    !Number.isSafeInteger(numerator) ||
+    numerator > specificationMax ||
     denominator < 1 ||
-    denominator > 100000 ||
-    numerator / denominator < 1 ||
-    numerator / denominator > 240
+    !Number.isSafeInteger(denominator) ||
+    denominator > specificationMax
   )
-    return { spec: null, error: "请选择有效帧率。", field: "fps" };
+    return {
+      spec: null,
+      error: "帧率须为正整数分子/分母，例如 24000/1001。",
+      field: "fps",
+    };
   if (!draft.code.trim() || draft.code.length > 200000)
     return {
       spec: null,
       error: "代码不能为空，最多支持 200000 字符。",
       field: "code",
     };
+  const fileError = sourceFilesError(draft.code, draft.files);
+  if (fileError) return { spec: null, error: fileError, field: "code" };
   return {
     spec: {
       schema_version: 1,
       engine: draft.engine,
       name: draft.name,
       code: draft.code,
+      files: draft.files,
       width: Number(draft.width),
       height: Number(draft.height),
       frames: Number(draft.frames),
@@ -157,13 +169,16 @@ export function MotionWorkbench({
   const [scenePage, setScenePage] = useState(0);
   const [sceneTotal, setSceneTotal] = useState(0);
   const [blankEngine, setBlankEngine] =
-    useState<MotionSpec["engine"]>("remotion-sdr-v1");
+    useState<MotionSpec["engine"]>("three-float-v1");
   const [templates, setTemplates] = useState<Template[]>([]);
   const [caps, setCaps] = useState<MotionCapabilities | null>(null);
   const [output, setOutput] = useState<MotionOutput>({
     master_bit_depth: 32,
-    video: "pq",
+    video: "none",
+    render_scale: 2,
   });
+  const [masterDepth, setMasterDepth] = useState<16 | 32>(32);
+  const outputEngine = useRef<MotionSpec["engine"]>("three-float-v1");
   const [outputError, setOutputError] = useState("");
   const [outputOptions, setOutputOptions] =
     useState<MotionDeliveryOptions | null>(null);
@@ -198,6 +213,10 @@ export function MotionWorkbench({
   const [job, setJob] = useState<Job | null>(null);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [refresh, setRefresh] = useState(0);
+  const [reviewTarget, setReviewTarget] = useState<MotionReply | null>(null);
+  const [reviewer, setReviewer] = useState("");
+  const [reviewNotes, setReviewNotes] = useState("");
+  const [reviewError, setReviewError] = useState("");
   const busy = useRef(false);
   const submission = useRef<{ recipe: string; key: string } | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -262,7 +281,17 @@ export function MotionWorkbench({
             ? old.map((item) => (item.id === savedId ? reply.record : item))
             : old,
         );
-        if (reply.revision_id === currentSaved.revision_id) return;
+        if (reply.revision_id === currentSaved.revision_id) {
+          // Review metadata can change without changing the immutable animation.
+          if (
+            JSON.stringify(reply.color_review) !==
+            JSON.stringify(currentSaved.color_review)
+          ) {
+            savedRef.current = reply;
+            setSaved(reply);
+          }
+          return;
+        }
         const currentDraft = draftRef.current;
         if (
           currentDraft &&
@@ -422,10 +451,18 @@ export function MotionWorkbench({
         if (reply.contract !== "motion-dual-v1" || reply.engine !== engine)
           throw new Error("动画输出服务版本不匹配，请重启服务。");
         setOutputOptions(reply);
+        // SDR's null depth is not an explicit float video-only choice. Reset on
+        // source-family changes, while reconnects preserve the current mode.
+        const changedEngine = outputEngine.current !== engine;
+        outputEngine.current = engine;
+        if (changedEngine && reply.default.master_bit_depth !== null)
+          setMasterDepth(reply.default.master_bit_depth);
         setOutput((old) =>
+          !changedEngine &&
           reply.videos.some((v) => v.value === old.video) &&
           (engine === "three-float-v1"
-            ? old.master_bit_depth !== null
+            ? old.master_bit_depth !== null ||
+              (reply.video_only === true && old.video !== "none")
             : old.master_bit_depth === null)
             ? old
             : reply.default,
@@ -559,7 +596,7 @@ export function MotionWorkbench({
       setStatus("动画已创建，可以开始编辑。");
     }
   }
-  function change(key: keyof Draft, value: string) {
+  function change<K extends keyof Draft>(key: K, value: Draft[K]) {
     // Protect edits immediately, even if a background read settles before React
     // commits the input event. The same reference also guards late save replies.
     if (!draftRef.current) return;
@@ -618,7 +655,9 @@ export function MotionWorkbench({
       export_directory: directory,
       output,
     };
-    const recipe = JSON.stringify(args);
+    // A new attestation changes the frozen report, even if source/output stay
+    // identical. A retry of the same evidence still reuses its original request key.
+    const recipe = JSON.stringify({ args, colorReview: saved.color_review });
     if (submission.current?.recipe !== recipe)
       submission.current = { recipe, key: crypto.randomUUID() };
     const reply = await run("提交本地渲染", () =>
@@ -628,6 +667,9 @@ export function MotionWorkbench({
       }),
     );
     if (reply) {
+      // Acknowledgement ends this request; the next delivery freezes current audio.
+      // Keep the key on uncertain failures so a deliberate retry cannot duplicate jobs.
+      submission.current = null;
       setJobId(reply.job.id);
       setJob(reply.job);
       setArtifacts([]);
@@ -654,6 +696,41 @@ export function MotionWorkbench({
   const archive = artifacts.find((item) => item.kind === "master-archive");
   const thumbnail = artifacts.find((item) => item.kind === "preview-image");
   const report = artifacts.find((item) => item.kind === "report");
+  const verification = report?.metadata.verification as
+    MotionVerification | undefined;
+  async function recordReview() {
+    if (!reviewTarget || pending || composing) return;
+    if (!reviewer.trim() || !reviewNotes.trim()) {
+      setReviewError("请填写审核人和对线性颜色、显示变换及 Alpha 的审核依据。");
+      document
+        .getElementById(
+          !reviewer.trim() ? "motion-reviewer" : "motion-review-notes",
+        )
+        ?.focus();
+      return;
+    }
+    // Freeze the reviewed revision when opening the dialog; a concurrent save
+    // must fail with a conflict, never apply this attestation to different code.
+    const target = reviewTarget;
+    const reply = await run("记录源码审核", () =>
+      call<MotionReply>("record_motion_color_review", {
+        scene_id: target.record.id,
+        expected_revision_id: target.revision_id,
+        reviewer,
+        notes: reviewNotes,
+      }),
+    );
+    if (!reply) {
+      setReviewError("审核记录未保存，请查看错误并核对最新源码后重试。");
+      return;
+    }
+    if (savedRef.current?.revision_id === reply.revision_id) {
+      savedRef.current = reply;
+      setSaved(reply);
+    }
+    setReviewTarget(null);
+    setStatus("当前修订的源码审核记录已保存。");
+  }
   const otherSelected =
     saved && !scenes.some((scene) => scene.id === saved.record.id)
       ? saved.record
@@ -677,6 +754,11 @@ export function MotionWorkbench({
             预览；按源类型选择母版与视频输出。
           </p>
         </div>
+        <ProjectAudio
+          key={projectId}
+          projectId={projectId}
+          disabled={!!pending}
+        />
         <span className={"save-state " + (dirty ? "unsaved" : "")}>
           {dirty
             ? "未保存"
@@ -887,10 +969,15 @@ export function MotionWorkbench({
                   onChange={(event) => change("name", event.target.value)}
                 />
               </Field>
-              <CodeEditor
-                value={draft.code}
-                onChange={(code) => change("code", code)}
+              <MotionSourceEditor
+                key={saved!.record.id}
+                engine={draft.engine}
+                code={draft.code}
+                files={draft.files}
+                onCode={(code) => change("code", code)}
+                onFiles={(files) => change("files", files)}
                 onComposing={compose}
+                disabled={!!pending || composing}
               />
               <p id="motion-code-help" className="technical-note">
                 {draft.engine === "remotion-sdr-v1"
@@ -906,9 +993,19 @@ export function MotionWorkbench({
                   <Save size={15} />
                   保存动画
                 </Button>
-                <Button onClick={() => void copy(draft.code)}>
+                <Button
+                  onClick={() =>
+                    void copy(
+                      Object.keys(draft.files).length
+                        ? JSON.stringify(valid.spec ?? draft, null, 2)
+                        : draft.code,
+                    )
+                  }
+                >
                   <Copy size={15} />
-                  复制代码
+                  {Object.keys(draft.files).length
+                    ? "复制全部源码"
+                    : "复制代码"}
                 </Button>
                 {conflict && (
                   <Button
@@ -937,6 +1034,26 @@ export function MotionWorkbench({
                   Date.now()、随机数或 useFrame() 累加动画；每一帧应由帧号决定。
                 </p>
               </details>
+              {draft.engine === "three-float-v1" && (
+                <div className="technical-note">
+                  <p>
+                    {!dirty && saved?.color_review?.status === "reviewed"
+                      ? `源码颜色契约已审核 · ${saved.color_review.reviewer}`
+                      : "源码颜色契约未审核"}
+                    。审核是对当前修订的人工记录，独立于浮点链路验证。
+                  </p>
+                  <Button
+                    disabled={dirty || !!pending || composing}
+                    onClick={() => {
+                      setReviewTarget(saved);
+                      setReviewError("");
+                      setReviewNotes("");
+                    }}
+                  >
+                    记录源码审核
+                  </Button>
+                </div>
+              )}
             </section>
             <div className="motion-preview-column">
               <MotionPreview
@@ -971,8 +1088,8 @@ export function MotionWorkbench({
                       <input
                         id={"motion-" + key}
                         type="number"
-                        min={key === "frames" ? 1 : 16}
-                        max={key === "frames" ? 36000 : 4096}
+                        min={1}
+                        max={specificationMax}
                         step={1}
                         value={draft[key]}
                         aria-invalid={valid.field === key}
@@ -980,7 +1097,7 @@ export function MotionWorkbench({
                       />
                     </Field>
                   ))}
-                  <Field label="帧率" id="motion-fps">
+                  <Field label="常用帧率" id="motion-fps">
                     <select
                       id="motion-fps"
                       value={draft.fps}
@@ -996,7 +1113,26 @@ export function MotionWorkbench({
                       ))}
                     </select>
                   </Field>
+                  <Field
+                    label="自定义帧率（分子/分母）"
+                    id="motion-custom-fps"
+                    invalid={valid.field === "fps"}
+                    hint="例如 24000/1001、120/1 或 1/2。"
+                  >
+                    <input
+                      id="motion-custom-fps"
+                      value={draft.fps}
+                      spellCheck={false}
+                      aria-invalid={valid.field === "fps"}
+                      aria-describedby="motion-custom-fps-help"
+                      onChange={(event) => change("fps", event.target.value)}
+                    />
+                  </Field>
                 </div>
+                <p className="panel-description">
+                  支持自定义尺寸和帧率。预览使用低分辨率；正式导出受当前
+                  GPU、内存、磁盘与编码器能力限制。
+                </p>
               </section>
             </div>
           </div>
@@ -1005,36 +1141,117 @@ export function MotionWorkbench({
               <h2>动画导出</h2>
               <p className="panel-description">
                 {draft.engine === "remotion-sdr-v1"
-                  ? "SDR 网页源为 8-bit sRGB，可输出 sRGB 或 Rec.709 视频。"
-                  : "保留 ACEScg EXR 浮点母版，可输出 SDR sRGB/Rec.709 或 HDR PQ/HLG 视频；预览始终为 sRGB。"}
+                  ? "SDR 网页源为 8-bit sRGB，可输出带完整色域与传递函数标签的 sRGB 视频。"
+                  : "可选择保留 ACEScg EXR 母版，或仅输出 SDR sRGB / HDR PQ、HLG 视频。仅视频不生成 EXR 母版；预览始终为 sRGB。"}
               </p>
             </div>
             <Notice text={outputError} error />
             {/* Shared server discovery owns output choices; changing delivery never changes the preview. */}
             <div className="frame-settings">
+              <Field
+                label="正式导出采样"
+                id="motion-render-scale"
+                hint="2×2 / 4×4 提升空间边缘质量，渲染更慢；不添加运动模糊。快速预览不受影响。"
+              >
+                <select
+                  id="motion-render-scale"
+                  value={output.render_scale ?? 2}
+                  disabled={!!pending || !outputOptions}
+                  onChange={(event) => {
+                    const renderScale = Number(event.currentTarget.value) as
+                      1 | 2 | 4;
+                    setOutput((old) => ({ ...old, render_scale: renderScale }));
+                  }}
+                >
+                  {(outputOptions?.render_scales || [1, 2, 4]).map((scale) => (
+                    <option key={scale} value={scale}>
+                      {scale}×{scale}
+                      {scale === 2
+                        ? " · 推荐"
+                        : scale === 1
+                          ? " · 单次采样"
+                          : " · 精细"}
+                    </option>
+                  ))}
+                </select>
+              </Field>
               {draft.engine === "three-float-v1" && (
-                <Field label="EXR 母版精度" id="motion-master-depth">
+                <Field
+                  label="导出模式"
+                  id="motion-delivery-mode"
+                  hint={
+                    output.master_bit_depth === null
+                      ? "逐帧渲染并直接编码，不生成 EXR 母版，也不为视频再次渲染。中断后重新执行需从头渲染。"
+                      : "保留 ACEScg EXR 母版；可同时输出视频。"
+                  }
+                >
                   <select
-                    id="motion-master-depth"
-                    value={output.master_bit_depth ?? 32}
+                    id="motion-delivery-mode"
+                    value={
+                      output.master_bit_depth === null ? "video-only" : "master"
+                    }
                     disabled={!!pending || !outputOptions}
                     onChange={(event) => {
-                      // Capture before a discovery response rerenders the controlled select.
-                      const depth = Number(event.currentTarget.value) as
-                        16 | 32;
-                      setOutput((old) => ({ ...old, master_bit_depth: depth }));
+                      const onlyVideo =
+                        event.currentTarget.value === "video-only";
+                      // Preserve the selected video and last EXR precision when toggling modes.
+                      const video =
+                        output.video !== "none"
+                          ? output.video
+                          : outputOptions?.videos.find(
+                              (item) => item.value !== "none" && item.available,
+                            )?.value;
+                      setOutput((old) => ({
+                        ...old,
+                        master_bit_depth: onlyVideo ? null : masterDepth,
+                        video: onlyVideo ? video || "srgb" : old.video,
+                      }));
                     }}
                   >
-                    {(outputOptions?.master_bit_depths || [16, 32]).map(
-                      (depth) => (
-                        <option key={depth} value={depth}>
-                          {depth}-bit {depth === 32 ? "Float" : "Half"} · ACEScg
-                        </option>
-                      ),
-                    )}
+                    <option value="master">保留 EXR 母版</option>
+                    <option
+                      value="video-only"
+                      disabled={
+                        !outputOptions?.video_only ||
+                        !outputOptions.videos.some(
+                          (item) => item.value !== "none" && item.available,
+                        )
+                      }
+                    >
+                      仅视频
+                    </option>
                   </select>
                 </Field>
               )}
+              {draft.engine === "three-float-v1" &&
+                output.master_bit_depth !== null && (
+                  <Field label="EXR 母版精度" id="motion-master-depth">
+                    <select
+                      id="motion-master-depth"
+                      value={output.master_bit_depth ?? 32}
+                      disabled={!!pending || !outputOptions}
+                      onChange={(event) => {
+                        // Capture before a discovery response rerenders the controlled select.
+                        const depth = Number(event.currentTarget.value) as
+                          16 | 32;
+                        setMasterDepth(depth);
+                        setOutput((old) => ({
+                          ...old,
+                          master_bit_depth: depth,
+                        }));
+                      }}
+                    >
+                      {(outputOptions?.master_bit_depths || [16, 32]).map(
+                        (depth) => (
+                          <option key={depth} value={depth}>
+                            {depth}-bit {depth === 32 ? "Float" : "Half"} ·
+                            ACEScg
+                          </option>
+                        ),
+                      )}
+                    </select>
+                  </Field>
+                )}
               <Field
                 label="视频输出"
                 id="motion-hdr-video"
@@ -1050,22 +1267,34 @@ export function MotionWorkbench({
                     setOutput((old) => ({ ...old, video }));
                   }}
                 >
-                  {(outputOptions?.videos || []).map((item) => (
-                    <option
-                      key={item.value}
-                      value={item.value}
-                      disabled={!item.available}
-                    >
-                      {item.label}
-                      {!item.available ? " · 本机缺少编码器" : ""}
-                    </option>
-                  ))}
+                  {(outputOptions?.videos || [])
+                    .filter(
+                      (item) =>
+                        output.master_bit_depth !== null ||
+                        item.value !== "none",
+                    )
+                    .map((item) => (
+                      <option
+                        key={item.value}
+                        value={item.value}
+                        disabled={!item.available}
+                      >
+                        {item.label}
+                        {!item.available
+                          ? " · " + (item.reason || "本机缺少编码器")
+                          : ""}
+                      </option>
+                    ))}
                 </select>
               </Field>
             </div>
             <DeliveryDestination
               onPickingChange={setDirectoryPicking}
               variant="animation"
+              videoOnly={
+                draft.engine === "three-float-v1" &&
+                output.master_bit_depth === null
+              }
               options={destinationOptions}
               value={directory}
               error={destinationError}
@@ -1074,6 +1303,18 @@ export function MotionWorkbench({
                 setDestination(value);
                 setDestinationError("");
               }}
+            />
+            <MotionStorageEstimate
+              spec={valid.spec}
+              output={output}
+              directory={directory}
+              projectId={projectId}
+              active={
+                active &&
+                !composing &&
+                !directoryPicking &&
+                outputOptions?.engine === draft.engine
+              }
             />
             <div className="motion-export-actions">
               <Button
@@ -1202,11 +1443,31 @@ export function MotionWorkbench({
             </div>
             <progress aria-label="动画导出进度" value={job.progress} max={1} />
             <Notice text={job.error?.message || ""} error />
+            {verification && (
+              <p className="panel-description">
+                {verification.float_pipeline_verified
+                  ? "浮点链路已验证"
+                  : "SDR 截图链路 · 不属于浮点母版"}
+                {verification.source_color_contract?.status !==
+                  "not_applicable" && (
+                  <>
+                    {" "}
+                    ·{" "}
+                    {verification.source_color_contract?.status === "reviewed"
+                      ? "源码颜色契约已审核"
+                      : "源码颜色契约未审核"}
+                  </>
+                )}
+                {(verification.native_color_tags_verified ||
+                  verification.video?.native_color_tags_verified) &&
+                  " · 视频色彩标签已验证"}
+              </p>
+            )}
             {thumbnail && (
               <img
                 className="preview-image"
                 src={artifactUrl(thumbnail.id)}
-                alt="导出母版的 sRGB 预览"
+                alt="导出画面的 sRGB 预览"
               />
             )}
             <div className="motion-artifact-actions">
@@ -1252,6 +1513,91 @@ export function MotionWorkbench({
           </>
         )}
       </section>
+      <Modal
+        open={!!reviewTarget}
+        title="记录源码颜色契约审核"
+        onClose={() => {
+          if (!pending) setReviewTarget(null);
+        }}
+      >
+        <p>
+          仅记录修订 {reviewTarget?.revision_id.slice(0, 8)} 的审核。请确认最终
+          RGB 为线性 Rec.709 光量，未烘焙显示 Gamma
+          或色调映射，且透明混合符合宿主 Alpha 约定。此记录不会自动检查任意
+          shader，也不会阻止未审核代码渲染。
+        </p>
+        {/* Reuse the shared modal form padding and native keyboard submission. */}
+        <form
+          noValidate
+          onSubmit={(event) => {
+            event.preventDefault();
+            void recordReview();
+          }}
+        >
+          <Field
+            label="审核人"
+            id="motion-reviewer"
+            invalid={!!reviewError && !reviewer.trim()}
+            hint={
+              reviewError && !reviewer.trim() ? "请输入审核人。" : undefined
+            }
+          >
+            <input
+              id="motion-reviewer"
+              autoFocus
+              maxLength={120}
+              value={reviewer}
+              aria-invalid={!!reviewError && !reviewer.trim()}
+              aria-describedby={
+                reviewError && !reviewer.trim()
+                  ? "motion-reviewer-help"
+                  : undefined
+              }
+              disabled={!!pending}
+              onChange={(event) => setReviewer(event.target.value)}
+            />
+          </Field>
+          <Field
+            label="审核依据"
+            id="motion-review-notes"
+            invalid={!!reviewError && !reviewNotes.trim()}
+            hint={
+              reviewError && !reviewNotes.trim()
+                ? "请输入源码颜色契约的审核依据。"
+                : undefined
+            }
+          >
+            <Textarea
+              className="resize-none"
+              id="motion-review-notes"
+              rows={5}
+              maxLength={4000}
+              value={reviewNotes}
+              aria-invalid={!!reviewError && !reviewNotes.trim()}
+              aria-describedby={
+                reviewError && !reviewNotes.trim()
+                  ? "motion-review-notes-help"
+                  : undefined
+              }
+              disabled={!!pending}
+              onChange={(event) => setReviewNotes(event.target.value)}
+            />
+          </Field>
+          <Notice text={reviewError} error />
+          <div className="modal-actions">
+            <Button disabled={!!pending} onClick={() => setReviewTarget(null)}>
+              取消
+            </Button>
+            <Button
+              type="submit"
+              className="primary"
+              disabled={!!pending || composing}
+            >
+              保存审核记录
+            </Button>
+          </div>
+        </form>
+      </Modal>
       <Modal
         open={!!discard}
         title="保留当前动画草稿"

@@ -7,10 +7,50 @@
 - **场景创作**：从模板开始，用 JSON 和 WGSL 定义画面，调整参数、颜色与关键帧。
 - **HDR / SDR 动画代码**：同时提供浮点 Three.js、SDR React 文字和 ThreeCanvas 模板；统一预览，按源类型导出 HDR/SDR 视频或浮点母版。
 - **实时预览**：播放、暂停和逐帧查看动画，检查原始像素值。
-- **色彩管理**：代码生成与内部处理固定为 float32 线性 ACEScg（AP1），网页使用 sRGB 预览，输出色彩空间在交付时选择；统一通过 OCIO / ACES 2.0 转换，原始浮点数据与显示预览分别保留。
+- **色彩管理**：WGSL 生成与母版处理使用 float32 线性 ACEScg（AP1）；Three.js 动画以线性 Rec.709 生成，再转换为 ACEScg，网页使用 sRGB 预览，输出色彩空间在交付时选择；统一通过 OCIO / ACES 2.0 转换，原始浮点数据与显示预览分别保留。
 - **多格式交付**：导出 EXR、PNG、TIFF、DPX 图像序列，以及 H.264、HEVC、ProRes、DNxHR 等视频；可用组合由本机能力决定。
+- **项目音频**：导入本地音频，或用代码生成音调、节奏与音效；设置音轨裁切、起点和音量，随视频混音或作为独立 WAV 交付。
 - **任务管理**：查看渲染进度、下载成果，恢复符合条件的中断任务。
 - **模型调用**：所有产品操作均提供 MCP 工具和 CLI 调用。场景示例见 [examples](examples/README.md)。
+
+## 音频制作与 MCP
+
+“工作区”和“动画代码”均提供 **项目音频**：导入文件或生成音效，试听素材，点击“添加到音轨”，设置时间线起点、素材起点、播放时长及增益，再保存音轨。音轨用于该项目所有场景的新交付任务；编辑预览暂不播放音轨。
+
+Agent 可以通过 `chromascript.create_audio` 程序化生成音频。以下是相同操作的 CLI 示例（替换项目 ID）：
+
+```sh
+.venv/bin/chromascript call create_audio --arguments '{
+  "project_id": "PROJECT_ID",
+  "name": "双音提示",
+  "spec": {
+    "duration_seconds": 1,
+    "seed": 42,
+    "events": [
+      {"waveform":"sine","frequency_hz":440,"start_seconds":0,"duration_seconds":0.2,"gain_db":-18},
+      {"waveform":"sine","frequency_hz":660,"start_seconds":0.3,"duration_seconds":0.3,"gain_db":-18}
+    ]
+  }
+}'
+```
+
+生成接口返回 `asset.id`。先调用 `get_project_audio` 读取当前 `revision_id`（初始为 `"0"`），再用 `set_project_audio` 将素材放进项目音轨：
+
+```json
+{
+  "project_id": "PROJECT_ID",
+  "expected_revision_id": "0",
+  "timeline": {
+    "clips": [{"asset_id":"ASSET_ID","start_seconds":0,"gain_db":0}]
+  }
+}
+```
+
+所有接口均可用 `chromascript call 操作名 --arguments @参数.json` 调用；MCP 使用同名 `chromascript.*` 工具。`get_documentation(topic="audio")` 提供完整输入契约。`import_audio` 接受 `source_path`（本地绝对路径）或 `data_base64` 二选一；外部工具生成的音频也可通过此接口进入项目。
+
+本地合成支持正弦波、三角波、噪声、定时事件、声像和淡入淡出。重复事件组成节奏，重叠事件组成和弦；不调用音乐或语音模型。每段素材最多 10 分钟，导入文件最多 128 MiB；素材统一为 48 kHz 双声道 32-bit 整数 PCM，原始音频实际属性另行记录，存储位深不等于源精度。
+
+交付冻结音轨修订与素材校验和。后续修改不影响已排队任务；使用修改后的音轨需新任务键。视频交付混入音频（MP4/AAC，MOV/MKV/MXF 使用 PCM，仍须通过实际编码验证），所有带音频的交付额外包含精确时长的 `audio.wav`。EXR 等图像序列通过交付接口获得独立 WAV；单帧、预览和单独的 `render_sequence` 操作仍静音。音轨空白补静音、超出画面时长裁切；报告记录实际解码样本数和削波情况。WAV 混音须小于 4 GiB。音频不进入 OCIO，画面色彩流程保持独立。
 
 ## 色彩工作流程
 
@@ -23,6 +63,31 @@
 颜色参数的 `color_space` 仅声明参数的存储编码（ACEScg 或 sRGB）；参数进入 `ctx.params` 前统一转换为线性 ACEScg，不会改变整个场景的生成空间。网页预览固定使用 ACES 2.0 sRGB SDR 显示变换，不随交付设置改变，也不替代 HDR 校准监看。
 
 在交付面板分别选择输出色彩空间与 Gamma。显示交付应用一次 ACES 输出变换；ACEScg、ACES2065-1 或 ACEScct 场景编码仅做色彩空间转换，不烘焙显示效果。可用组合仍受封装、编码器与位深限制。
+
+## 调色母版与完整色彩标签
+
+“动画导出”面板按所选导出模式提供 **渲染预估磁盘空间**，随当前草稿尺寸、帧数、Half/Float 精度、超采样、视频输出和导出目录更新。分别显示 EXR 未压缩体积、导出盘所需空间预算、磁盘可用空间，以及中间数据、视频、音轨和工作区元数据明细。ZIP 实际体积取决于画面；预估不预留空间、不扣除已有缓存，提交时使用同一套预算重新检查。修改音轨或释放磁盘后可点击“刷新预估”。
+
+MCP 使用 `chromascript.estimate_motion_render`，CLI 使用同名操作：
+
+```sh
+.venv/bin/chromascript call estimate_motion_render --arguments '{"settings":{"width":3840,"height":2160,"frames":300,"fps":{"numerator":60,"denominator":1}},"output":{"master_bit_depth":32,"video":"none","render_scale":2}}'
+```
+
+可传 `export_directory` 检查指定磁盘，传 `project_id` 计入项目当前音轨；估算不会创建目录或渲染任务。SDR 源显示中间帧和视频预算，不标作浮点母版。
+
+
+新建动画默认使用浮点引擎，默认导出 ACEScg 32-bit Float / ZIP EXR 母版、不额外编码视频。`submit_motion_render.output.render_scale` 可选 1、2、4，默认 2，即每个输出像素使用 2×2 空间采样。浮点路径在线性预乘 RGB/Alpha 中平均后解除预乘、转为 ACEScg；SDR 截图在线性 sRGB 光量中合成和缩小，不增加源位深。预览仍为低分辨率单次采样；本项不添加运动模糊。
+
+动画尺寸、总帧数和帧率分子/分母可自定义，整数范围为 1–2147483647，不再限定 4096 像素、36000 帧或 1–240 fps。实际渲染受 GPU 纹理/视口、可用内存、磁盘和编码器约束；不支持时明确失败，不缩放成其他交付规格。有理数帧率始终原样传递并在编码后核对。
+
+浮点和 SDR 动画均直接在 `export_directory` 所选磁盘的任务临时目录生成中间帧、编码文件与最终成果，验证后在同一磁盘发布。本机工作区保留任务数据库与日志；浏览器仍使用系统临时配置。支持外部硬盘，断开或替换导出卷时失败，不回退写入本机。SDR 和仅视频模式重试时从头渲染；保留母版模式重试复用已验证 EXR。
+
+自定义 shader 保持可用。报告分别记录 `float_pipeline_verified` 与 `source_color_contract`。浮点验证不自动证明任意源码的颜色语义；`scene_linear_master` 表示是否交付场景线性母版；仅视频模式为 false，浮点源仍独立验证。人工审核后通过界面“记录源码审核”或共享 `record_motion_color_review(scene_id, expected_revision_id, reviewer, notes)` 记录依据。审核绑定修订及源码哈希；修订改变后为未审核，旧任务保留提交时的审核记录。未审核不阻止创作和渲染。
+
+所有新视频必须使用能准确标记色域和传递函数的组合。默认 SDR 为 Rec.709 色域 / sRGB，HDR 为 Rec.2020 / PQ 或 HLG；通用交付也保留受支持的 P3-D65 和 Gamma 2.2。纯 Gamma 2.4/2.6 及 AP1/ACEScct 没有精确的标准视频标签，不能通过备注或错误套用 BT.709 标签发布；这些旧视频组合禁用，EXR 与有原生数字 Gamma 字段的 DPX 不受影响。回读验证码流的 primaries、transfer、matrix、range，MOV/MP4 还核对实际 colr 字段；报告、CLI 和 MCP 使用同一规则。
+
+Three.js 接受 sRGB 编码颜色（如 Hex/CSS），转换后在默认线性 Rec.709/D65 中计算；线性并不等于 SDR 或 0–1。当前宿主固定这一工作空间再由 OCIO 转为 ACEScg，禁止源码修改全局工作空间而破坏解释。其他色域/Log/PQ 输入需先正确转换，不能只改标签。
 
 ## 安装方法
 
@@ -43,13 +108,19 @@ cd /absolute/path/ChromaScript
 
 日常只需运行 `./start.sh`，打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)，创建项目并新建空白场景（示例模板可选）。启动不联网安装依赖，数据默认保存在仓库下的 `workspace`，按 `Ctrl+C` 停止服务。
 
-制作动画时，点击顶部“动画代码”，选择 SDR 网页或浮点渲染类型，点击“新建空白动画”；“示例模板（可选）”中保留文字、几何、光能等起点。修改 TypeScript 后自动预览；保存后选择 EXR 16-bit Half 或 32-bit Float，以及仅母版、PQ、HLG、sRGB 或 Rec.709 视频，点击“导出动画”。EXR 保留直通 Alpha，视频在场景线性空间合成黑底。视频要求偶数宽高与本机 libx265；EXR 可使用奇数尺寸。浏览器预览始终为 sRGB SDR，不作为 HDR 亮度参考。
+制作动画时，点击顶部“动画代码”，选择 SDR 网页或浮点渲染类型，点击“新建空白动画”；“示例模板（可选）”中保留文字、几何、光能等起点。修改 TypeScript 后自动预览；保存后选择“保留 EXR 母版”或“仅视频”。保留母版时可选 16-bit Half 或 32-bit Float，并可另输出视频；仅视频时选择 PQ、HLG 或 sRGB，点击“导出动画”。EXR 保留直通 Alpha，视频在场景线性空间合成黑底。视频要求偶数宽高及相应本机编码器（HDR 用 libx265，sRGB 用 libx264）；EXR 可使用奇数尺寸。浏览器预览始终为 sRGB SDR，不作为 HDR 亮度参考。
 
-HDR 浮点代码仅导入 `three`，默认导出同步 `createScene({width,height,frames,fps,frameRate})`，返回 `{scene,camera,update({frame,time,fps,width,height})}`。每帧直接设置状态，时间为 `frame × 帧率分母 / 分子`。Three 数值颜色采用线性 Rec.709/D65，允许超过 1；交由宿主转换为 ACEScg/AP1。材质不得烘焙 tone mapping 或显示编码。透明材质使用 NormalBlending，输出小于 1 的 Alpha 时必须启用 transparent。禁止网络素材与文件导入，代码只在隔离浏览器运行。
+HDR 浮点代码的外部包仅允许 `three`，默认导出同步 `createScene({width,height,frames,fps,frameRate})`，返回 `{scene,camera,update({frame,time,fps,width,height})}`。工厂与 update 另提供 `rasterWidth/rasterHeight` 表示实际采样尺寸；使用 `gl_FragCoord` 的 shader 应用它们归一化坐标，布局仍使用逻辑 width/height。每帧直接设置状态，时间为 `frame × 帧率分母 / 分子`。Three 数值颜色采用线性 Rec.709/D65，允许超过 1；交由宿主转换为 ACEScg/AP1。材质不得烘焙 tone mapping 或显示编码。透明材质使用 NormalBlending，输出小于 1 的 Alpha 时必须启用 transparent。允许导入同一动画的分章模块；禁止网络素材及宿主文件导入，代码只在隔离浏览器运行。
+
+单场景支持多个分章文件联合渲染。在“源码文件”中切换入口与分章，用“添加分章文件”拆分长动画；入口通过 `import ... from "./chapters/intro"` 引用分章并安排时间。浮点场景共享同一 scene/camera，SDR 可用 Remotion `Sequence` 组织各章。全部文件一起预览、保存、检查修订冲突并冻结到渲染任务，交付中附带完整 `sources/` 源码树。CLI/MCP 的 `MotionSpec` 新增可选 `files: {相对路径: 源码}`，旧 `code` 仍是入口；参见 [多文件示例与调用方式](examples/motion-chapters/README.md)。
 
 本地创作源码可放在 `workspace/authored/`，使用本地 `workspace/tsconfig.json` 指向 `frontend` 的 TypeScript 设置与已安装的 Three 类型声明。工作区不纳入 Git 或前端应用构建。
 
 MCP/CLI 使用 `get_motion_delivery_options` 发现输出，`render_motion_frame` 检查未保存草稿的 sRGB 图片和原始浮点范围，`submit_motion_render` 的 `output` 为 `{"master_bit_depth":32,"video":"pq"}`（video 可选 none/pq/hlg）。浮点动画直接在导出盘的任务临时目录生成逐帧 EXR、源码、快照、缩略图、可选视频与验证报告，验证后原地发布；workspace 不再复制母版。失败或中断保留已验证帧，重试校验帧哈希和冻结的 GPU/运行环境/色彩配置。`inspect_frame` / `sample_pixels` 可检查导出目录中的原始母版。
+
+新增“仅视频”模式使用 `output={"master_bit_depth":null,"video":"pq","render_scale":1}`（视频也可选 `hlg` / `srgb`），通过同一 `submit_motion_render` / `estimate_motion_render` 操作在界面、CLI 和 MCP 使用。每帧浮点读取、线性采样/Alpha 处理与 ACES 输出变换后直接送入 FFmpeg，不写 EXR，也不二次渲染。导出盘仅保留一帧临时 `.f32` 传输文件，消费后删除；成果仍附源码、规格、缩略图和验证报告。默认母版模式保持不变。仅视频不能同时设置 `video="none"`，中断后的显式重试从头开始；已原子发布的成果可直接恢复完成状态。
+
+仅视频空间预算包含单帧中间数据、音轨、辅助文件以及压缩视频估算；规划码率为 `max(8 Mbps, 宽×高×fps×0.2)`，按精确有理帧率算时长，再加 20% 与封装余量。规划码率**不是编码器限制**，原有 CRF/质量不变，不能保证实际文件大小；运行时持续检查磁盘余量。4K UHD 60fps、10 分钟、1×1 无音轨的估算约 8.56 GiB，而不是按整段未压缩 EXR 计算。
 
 “下载 ACEScg 母版 ZIP”在下载时流式打包，不在服务端保存 ZIP；浏览器下载位置会保存用户请求的归档。MCP/CLI 可通过 `export_artifact` 将同一虚拟 `master-archive` 写入指定文件。流式 ZIP 不支持断点下载，中断后需重新开始。旧任务文件和快照保留不迁移；升级改变运行时指纹后，旧任务若要继续渲染需重新提交。
 
@@ -67,6 +138,8 @@ MCP/CLI 使用 `get_motion_delivery_options` 发现输出，`render_motion_frame
   }
 }
 ```
+
+MCP 自动启动的网页固定使用 [http://127.0.0.1:8765](http://127.0.0.1:8765)，端口被占用时不会自动改用随机端口。同一工作区已有健康服务时会继续复用其地址（包括手动指定的端口）。旧版本已启动的随机端口服务需在任务结束后停止，再重新连接 MCP，才会切换到固定端口。
 
 ## 常见问题
 
@@ -96,6 +169,6 @@ MCP/CLI 使用 `get_motion_delivery_options` 发现输出，`render_motion_frame
 
 网页、MCP 与 CLI 共用 `choose_export_directory`（可选 `initial_directory`）和 `open_export_directory`（`directory`）操作，例如 `chromascript call choose_export_directory`。系统文件夹选择器目前用于 macOS；其他系统可直接输入目录。旧脚本的 `--export-root` 参数仍可解析，但不再限制导出位置。
 
-SDR 模板使用 `engine=remotion-sdr-v1`，默认导出 React 组件。允许原有 React、Remotion、ThreeCanvas 与 Three.js 导入。`get_motion_delivery_options(engine)` 返回源类型对应的选项；SDR 的 `output` 为 `{"master_bit_depth":null,"video":"srgb"}` 或 `rec709`。浏览器 SDR 源不会被重新标记为 HDR 或 ACEScg 母版。
+SDR 模板使用 `engine=remotion-sdr-v1`，默认导出 React 组件。允许原有 React、Remotion、ThreeCanvas 与 Three.js 导入。`get_motion_delivery_options(engine)` 返回源类型对应的选项；SDR 的 `output` 为 `{"master_bit_depth":null,"video":"srgb"}` 。`rec709`（纯 Gamma 2.4）因缺少精确标准视频标签而禁用。浏览器 SDR 源不会被重新标记为 HDR 或 ACEScg 母版。
 
-不需要通过模板开始：`create_scene` 仅传 `project_id` 即创建空白 WGSL 场景；`create_motion_scene` 仅传 `project_id` 创建空白 SDR 动画，增加 `engine: "three-float-v1"` 则创建空白浮点动画。两者均可直接传入 `spec`，也可在创建后使用修订号通过 MCP/CLI 修改源码。空白场景只含可运行的最小透明画面代码，没有示例图形或动画；项目用于归属与历史管理，模板不构成依赖。
+不需要通过模板开始：`create_scene` 仅传 `project_id` 即创建空白 WGSL 场景；`create_motion_scene` 仅传 `project_id` 创建空白浮点动画；显式传入 `engine: "remotion-sdr-v1"` 创建 SDR 网页动画。两者均可直接传入 `spec`，也可在创建后使用修订号通过 MCP/CLI 修改源码。空白场景只含可运行的最小透明画面代码，没有示例图形或动画；项目用于归属与历史管理，模板不构成依赖。

@@ -33,6 +33,9 @@ from chromascript.worker import run
 def float_job(tmp_path, monkeypatch):
     # Failure injection uses deterministic float transport. Real GPU/codec
     # precision remains covered by test_motion's native integration scenarios.
+    # Import before patching the source module so teardown restores the real
+    # worker identity, independently of which integration test ran first.
+    __import__("chromascript.motion_worker")
     for module in ("motion", "motion_worker", "service"):
         monkeypatch.setattr(f"chromascript.{module}.motion_identity", lambda: {"test": 1})
     monkeypatch.setattr(
@@ -60,7 +63,9 @@ def float_job(tmp_path, monkeypatch):
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "gpu.json").write_text(json.dumps(gpu))
         for index in indices:
-            pixels = np.empty((spec.height, spec.width, 4), dtype="<f4")
+            # Model the actual transport raster, including final supersampling.
+            scale = kwargs.get("render_scale", 1)
+            pixels = np.empty((spec.height * scale, spec.width * scale, 4), dtype="<f4")
             # Choose negative radiance that remains negative after the Rec.709→AP1 matrix.
             pixels[:] = [-4.125, 4.125 + index, 0.1234567, 0.5]
             raw = directory / f"frame-{index}.f32"
@@ -94,6 +99,17 @@ def test_single_copy_and_original_artifacts_outside_workspace(float_job):
     archive = archive_of(service, job)
     assert archive["representation"] == "zip-stream" and archive["size_bytes"] is None
     assert service.get_artifact(archive["id"])["local_path"] is None
+
+
+def test_publication_does_not_change_the_destination_request_identity(float_job):
+    service, job, bundle, _, _ = float_job
+    run(service.store.root, job["id"])
+    assert service.get_job(job["id"])["job"]["status"] == "completed"
+    # Creating the formerly absent destination must not change the frozen volume
+    # identity or turn a transport retry into a conflicting/new render request.
+    repeated = service.submit_motion_render(job["scene_id"], job["revision_id"], "single-copy",
+        export_directory=str(bundle.target.parent), output=MotionOutput(video="none"))["job"]
+    assert repeated["id"] == job["id"]
 
 
 def test_failed_publication_reuses_only_valid_masters(float_job, monkeypatch):

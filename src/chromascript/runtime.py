@@ -39,6 +39,7 @@ def ensure_daemon(root: Path) -> dict[str, Any]:
         return endpoint(root)
     root.mkdir(parents=True, exist_ok=True)
     with (root / "daemon.log").open("ab") as log:
+        # Match manual serve's fixed web address; never silently choose a random port.
         subprocess.Popen(
             [
                 sys.executable,
@@ -48,7 +49,7 @@ def ensure_daemon(root: Path) -> dict[str, Any]:
                 str(root),
                 "serve",
                 "--port",
-                "0",
+                "8765",
             ],
             stdout=log,
             stderr=log,
@@ -76,7 +77,7 @@ def call(
         # destination creation prevents a retry from overwriting the first export.
         timeout=(
             httpx.Timeout(60, read=None)
-            if name.removeprefix("chromascript.") == "export_artifact"
+            if name.removeprefix("chromascript.") in {"export_artifact", "create_audio", "import_audio"}
             else 330 if name.removeprefix("chromascript.") == "choose_export_directory" else 60
         ),
     )

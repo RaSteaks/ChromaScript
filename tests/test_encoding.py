@@ -9,8 +9,19 @@ import pytest
 
 from chromascript.encoding import check_image_metadata, check_probe, encode
 from chromascript.images import read_image, write_image
-from chromascript.models import RenderSettings
-from chromascript.presets import builtins
+from chromascript.models import ColorPipeline, RenderSettings
+from chromascript.presets import builtins as legacy_builtins
+
+
+def tagged_presets():
+    # Exercise the same codec/profile/range contracts using explicitly taggable
+    # outputs. Historical Gamma 2.4 preset definitions retain their old meaning.
+    result = legacy_builtins()
+    for key, preset in result.items():
+        if preset.container not in {"exr", "png", "tiff", "dpx"} and preset.color.output == "Rec.709":
+            result[key] = preset.model_copy(update={"color": ColorPipeline(
+                output="Rec.709-Gamma2.2" if preset.container == "mxf" else "sRGB")})
+    return result
 
 
 @pytest.mark.integration
@@ -30,7 +41,7 @@ from chromascript.presets import builtins
     ],
 )
 def test_streams_and_precision(tmp_path: Path, id):
-    p = builtins()[id]
+    p = tagged_presets()[id]
     s = RenderSettings(width=320, height=180, frames=2)
     pixels = np.ones((180, 320, 4), dtype=np.float32) * 0.5
     pixels[..., 3] = 1
@@ -50,10 +61,10 @@ def test_streams_and_precision(tmp_path: Path, id):
         wrong["container_color"][0]["primaries"] = 12
         assert not check_probe(wrong, p, s)["passed"]
         if p.container == "mov":
-            # colr takes precedence over gama; automatic pure-gamma import is not certified.
+            # colr must describe the actual curve, never an unspecified declaration.
             assert "gamma" not in info["container_color"][0]
-            assert info["container_color"][0]["transfer"] == 2
-            assert result["color_encoding"]["requires_manual_video_interpretation"]
+            assert info["container_color"][0]["transfer"] == 13
+            assert not result["color_encoding"]["requires_manual_video_interpretation"]
 
 
 @pytest.mark.integration
@@ -61,7 +72,7 @@ def test_streams_and_precision(tmp_path: Path, id):
     "id,depth,black,white", [("prores-4", 12, 256, 3760), ("dnxhr-hqx-mov", 10, 64, 940)]
 )
 def test_intra_codec_implicit_legal_range(tmp_path: Path, id, depth, black, white):
-    p = builtins()[id]
+    p = tagged_presets()[id]
     s = RenderSettings(width=320, height=180, frames=1)
     a = np.ones((180, 320, 4), dtype=np.float32)
     a[:, :160, :3] = 0
@@ -95,7 +106,7 @@ def test_explicit_full_range_is_signaled(tmp_path):
     from chromascript.models import DeliveryPreset
 
     p = DeliveryPreset.model_validate(
-        {**builtins()["h264-review"].model_dump(), "id": "h264-full", "data_range": "full"}
+        {**tagged_presets()["h264-review"].model_dump(), "id": "h264-full", "data_range": "full"}
     )
     settings = RenderSettings(width=64, height=64, frames=2)
     pixels = np.ones((64, 64, 4), dtype=np.float32) * 0.5
@@ -121,7 +132,7 @@ def test_unknown_frame_rate_is_a_verification_failure():
         ]
     }
     checked = check_probe(
-        info, builtins()["h264-review"], RenderSettings(width=320, height=180, frames=2)
+        info, tagged_presets()["h264-review"], RenderSettings(width=320, height=180, frames=2)
     )
     assert not checked["passed"]
     assert "frame-rate mismatch" in checked["issues"]
@@ -130,7 +141,7 @@ def test_unknown_frame_rate_is_a_verification_failure():
 @pytest.mark.integration
 def test_decoded_profile_and_sampling_must_match_the_requested_delivery(tmp_path):
     # One real 4:2:2 file supplies independent evidence for both negative cases.
-    p = builtins()["prores-2"]
+    p = tagged_presets()["prores-2"]
     settings = RenderSettings(width=64, height=64, frames=1)
     info = encode(
         p, settings, tmp_path / "422.mov", [np.ones((64, 64, 4), np.float32)], lambda _: None
@@ -154,7 +165,7 @@ def test_decoded_profile_and_sampling_must_match_the_requested_delivery(tmp_path
 @pytest.mark.parametrize("id", ["prores-4", "ffv1-rgb16"])
 def test_codec_transparency_survives_decode(tmp_path, id):
     # Vary coverage independently of RGB so an opaque-only sample cannot pass.
-    p = builtins()[id]
+    p = tagged_presets()[id]
     if id == "ffv1-rgb16":
         # The built-in is RGB; this legal custom variant explicitly requests alpha.
         p = p.model_copy(update={"alpha": True, "pixel_format": "gbrap16le"})
@@ -188,7 +199,7 @@ def test_codec_transparency_survives_decode(tmp_path, id):
 
 
 def test_image_storage_check_rejects_incorrect_native_depth(tmp_path):
-    p = builtins()["png-16"]
+    p = tagged_presets()["png-16"]
     path = tmp_path / "native.png"
     write_image(path, np.ones((16, 16, 4), dtype=np.float32), space="sRGB", depth=16)
     _, metadata = read_image(path)
@@ -214,7 +225,7 @@ def test_image_storage_check_rejects_incorrect_native_depth(tmp_path):
 def test_native_sequence_color_metadata_survives_without_sidecar(tmp_path, id):
     import json
 
-    p = builtins()[id]
+    p = tagged_presets()[id]
     path = tmp_path / f"frame.{p.container}"
     # Non-opaque coverage and unequal RGB catch unwanted color/alpha processing.
     pixels = np.broadcast_to(np.array([0.125, 0.5, 0.75, 0.5], dtype=np.float32), (16, 16, 4))
@@ -258,7 +269,7 @@ def test_untagged_png_is_not_certified_from_reader_default(tmp_path):
     _, metadata = read_image(path)
     # OIIO reports assumed sRGB; a physical sRGB/gAMA/cHRM header is still required.
     assert metadata["oiio:ColorSpace"] == "srgb_rec709_scene"
-    p = builtins()["png-8"].model_copy(update={"alpha": False})
+    p = tagged_presets()["png-8"].model_copy(update={"alpha": False})
     assert "missing PNG sRGB chunk" in check_image_metadata(metadata, p)
 
 
@@ -275,7 +286,7 @@ def test_untagged_png_is_not_certified_from_reader_default(tmp_path):
 def test_gamma_choices_write_standard_container_tags(tmp_path, container, output, expected):
     from chromascript.models import ColorPipeline
 
-    p = builtins()["hevc-mov"].model_copy(
+    p = tagged_presets()["hevc-mov"].model_copy(
         update={
             "container": container,
             "color": ColorPipeline(output=output),
@@ -296,7 +307,7 @@ def test_gamma_choices_write_standard_container_tags(tmp_path, container, output
 def test_nonzero_drop_frame_timecode_is_verified(tmp_path):
     from chromascript.models import Rational
 
-    p = builtins()["h264-review"]
+    p = tagged_presets()["h264-review"]
     settings = RenderSettings(
         width=64,
         height=64,
@@ -318,7 +329,7 @@ def test_native_encoder_failure_cleans_partial_and_keeps_diagnostics(tmp_path):
     from chromascript.errors import ChromaError
 
     # Enough input to encounter a closed native encoder pipe, not just its exit status.
-    p = builtins()["h264-review"].model_copy(update={"profile": "invalid-native-profile"})
+    p = tagged_presets()["h264-review"].model_copy(update={"profile": "invalid-native-profile"})
     settings = RenderSettings(width=320, height=180, frames=30)
     pixels = np.ones((180, 320, 4), dtype=np.float32)
     target = tmp_path / "failed.mp4"
@@ -333,7 +344,7 @@ def test_native_encoder_failure_cleans_partial_and_keeps_diagnostics(tmp_path):
 def test_120fps_timecode_retains_three_digit_frame_number(tmp_path):
     from chromascript.models import Rational
 
-    p = builtins()["h264-review"]
+    p = tagged_presets()["h264-review"]
     settings = RenderSettings(
         width=64, height=64, frames=2, fps=Rational(numerator=120), timecode="00:00:00:110"
     )

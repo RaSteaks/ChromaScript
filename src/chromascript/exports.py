@@ -46,6 +46,12 @@ def export_directory(value: str) -> Path:
         if not value.strip() or "\x00" in value or not path.is_absolute():
             raise ValueError("请输入绝对目录路径，例如 /Users/name/Movies。")
         path = path.resolve()
+        # A disconnected macOS volume must never become a new directory on the
+        # system disk. Subdirectories on an actually mounted volume are allowed.
+        if len(path.parts) >= 3 and path.parts[1] == "Volumes":
+            mount = Path(*path.parts[:3])
+            if not mount.is_mount():
+                raise ValueError("外部磁盘未挂载，请连接磁盘后重新选择导出位置。")
         parent = path
         while not parent.exists():
             parent = parent.parent
@@ -308,7 +314,7 @@ def motion_bundle(job: dict[str, Any], snapshot: dict[str, Any]) -> RenderBundle
     """Derive external storage exclusively from a checksummed, frozen motion snapshot."""
     if (
         snapshot.get("storage_layout") != DESTINATION_LAYOUT
-        or snapshot.get("engine") != "three-float-v1"
+        or snapshot.get("engine") not in {"three-float-v1", "remotion-sdr-v1"}
         or job.get("kind") != "motion"
         or hashlib.sha256(canonical(snapshot).encode()).hexdigest() != job["snapshot_hash"]
     ):

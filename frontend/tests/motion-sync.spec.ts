@@ -155,7 +155,7 @@ test("MCP updates the existing editor, specification and preview without reloadi
     ["宽度", "352"],
     ["高度", "198"],
     ["总帧数", "18"],
-    ["帧率", "24000/1001"],
+    ["常用帧率", "24000/1001"],
   ])
     await expect(page.getByLabel(label, { exact: true })).toHaveValue(value);
   await expect(page.getByLabel("已保存的动画", { exact: true })).toContainText(
@@ -173,7 +173,7 @@ test("MCP updates the existing editor, specification and preview without reloadi
   await expect(
     page.getByRole("button", { name: "播放动画", exact: true }),
   ).toBeEnabled();
-  // Multiple unchanged reads retain the same editor and immutable saved head.
+  // Preset and custom rate controls share one draft. Multiple unchanged reads retain the same editor and immutable saved head.
   await page.waitForTimeout(2200);
   expect(navigations).toBe(0);
   expect(await revisionCount()).toBe(2);
@@ -192,7 +192,7 @@ test("external updates retain all draft fields, the save baseline and explicit s
   await page.getByLabel("动画名称", { exact: true }).fill("本地未保存名称");
   await page.getByLabel("宽度", { exact: true }).fill("333");
   await page.getByLabel("总帧数", { exact: true }).fill("20");
-  await page.getByLabel("帧率", { exact: true }).selectOption("24/1");
+  await page.getByLabel("常用帧率", { exact: true }).selectOption("24/1");
   await page.route("**/api/operations/update_motion_scene", (route) =>
     route.fulfill({
       status: 503,
@@ -214,7 +214,7 @@ test("external updates retain all draft fields, the save baseline and explicit s
     ["动画名称", "本地未保存名称"],
     ["宽度", "333"],
     ["总帧数", "20"],
-    ["帧率", "24/1"],
+    ["常用帧率", "24/1"],
   ])
     await expect(page.getByLabel(label, { exact: true })).toHaveValue(value);
   await page.unroute("**/api/operations/update_motion_scene");

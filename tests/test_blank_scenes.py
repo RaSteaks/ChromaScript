@@ -47,7 +47,8 @@ def test_blank_animation_needs_no_template_and_is_previewable(tmp_path, monkeypa
         "chromascript.motion.templates", lambda: pytest.fail("blank must not load templates")
     )
     args = {"project_id": project}
-    if engine != "remotion-sdr-v1":
+    # Master-oriented blank creation defaults to float; SDR remains explicit.
+    if engine != "three-float-v1":
         args["engine"] = engine
     result = execute(service, "create_motion_scene", args)
     assert result["scene"]["engine"] == engine

@@ -1,6 +1,8 @@
 import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { MotionReply } from "../src/types";
 
 async function showExamples(page: Page) {
@@ -188,6 +190,8 @@ test("HDR editing, seeking, recovery and actual local video export", async ({
   await expect(
     page.getByRole("button", { name: "打开导出文件夹", exact: true }),
   ).not.toBeVisible();
+  // Master-only is now the default; explicitly request this test's HDR viewing copy.
+  await page.getByLabel("视频输出", { exact: true }).selectOption("pq");
   await page.getByRole("button", { name: "导出动画", exact: true }).click();
   const results = page.getByRole("region", {
     name: "动画渲染成果",
@@ -292,6 +296,9 @@ test("Three.js preview, revision conflict, keyboard and narrow accessibility", a
     })
     .toBeLessThan(2);
   mkdirSync("../reports", { recursive: true });
+  // Multi-file controls can leave the preview offscreen after saving. Chromium
+  // suspends iframe animation callbacks there, so expose it before awaiting paint.
+  await page.locator("iframe[title='动画画面']").scrollIntoViewIfNeeded();
   // DOM resize precedes the GPU compositor. Wait for two frame paints before
   // recording pixels, especially after the candidate iframe changes stacking.
   await page
@@ -317,8 +324,10 @@ test("Three.js preview, revision conflict, keyboard and narrow accessibility", a
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
   ).toBe(true);
-  await page.getByLabel("帧率", { exact: true }).selectOption("24/1");
-  await expect(page.getByLabel("帧率", { exact: true })).toHaveValue("24/1");
+  await page.getByLabel("常用帧率", { exact: true }).selectOption("24/1");
+  await expect(page.getByLabel("常用帧率", { exact: true })).toHaveValue(
+    "24/1",
+  );
   await expect(page.locator(".motion-preview-status")).toHaveText(
     "当前草稿 · 网页 sRGB 预览",
   );
@@ -488,7 +497,7 @@ test("HDR delivery choices preserve the sRGB preview and export half-float maste
     results.getByRole("link", { name: "下载视频 MP4", exact: true }),
   ).not.toBeVisible();
   await expect(
-    results.getByRole("img", { name: "导出母版的 sRGB 预览" }),
+    results.getByRole("img", { name: "导出画面的 sRGB 预览" }),
   ).toBeVisible();
   const href = await results
     .getByRole("link", { name: "下载验证报告", exact: true })
@@ -701,8 +710,10 @@ for (const template of ["title", "sdr-three"]) {
     });
     expect(updated.scene.engine).toBe("remotion-sdr-v1");
     expect(updated.scene.code).toBe(saved.scene.code);
-    await video.selectOption("rec709");
-    await expect(video).toHaveValue("rec709");
+    // Pure Gamma 2.4 has no exact native transfer tag; keep this visible but disabled.
+    await expect(video.locator('option[value="rec709"]')).toBeDisabled();
+    await video.selectOption("srgb");
+    await expect(video).toHaveValue("srgb");
     await page.getByRole("button", { name: "导出动画", exact: true }).click();
     const results = page.getByRole("region", {
       name: "动画渲染成果",
@@ -719,7 +730,7 @@ for (const template of ["title", "sdr-three"]) {
       .getAttribute("href");
     const report = await (await page.request.get(url!)).json();
     expect(report.verification.scene_linear_master).toBe(false);
-    expect(report.probe.streams[0].color_transfer).toBe("bt709");
+    expect(report.probe.streams[0].color_transfer).toBe("iec61966-2-1");
     // A source-family switch refreshes output constraints, not just its labels.
     await showExamples(page);
     await page
@@ -728,7 +739,7 @@ for (const template of ["title", "sdr-three"]) {
     await expect(
       page.getByLabel("EXR 母版精度", { exact: true }),
     ).toBeVisible();
-    await expect(video).toHaveValue("pq");
+    await expect(video).toHaveValue("none");
     await page
       .getByLabel("已保存的动画", { exact: true })
       .selectOption(saved.record.id);
@@ -783,3 +794,227 @@ for (const engine of ["remotion-sdr-v1", "three-float-v1"]) {
     );
   });
 }
+
+// The actual UI, GPU export and immutable job report must agree on review and precision.
+test("master workflow accessibility, custom specs, direct destination and separate review evidence", async ({
+  page,
+}, testInfo) => {
+  const { call, saved } = await setup(page);
+  await expect(page.getByLabel("视频输出", { exact: true })).toHaveValue(
+    "none",
+  );
+  await expect(page.getByLabel("正式导出采样", { exact: true })).toHaveValue(
+    "2",
+  );
+  await page.getByLabel("宽度", { exact: true }).fill("7680");
+  await page.getByLabel("高度", { exact: true }).fill("4320");
+  await page
+    .getByLabel("自定义帧率（分子/分母）", { exact: true })
+    .fill("480/1");
+  await expect(
+    page.getByRole("button", { name: "保存动画", exact: true }),
+  ).toBeEnabled();
+  // Exercise an actual small high-fps video; the 8K source validation does not allocate an 8K master.
+  await page.getByLabel("宽度", { exact: true }).fill("32");
+  await page.getByLabel("高度", { exact: true }).fill("32");
+  await page.getByLabel("总帧数", { exact: true }).fill("2");
+  await page.getByRole("button", { name: "保存动画", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "保存动画", exact: true }),
+  ).toBeDisabled();
+  await page.getByRole("button", { name: "记录源码审核", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "记录源码颜色契约审核" });
+  await dialog.getByRole("button", { name: "保存审核记录" }).click();
+  await expect(dialog.getByRole("alert")).toBeVisible();
+  expect(
+    (await new AxeBuilder({ page }).include("dialog[open]").analyze())
+      .violations,
+  ).toEqual([]);
+  await dialog.screenshot({ path: testInfo.outputPath("review-dialog.png") });
+  await dialog.getByLabel("审核人", { exact: true }).fill("浏览器验收");
+  await dialog
+    .getByLabel("审核依据", { exact: true })
+    .fill("模板输出线性 Rec.709；未烘焙显示变换；已核对 Alpha 关联。");
+  await dialog.getByRole("button", { name: "保存审核记录" }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByText(/源码颜色契约已审核 · 浏览器验收/)).toBeVisible();
+  const destination = mkdtempSync(join(tmpdir(), "chromascript-master-ui-"));
+  await page.getByLabel("导出位置", { exact: true }).fill(destination);
+  await page.getByLabel("视频输出", { exact: true }).selectOption("srgb");
+  await page.getByRole("button", { name: "导出动画", exact: true }).click();
+  const results = page.getByRole("region", {
+    name: "动画渲染成果",
+    exact: true,
+  });
+  await expect(results.getByText(/浮点链路已验证/)).toBeVisible({
+    timeout: 30000,
+  });
+  await expect(results).toContainText("源码颜色契约已审核");
+  await expect(results).toContainText("视频色彩标签已验证");
+  await expect(
+    results.getByRole("button", { name: "打开导出文件夹" }),
+  ).toBeVisible();
+  const reply = await call<MotionReply>("get_motion_scene", {
+    scene_id: saved.record.id,
+  });
+  const firstJob = await page
+    .getByLabel("动画渲染任务", { exact: true })
+    .inputValue();
+  // A fresh review changes report provenance without changing source/output.
+  // The next render must receive a fresh key rather than clash with the old job.
+  await call("record_motion_color_review", {
+    scene_id: reply.record.id,
+    expected_revision_id: reply.revision_id,
+    reviewer: "补充审核",
+    notes: "再次核对本修订的线性光量与透明度。",
+  });
+  await expect(page.getByText(/源码颜色契约已审核 · 补充审核/)).toBeVisible();
+  await page.getByRole("button", { name: "导出动画", exact: true }).click();
+  await expect(
+    page.getByLabel("动画渲染任务", { exact: true }),
+  ).not.toHaveValue(firstJob);
+  await expect(results.getByText(/浮点链路已验证/)).toBeVisible({
+    timeout: 30000,
+  });
+  await call("update_motion_scene", {
+    scene_id: saved.record.id,
+    expected_revision_id: reply.revision_id,
+    spec: {
+      ...reply.scene,
+      code: reply.scene.code + "\n// edited after review",
+    },
+  });
+  await expect(
+    page.getByText(/源码颜色契约未审核。审核是对当前修订/),
+  ).toBeVisible();
+  // The frozen job remains reviewed even when the editable source changes.
+  await expect(results).toContainText("源码颜色契约已审核");
+  await expect(page.locator(".motion-preview-status")).toHaveText(
+    "当前草稿 · 网页 sRGB 预览",
+    { timeout: 20000 },
+  );
+  await page.screenshot({
+    path: testInfo.outputPath("master-desktop.png"),
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await page.getByLabel("正式导出采样", { exact: true }).focus();
+  await page.keyboard.press("Space");
+  await page.keyboard.press("Escape");
+  await expect(page.getByLabel("正式导出采样", { exact: true })).toBeFocused();
+  await page.screenshot({
+    path: testInfo.outputPath("master-mobile.png"),
+    fullPage: true,
+  });
+});
+
+test("animation submission retries uncertain outcomes and renews keys after audio changes", async ({ page }) => {
+  const { call, project } = await setup(page, "title");
+  const keys: string[] = [];
+  const jobs: string[] = [];
+  await page.route("**/api/operations/submit_motion_render", async (route) => {
+    keys.push(route.request().postDataJSON().idempotency_key);
+    const response = await route.fetch();
+    expect(response.ok(), await response.text()).toBe(true);
+    jobs.push((await response.json()).job.id);
+    // The server accepted the first request, but its acknowledgement was lost.
+    if (keys.length === 1) await route.abort("failed");
+    else await route.fulfill({ response });
+  });
+  const submit = page.getByRole("button", { name: "导出动画", exact: true });
+  await submit.click();
+  await expect(page.getByText("请核对导出目录和上方错误后重试。")).toBeVisible();
+  await submit.click();
+  await expect(page.getByText("任务已提交，可继续编辑；渲染使用已保存版本。")).toBeVisible();
+  expect(keys[1]).toBe(keys[0]);
+  expect(jobs[1]).toBe(jobs[0]);
+
+  const { asset } = await call<{ asset: { id: string } }>("create_audio", {
+    project_id: project.id, name: "新音轨",
+    spec: { duration_seconds: 0.2, events: [{ waveform: "sine", duration_seconds: 0.2 }] },
+  });
+  await call("set_project_audio", {
+    project_id: project.id, expected_revision_id: "0",
+    timeline: { clips: [{ asset_id: asset.id }] },
+  });
+  // A subsequent explicit export freezes current project audio with a new request identity.
+  await submit.click();
+  await expect.poll(() => jobs.length).toBe(3);
+  expect(keys[2]).not.toBe(keys[1]);
+  expect(jobs[2]).not.toBe(jobs[1]);
+});
+
+test("chapter files share preview, save, validation and deletion recovery", async ({ page }) => {
+  const { call, saved } = await setup(page, "title");
+  await page.getByRole("button", { name: "添加分章文件", exact: true }).click();
+  await page.getByLabel("分章文件路径", { exact: true }).fill("../bad.tsx");
+  await page.getByRole("button", { name: "添加文件", exact: true }).click();
+  await expect(page.getByLabel("分章文件路径", { exact: true })).toHaveAttribute("aria-invalid", "true");
+  await page.getByLabel("分章文件路径", { exact: true }).fill("chapters/intro.tsx");
+  await page.getByRole("button", { name: "添加文件", exact: true }).click();
+  await expect(page.getByLabel("源码文件", { exact: true })).toHaveValue("chapters/intro.tsx");
+  // Different filenames cannot disguise a case-insensitive directory collision.
+  await page.getByRole("button", { name: "添加分章文件", exact: true }).click();
+  await page.getByLabel("分章文件路径", { exact: true }).fill("Chapters/outro.tsx");
+  await page.getByRole("button", { name: "添加文件", exact: true }).click();
+  await expect(page.getByLabel("分章文件路径", { exact: true })).toHaveAttribute("aria-invalid", "true");
+  await expect(page.getByText(/分章目录大小写不一致/)).toBeVisible();
+  await page.getByRole("button", { name: "取消", exact: true }).click();
+  const chapter = 'import {AbsoluteFill} from "remotion"; export default function Chapter(){return <AbsoluteFill>第一章</AbsoluteFill>;}';
+  await editCode(page, chapter);
+  await page.getByLabel("源码文件", { exact: true }).selectOption("");
+  await editCode(page, 'export {default} from "./chapters/intro";');
+  await expect(page.frameLocator("iframe[title='动画画面']").getByText("第一章")).toBeVisible({ timeout: 20000 });
+  await page.getByRole("button", { name: "保存动画", exact: true }).click();
+  await expect(page.getByRole("button", { name: "保存动画", exact: true })).toBeDisabled();
+  const persisted = await call<MotionReply>("get_motion_scene", { scene_id: saved.record.id });
+  expect(persisted.scene.files?.["chapters/intro.tsx"]).toBe(chapter);
+  await page.getByLabel("源码文件", { exact: true }).selectOption("chapters/intro.tsx");
+  await editCode(page, chapter.replace("第一章", "分章草稿"));
+  await page.getByRole("button", { name: "工作区", exact: true }).click();
+  await page.getByRole("button", { name: "动画代码", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "动画 TypeScript 代码", exact: true })).toContainText("分章草稿");
+  await expect(page.frameLocator("iframe[title='动画画面']").getByText("分章草稿")).toBeVisible({ timeout: 20000 });
+  await expect(page.getByRole("button", { name: "复制全部源码", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "删除分章文件", exact: true }).click();
+  await page.getByRole("button", { name: "保留文件", exact: true }).click();
+  await expect(page.getByLabel("源码文件", { exact: true })).toHaveValue("chapters/intro.tsx");
+  await page.getByRole("button", { name: "删除分章文件", exact: true }).click();
+  await page.getByRole("button", { name: "删除文件", exact: true }).click();
+  await expect(page.getByText(/找不到分章文件/)).toBeVisible({ timeout: 20000 });
+  await expect(page.frameLocator("iframe[title='动画画面']").getByText("分章草稿")).toBeVisible();
+  // A broken draft never deletes the saved chapter or replaces the last good picture.
+  expect((await call<MotionReply>("get_motion_scene", { scene_id: saved.record.id })).scene.files?.["chapters/intro.tsx"]).toBe(chapter);
+});
+
+test("chapter-only external saves synchronize clean drafts and preserve local conflicts", async ({ page }) => {
+  const { call, saved } = await setup(page, "title");
+  const chapter = 'import {AbsoluteFill} from "remotion"; export default function Chapter(){return <AbsoluteFill>外部章节</AbsoluteFill>;}';
+  const external = await call<MotionReply>("update_motion_scene", {
+    scene_id: saved.record.id, expected_revision_id: saved.revision_id,
+    spec: {...saved.scene, code: 'export {default} from "./chapter";', files: {"chapter.tsx": chapter}},
+  });
+  await expect(page.getByLabel("源码文件", { exact: true }).locator("option[value='chapter.tsx']")).toHaveCount(1, { timeout: 15000 });
+  await page.getByLabel("源码文件", { exact: true }).selectOption("chapter.tsx");
+  await editCode(page, chapter.replace("外部章节", "本地章节"));
+  await call<MotionReply>("update_motion_scene", {
+    scene_id: saved.record.id, expected_revision_id: external.revision_id,
+    spec: {...external.scene, files: {"chapter.tsx": chapter.replace("外部章节", "较新章节")}},
+  });
+  await expect(page.getByRole("button", { name: "载入最新版本", exact: true })).toBeVisible({ timeout: 15000 });
+  await expect(page.getByRole("textbox", { name: "动画 TypeScript 代码", exact: true })).toContainText("本地章节");
+  await page.getByRole("button", { name: "载入最新版本", exact: true }).click();
+  await page.getByRole("button", { name: "丢弃修改并继续", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "动画 TypeScript 代码", exact: true })).toContainText("较新章节");
+  await expect(page.frameLocator("iframe[title='动画画面']").getByText("较新章节")).toBeVisible({ timeout: 20000 });
+  await page.screenshot({path: "../reports/motion-chapters-desktop.png", fullPage: true});
+  await page.setViewportSize({width: 390, height: 844});
+  await expect(page.getByLabel("源码文件", {exact: true})).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({path: "../reports/motion-chapters-mobile.png", fullPage: true});
+});

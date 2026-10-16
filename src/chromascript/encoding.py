@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import struct
 import subprocess
+import tempfile
+from fractions import Fraction
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterable, Iterator
@@ -13,7 +16,7 @@ from typing import Any, BinaryIO, Callable, Iterable, Iterator
 import numpy as np
 from numpy.typing import NDArray
 
-from .color import output_metadata, tags
+from .color import output_metadata, tags, video_tag_issue
 from .errors import ChromaError
 from .models import OUTPUT_ENCODINGS, DeliveryPreset, RenderSettings
 
@@ -120,6 +123,10 @@ def quicktime_color_metadata(path: Path) -> list[dict[str, Any]]:
 
 
 def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path) -> list[str]:
+    # Comments/sidecars cannot replace native gamut and transfer tags. This gate
+    # also covers legacy preset calls that bypass the configured-delivery UI.
+    if issue := video_tag_issue(preset.color.output, preset.container):
+        raise ChromaError("video_color_tags", issue)
     executable = shutil.which("ffmpeg")
     if not executable:
         raise ChromaError("ffmpeg_unavailable", "Install FFmpeg and add it to PATH")
@@ -204,7 +211,11 @@ def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path)
     if preset.container in {"mov", "mp4"}:
         # QuickTime forbids relying on gama alongside colr: compliant readers
         # ignore gama in that combination. Never emit it as a gamma certificate.
-        args += ["-movflags", "+faststart+write_colr", "-timecode", settings.timecode]
+        args += ["-movflags", "+faststart+write_colr"]
+        # QuickTime tmcd stores nominal fps in one byte. Keep arbitrary source
+        # rates exact instead of letting an optional timecode track break muxing.
+        if 1 <= settings.fps.value and math.ceil(settings.fps.value) <= 255:
+            args += ["-timecode", settings.timecode]
     if preset.container == "mxf":
         args += ["-timecode", settings.timecode, "-f", "mxf"]
     declaration = _encoding_declaration(preset)
@@ -220,11 +231,22 @@ def encode(
     path: Path,
     frames: Iterable[NDArray[np.float32]],
     progress: Callable[[int], None],
+    audio_path: Path | None = None,
 ) -> dict[str, Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(path.stem + ".partial" + path.suffix)
     log_path = path.with_suffix(path.suffix + ".ffmpeg.log")
     args = command(preset, settings, partial)
+    if audio_path is not None:
+        # Audio is a separate PCM input; video/color filters never see its samples.
+        # Match the pre-rendered exact-length WAV, without -shortest dropping video frames.
+        index = args.index("-an")
+        codec = "aac" if preset.container == "mp4" else "pcm_s24le"
+        args[index:index + 1] = ["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0",
+                                "-c:a", codec, "-ar", "48000", "-ac", "2"]
+        if codec == "aac":
+            args[index:index] = ["-thread_queue_size", "512"]
+        # Match audio properties against the actual muxed stream after encoding.
     count = 0
     with log_path.open("wb") as log:
         process = subprocess.Popen(
@@ -283,7 +305,54 @@ def encode(
                     return_code=process.returncode,
                 ) from exc
             raise
-    return probe(path)
+    info = probe(path)
+    if audio_path is not None:
+        audio = next((s for s in info["streams"] if s["codec_type"] == "audio"), None)
+        duration = float(audio.get("duration", info["format"].get("duration", 0))) if audio else 0
+        # AAC may include two packets of padding. PCM MOV/MKV must decode to
+        # exactly the frozen sample count; a low video fps never relaxes that check.
+        expected_samples = round(Fraction(settings.frames * settings.fps.denominator,
+                                          settings.fps.numerator) * 48000)
+        padding = (2048 if codec == "aac" else
+                   math.ceil(48000 / settings.fps.value) if preset.container == "mxf" else 0)
+        tolerance = max(padding / 48000, 0.001)  # Container time fields may use milliseconds.
+        if (audio is None or audio.get("codec_name") != codec
+                or int(audio.get("sample_rate", 0)) != 48000 or audio.get("channels") != 2
+                or abs(duration - settings.duration) > tolerance):
+            raise ChromaError("audio_verification", "Muxed audio properties failed verification", stream=audio)
+        decoded = decode_audio_evidence(path)
+        if abs(decoded["decoded_samples"] - expected_samples) > padding:
+            raise ChromaError("audio_verification", "Decoded audio duration failed verification", evidence=decoded)
+        info["audio_verification"] = {"passed": True, "stream": audio, **decoded,
+                                      "expected_samples": expected_samples,
+                                      "padding_tolerance_samples": padding,
+                                      "expected_duration_seconds": settings.duration,
+                                      "duration_tolerance_seconds": tolerance}
+    return info
+
+
+def decode_audio_evidence(path: Path) -> dict[str, Any]:
+    """Decode the actual muxed audio with bounded memory, not just container labels."""
+    count, peak = 0, 0
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(["ffmpeg", "-v", "error", "-nostdin", "-err_detect", "explode",
+            "-i", str(path), "-map", "0:a:0", "-c:a", "pcm_s32le", "-f", "s32le", "pipe:1"],
+            stdout=subprocess.PIPE, stderr=errors)
+        try:
+            assert process.stdout is not None
+            with process.stdout:
+                while data := process.stdout.read(65536):
+                    count += len(data)
+                    peak = max(peak, int(np.max(np.abs(np.frombuffer(data, dtype="<i4").astype(np.int64)))))
+            result = process.wait()
+            if result or count == 0 or count % 8:
+                errors.seek(0)
+                raise ChromaError("audio_verification", "Audio stream did not fully decode", diagnostic=errors.read(2000).decode(errors="replace"))
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+    return {"decoded_samples": count // 8, "decoded_peak": peak / 2**31}
 
 
 def probe(path: Path, count_frames: bool = True) -> dict[str, Any]:
@@ -311,6 +380,8 @@ def check_probe(
     if not video:
         raise ChromaError("delivery_verification", "Output has no video stream")
     issues = []
+    if issue := video_tag_issue(preset.color.output, preset.container):
+        issues.append(issue)
     expected_codec = {"libx264": "h264", "libx265": "hevc", "prores_ks": "prores"}.get(
         preset.codec, preset.codec
     )
@@ -319,7 +390,10 @@ def check_probe(
     # QuickTime/MP4 timecode may live on a separate tmcd stream, MXF on the container.
     timecodes = [stream.get("tags", {}).get("timecode") for stream in info["streams"]]
     timecodes.append(info.get("format", {}).get("tags", {}).get("timecode"))
-    if preset.container in {"mov", "mp4", "mxf"} and settings.timecode not in timecodes:
+    embedded_timecode = preset.container == "mxf" or (
+        preset.container in {"mov", "mp4"} and 1 <= settings.fps.value and math.ceil(settings.fps.value) <= 255
+    )
+    if embedded_timecode and settings.timecode not in timecodes:
         issues.append("timecode mismatch")
     if (video["width"], video["height"]) != (settings.width, settings.height):
         issues.append("dimension mismatch")
@@ -462,9 +536,11 @@ def check_probe(
         "decoded_storage_precision": f"{actual_depth}-bit",
         "range_signaling": "codec convention" if implicit_range else "explicit",
         "effective_range": expected_range,
+        "timecode_signaling": "embedded" if embedded_timecode else "sidecar only",
         "container": preset.container,
         "color_encoding": output_metadata(preset.color.output),
         "container_color": info.get("container_color"),
+        "native_color_tags_verified": not issues,
         "color_signaling": "native ACEScct declaration; AP1/transfer flags unspecified, manual interpretation required"
         if preset.color.output == "ACEScct"
         else "colr/codec tags and native declaration; manual gamma interpretation required"

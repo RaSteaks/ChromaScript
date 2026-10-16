@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "engine": "three-float-v1",
+  "name": "双章节联合渲染 · 浮点",
+  "code": "import * as THREE from \"three\";\nimport {chapterColor} from \"./chapters\";\nexport default function createScene({frames}) {\n  const scene = new THREE.Scene();\n  const camera = new THREE.OrthographicCamera(-1,1,1,-1,0,2);\n  camera.position.z = 1;\n  const material = new THREE.ShaderMaterial({\n    uniforms: {color: {value: new THREE.Color()}},\n    vertexShader: \"void main(){gl_Position=vec4(position,1.0);}\",\n    fragmentShader: \"uniform vec3 color; void main(){gl_FragColor=vec4(color,1.0);}\",\n    toneMapped: false,\n  });\n  scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2),material));\n  // Every update assigns absolute state, so chapter boundaries support seeking/retry.\n  return {scene,camera,update({frame}) {material.uniforms.color.value.setRGB(...chapterColor(frame, frames));}};\n}",
+  "files": {
+    "chapters/index.ts": "export {chapterColor} from \"./intro\";",
+    "chapters/intro.ts": "import {red, green} from \"../shared/colors.js\";\nexport function chapterColor(frame: number, frames: number) {return frame < Math.floor(frames / 2) ? red : green;}",
+    "shared/colors.js": "export const red = [4,0,0]; export const green = [0,4,0];"
+  },
+  "width": 1280,
+  "height": 720,
+  "frames": 150,
+  "fps": {
+    "schema_version": 1,
+    "numerator": 30000,
+    "denominator": 1001
+  }
+}

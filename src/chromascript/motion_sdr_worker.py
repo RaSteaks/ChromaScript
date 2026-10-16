@@ -14,21 +14,23 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from .audio import mix_audio
 from .color import transform
 from .encoding import check_probe, encode
 from .errors import ChromaError
-from .exports import bundle_name, publish_bundle
+from .exports import DESTINATION_LAYOUT, RenderBundle, bundle_name, motion_bundle, publish_bundle
 from .images import file_hash, resize_srgb, write_image
 from .models import Artifact
 from .motion import FRONTEND, MotionOutput, MotionSpec, browser_executable, motion_identity
 from .motion import SDR_RUNTIME as RUNTIME
+from .motion_sources import source_hash, write_sources
 from .presets import builtins
 from .store import Store, canonical, now
 
 
-def browser_pixels(path: Path, spec: MotionSpec) -> np.ndarray:
+def browser_pixels(path: Path, spec: MotionSpec, render_scale: int = 1) -> np.ndarray:
     with Image.open(path) as image:
-        if image.size != (spec.width, spec.height):
+        if image.size != (spec.width * render_scale, spec.height * render_scale):
             raise ChromaError("motion_frame", "浏览器帧的实际尺寸与动画规格不一致。")
         pixels = np.asarray(image.convert("RGBA"), dtype=np.float32) / 255.0
     # H.264 has no alpha. Composite the display-referred source on black in
@@ -36,6 +38,11 @@ def browser_pixels(path: Path, spec: MotionSpec) -> np.ndarray:
     rgb = pixels[..., :3]
     linear = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
     linear *= pixels[..., 3:4]
+    if render_scale > 1:
+        # Integrate in display-linear light, after alpha association. Supersampling
+        # improves edges but does not turn the 8-bit screenshot source into HDR.
+        linear = linear.reshape(spec.height, render_scale, spec.width, render_scale, 3).mean(axis=(1, 3))
+        pixels = np.ones((spec.height, spec.width, 4), dtype=np.float32)
     pixels[..., :3] = np.where(
         linear <= 0.0031308, linear * 12.92, 1.055 * linear ** (1 / 2.4) - 0.055
     )
@@ -50,9 +57,12 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
     start = time.monotonic()
     artifacts = list(job["artifacts"])
     directory = store.file(f"jobs/{job_id}/output")
-    directory.mkdir(parents=True, exist_ok=True)
+    direct = snapshot.get("storage_layout") == DESTINATION_LAYOUT
+    bundle: RenderBundle | None = None
 
     def progress(stage: str, amount: float, completed: int | None = None) -> None:
+        if bundle is not None:
+            bundle.check_volume()
         def update(current: dict[str, Any]) -> dict[str, Any]:
             if current["status"] == "cancelled":
                 raise ChromaError("cancelled", "动画渲染已取消。")
@@ -71,7 +81,7 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
 
     def artifact(path: Path, kind: str, mime: str, metadata: dict[str, Any] | None = None) -> None:
         # Store resolves symlinked macOS temporary/workspace roots once.
-        relative = str(path.relative_to(store.root))
+        relative = str(path.relative_to(directory if direct else store.root))
         aid = hashlib.sha256((job_id + relative).encode()).hexdigest()[:32]
         value = Artifact(
             id=aid,
@@ -80,6 +90,7 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
             name=path.name,
             kind=kind,
             relative_path=relative,
+            storage="delivery" if direct else "workspace",
             mime_type=mime,
             size_bytes=path.stat().st_size,
             created_at=now(),
@@ -89,6 +100,20 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
         if aid not in artifacts:
             artifacts.append(aid)
         store.update("job", job_id, lambda current: {**current, "artifacts": artifacts})
+
+    def finish() -> None:
+        store.update("job", job_id, lambda current: {
+            **current,
+            "status": "completed" if current["status"] != "cancelled" else "cancelled",
+            "stage": "completed" if current["status"] != "cancelled" else "cancelled",
+            "progress": 1, "export_completed": current["status"] != "cancelled",
+            "elapsed_seconds": time.monotonic() - start, "updated_at": now(),
+        })
+        if bundle is not None:
+            try:
+                bundle.discard_transport()
+            except (OSError, ChromaError) as exc:
+                print(f"Retained disposable render state: {exc}", flush=True)
 
     try:
         if hashlib.sha256(canonical(snapshot).encode()).hexdigest() != job["snapshot_hash"]:
@@ -101,16 +126,31 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
         if str(destination) != job.get("export_path"):
             raise ChromaError("snapshot_corrupt", "动画导出位置与冻结快照不一致。")
         settings = spec.settings()
-        source = directory / "Animation.tsx"
-        source.write_text(spec.code, encoding="utf-8")
+        output = MotionOutput.model_validate(snapshot["output"])
+        if direct:
+            bundle = motion_bundle(job, snapshot)
+            directory, published = bundle.prepare()
+            if published:
+                progress("exporting", 0.98, spec.frames)
+                finish()
+                return
+        else:
+            directory.mkdir(parents=True, exist_ok=True)
+        # Freeze every chapter alongside the entry so exported sources remain reproducible.
+        sources = write_sources(directory, spec.engine, spec.code, spec.files)
         description = directory / "animation.json"
         description.write_text(json.dumps(spec.model_dump(), ensure_ascii=False, indent=2))
+        audio_path = directory / "audio.wav"
+        audio_info = mix_audio(store, snapshot.get("audio"), settings, audio_path)
+        if audio_info is not None:
+            artifact(audio_path, "audio", "audio/wav", audio_info)
+
         frozen = directory / "scene-snapshot.json"
         frozen.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2))
-        for path in (source, description, frozen):
-            artifact(path, "source", "text/plain" if path.suffix == ".tsx" else "application/json")
+        for path in (*sources, description, frozen):
+            artifact(path, "source", "application/json" if path.suffix == ".json" else "text/plain")
 
-        work = store.file(f"jobs/{job_id}/motion")
+        work = bundle.work if bundle is not None else store.file(f"jobs/{job_id}/motion")
         frames = work / "frames"
         frames.mkdir(parents=True, exist_ok=True)
         progress("compiling", 0)
@@ -134,6 +174,7 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
                             "directory": str(work),
                             "frames": str(frames),
                             "browser": browser_executable(),
+                            "scale": output.render_scale,
                         }
                     )
                 )
@@ -172,7 +213,7 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
             raise ChromaError("motion_frames", "浏览器输出帧不完整，请重试任务。")
         thumbnail = directory / "thumbnail.png"
         write_image(
-            thumbnail, resize_srgb(browser_pixels(paths[0], spec), 1280), space="sRGB", depth=8
+            thumbnail, resize_srgb(browser_pixels(paths[0], spec, output.render_scale), 1280), space="sRGB", depth=8
         )
         artifact(
             thumbnail,
@@ -181,13 +222,12 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
             {"frame": 0, "color_space": "sRGB", "engine": "remotion", "scene_linear_master": False},
         )
 
-        output = MotionOutput.model_validate(snapshot["output"])
         preset = builtins()["h264-srgb-preview" if output.video == "srgb" else "h264-review"]
 
         # SDR conversion changes display encoding only; never apply an ACES view
         # to a browser screenshot or represent it as a scene-linear HDR master.
         def video_pixels(path: Path) -> np.ndarray:
-            pixels = browser_pixels(path, spec)
+            pixels = browser_pixels(path, spec, output.render_scale)
             return (
                 pixels
                 if output.video == "srgb"
@@ -195,19 +235,24 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
             )
 
         video = directory / "animation.mp4"
+        encoded_video = work / video.name if bundle is not None else video
         progress("encoding", 0.75)
         info = encode(
             preset,
             settings,
-            video,
+            encoded_video,
             (video_pixels(paths[i]) for i in range(spec.frames)),
             lambda count: progress("encoding", 0.75 + 0.2 * count / spec.frames),
+            **({"audio_path": audio_path} if audio_info is not None else {}),
         )
         verification = check_probe(info, preset, settings)
         # Padding an 8-bit screenshot into the encoder's 16-bit input pipe adds
         # no precision. File tags declare sRGB; no ACES transform was performed.
         verification["source_precision"] = "8-bit browser screenshot"
         verification["scene_linear_master"] = False
+        verification["float_pipeline_verified"] = False
+        verification["source_color_contract"] = {"status": "not_applicable"}
+        verification["sampling"] = {"render_scale": output.render_scale, "spatial_samples": output.render_scale**2, "temporal_samples": 1}
         verification["color_encoding"] = {
             **verification.get("color_encoding", {}),
             "output_transform": None,
@@ -217,6 +262,8 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
             raise ChromaError(
                 "verification_failed", "实际视频属性未通过验证。", verification=verification
             )
+        if encoded_video != video:
+            encoded_video.replace(video)
         artifact(
             video,
             "video",
@@ -230,13 +277,14 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
                     "engine": "remotion",
                     "verification": verification,
                     "probe": info,
-                    "source_sha256": hashlib.sha256(spec.code.encode()).hexdigest(),
+                    "audio": audio_info,
+                    "source_sha256": source_hash(spec.code, spec.files),
                     "video_sha256": file_hash(video),
                     "fps": spec.fps.model_dump(),
                     "notes": [
                         "Browser sRGB screenshot source; no ACEScg/HDR/float master",
                         "Transparent source is composited on black in linear sRGB",
-                        "Animation time should depend only on frame index; no audio or network assets",
+                        "Animation time should depend only on frame index; no embedded audio or network assets; use project audio tools",
                         "Retry rerenders browser frames from the frozen source",
                     ],
                 },
@@ -244,28 +292,18 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
                 indent=2,
             )
         )
-        artifact(report, "report", "application/json")
+        artifact(report, "report", "application/json", {"verification": verification})
         progress("exporting", 0.98)
-        publish_bundle(
-            {p.name: p for p in (source, description, frozen, thumbnail, video, report)},
-            destination,
-            Path(snapshot["export_root"]),
-            {"job_id": job_id, "snapshot_sha256": job["snapshot_hash"]},
-            lambda: progress("exporting", 0.98),
-        )
-        store.update(
-            "job",
-            job_id,
-            lambda current: {
-                **current,
-                "status": "completed" if current["status"] != "cancelled" else "cancelled",
-                "stage": "completed" if current["status"] != "cancelled" else "cancelled",
-                "progress": 1,
-                "export_completed": current["status"] != "cancelled",
-                "elapsed_seconds": time.monotonic() - start,
-                "updated_at": now(),
-            },
-        )
+        files = {str(p.relative_to(directory)): p for p in (*sources, description, frozen, thumbnail, video, report)}
+        if audio_info is not None:
+            files["audio.wav"] = audio_path
+        if bundle is not None:
+            bundle.publish(files, lambda: progress("exporting", 0.98))
+        else:
+            publish_bundle(files, destination, Path(snapshot["export_root"]),
+                {"job_id": job_id, "snapshot_sha256": job["snapshot_hash"]},
+                lambda: progress("exporting", 0.98))
+        finish()
         print(f"Completed browser animation {job_id}", flush=True)
     except BaseException as exc:
         traceback.print_exc()

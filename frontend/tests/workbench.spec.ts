@@ -271,7 +271,8 @@ test("linked format choices preserve compatible values and repair conflicts", as
   await expect(field("输出色彩空间")).toHaveValue("Rec.2020");
   await field("位深").selectOption("8");
   await expect(field("输出色彩空间")).toHaveValue("Rec.709");
-  await expect(field("传递函数 / Gamma")).toHaveValue("gamma2.4");
+  // SDR fallback must retain an exact native transfer tag instead of a Gamma 2.4 convention.
+  await expect(field("传递函数 / Gamma")).toHaveValue("srgb");
   await field("传递函数 / Gamma").selectOption("srgb");
   await expect(field("输出色彩空间")).toHaveValue("Rec.709");
   await field("封装 / 图像格式").selectOption("exr");

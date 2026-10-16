@@ -10,6 +10,7 @@ type Props = {
   disabled: boolean;
   onChange: (value: string) => void;
   variant?: "scene" | "animation";
+  videoOnly?: boolean;
   onPickingChange?: (picking: boolean) => void;
 };
 
@@ -21,6 +22,7 @@ export function DeliveryDestination({
   disabled,
   onChange,
   variant = "scene",
+  videoOnly = false,
   onPickingChange,
 }: Props) {
   // Both engines share path validation and controls, but their source bundles differ.
@@ -72,8 +74,10 @@ export function DeliveryDestination({
       </Field>
       <p className="panel-description">
         {variant === "animation"
-          ? // The folder contains one EXR sequence; its ZIP is a separate on-demand download.
-            "文件夹包含动画源码、完整规格、sRGB 缩略图和所选视频；浮点场景另含一份 ACEScg EXR 母版，ZIP 可按需下载，附带验证报告。"
+          ? // Describe only the artifacts selected for this delivery.
+            videoOnly
+            ? "成片和临时文件直接写入所选磁盘；仅视频模式不写入 EXR 母版，不缓存整段浮点帧。文件夹包含视频、源码、规格、sRGB 缩略图及验证报告。"
+            : "可选择外部硬盘；动画帧、中间文件和成片直接写入所选磁盘，本机工作区仅保留任务记录与日志。文件夹包含源码、规格、sRGB 缩略图、所选视频及验证报告；选择保留母版时另含 ACEScg EXR 序列，ZIP 可按需下载。"
           : "文件夹包含场景代码（WGSL）、完整场景（JSON）、sRGB 缩略图和所选视频或图像序列，附带验证报告。"}
       </p>
     </section>

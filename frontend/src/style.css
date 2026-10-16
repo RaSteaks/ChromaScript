@@ -2422,3 +2422,20 @@ input[type="search"]::-webkit-search-cancel-button {
   color: var(--color-muted);
   cursor: text;
 }
+
+/* Project audio shares form tokens and the app-owned modal's scroll boundary. */
+.project-audio { padding: var(--space-lg); }
+.project-audio .modal-actions { flex-wrap: wrap; padding-inline: 0; }
+.audio-editor-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.project-audio section { margin-block: var(--space-lg); }
+.audio-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-md); }
+.audio-asset, .audio-clip { padding-block: var(--space-md); border-bottom: 1px solid var(--color-border); }
+.audio-asset audio { display: block; width: 100%; height: 54px; margin-block: var(--space-sm); }
+.audio-asset .section-heading, .audio-clip .section-heading { flex-wrap: wrap; overflow-wrap: anywhere; }
+.project-audio input[type="file"] { max-width: 100%; }
+@media (max-width: 560px) { .audio-fields { grid-template-columns: 1fr; } }
+
+/* Storage estimates reuse specification rows and reserve feedback space while loading. */
+.motion-storage-estimate { border-top: 1px solid var(--color-border); padding-top: var(--space-lg); min-height: 220px; }
+.motion-storage-estimate .section-heading { flex-wrap: wrap; gap: var(--space-sm); }
+.motion-storage-estimate dd { overflow-wrap: anywhere; }

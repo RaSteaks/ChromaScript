@@ -50,8 +50,7 @@ def test_http_shared_contract_and_access(tmp_path: Path):
             headers=headers,
         )
         assert color_options.status_code == 200
-        # Partial requests retain their intent through HTTP revalidation; the
-        # implicit 8-bit default must not turn scene-log grading data into SDR.
+        # Scene-log remains discoverable but cannot be certified as tagged video.
         partial = client.post(
             "/api/operations/get_delivery_options",
             json={
@@ -60,8 +59,10 @@ def test_http_shared_contract_and_access(tmp_path: Path):
             headers=headers,
         )
         assert partial.status_code == 200
-        assert partial.json()["configuration"]["color_output"] == "ACEScct"
-        assert partial.json()["configuration"]["bit_depth"] == 10
+        assert next(v for v in partial.json()["options"]["color_space"] if v["value"] == "ACEScct")["disabled"]
+        blocked = client.post("/api/operations/validate_delivery_configuration", json={"configuration": {
+            "codec": "hevc", "color_space": "ACEScct", "gamma": "acescct"}}, headers=headers)
+        assert blocked.status_code != 200
         assert partial.json()["configuration"]["data_range"] == "limited"
         description = color_options.json()["color_encoding"]
         assert description["transfer_function_label"] == "HLG（ARIB STD-B67）"
@@ -88,7 +89,9 @@ def test_http_shared_contract_and_access(tmp_path: Path):
             },
         )
         assert p3.status_code == 200
-        assert p3.json()["configuration"]["gamma"] == "gamma2.4"
+        # Discovery suggests an exactly tagged alternative; submission never silently remaps it.
+        assert p3.json()["configuration"]["gamma"] == "srgb"
+        assert next(v for v in p3.json()["options"]["gamma"] if v["value"] == "gamma2.4")["disabled"]
         assert p3.json()["configuration"]["data_range"] == "auto"
         assert p3.json()["resolved_data_range"] == "limited"
 

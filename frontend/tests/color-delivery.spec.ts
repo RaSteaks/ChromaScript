@@ -149,8 +149,10 @@ test("output color space and gamma stay linked through HDR, narrow layout and re
   const space = target.getByLabel("输出色彩空间", { exact: true });
   const gamma = target.getByLabel("传递函数 / Gamma", { exact: true });
   await expect(space).toHaveValue("Rec.709");
-  await expect(gamma).toHaveValue("gamma2.4");
-  await expect(gamma.locator("option:checked")).toHaveText("Gamma 2.4");
+  await expect(gamma).toHaveValue("srgb");
+  await expect(gamma.locator("option:checked")).toHaveText(
+    "sRGB（IEC 61966-2-1）",
+  );
   await expect(
     target.getByLabel("目标显示峰值亮度", { exact: true }),
   ).toHaveValue("100 cd/m²（nit）");
@@ -223,7 +225,7 @@ test("output color space and gamma stay linked through HDR, narrow layout and re
     fullPage: true,
   });
   await space.selectOption("Rec.709");
-  await expect(gamma).toHaveValue("gamma2.4");
+  await expect(gamma).toHaveValue("srgb");
   await gamma.selectOption("srgb");
   await expect(space).toHaveValue("Rec.709");
 
@@ -231,16 +233,16 @@ test("output color space and gamma stay linked through HDR, narrow layout and re
   await page.route("**/api/operations/get_delivery_options", (route) =>
     route.abort("failed"),
   );
-  await gamma.selectOption("gamma2.4");
+  await gamma.selectOption("gamma2.2");
   await expect(target.getByRole("alert")).toBeVisible();
-  await expect(gamma).toHaveValue("gamma2.4");
+  await expect(gamma).toHaveValue("gamma2.2");
   await page.unroute("**/api/operations/get_delivery_options");
   await target
     .getByRole("button", { name: "重试联动选项", exact: true })
     .click();
   await expect(target.getByRole("alert")).not.toBeVisible();
   await expect(gamma).toBeEnabled();
-  await expect(gamma).toHaveValue("gamma2.4");
+  await expect(gamma).toHaveValue("gamma2.2");
 });
 
 test("linear EXR uses no display luminance while image formats retain their encoding", async ({
@@ -360,8 +362,13 @@ test("requested gamuts and Auto Video Full levels are real linked choices", asyn
   });
   await range.selectOption("limited");
   await expect(range).toHaveValue("limited");
+  // AP1/log video lacks native identifiers; the same encoding remains available in EXR.
+  await expect(space.locator('option[value="ACEScct"]')).toBeDisabled();
+  await target
+    .getByLabel("封装 / 图像格式", { exact: true })
+    .selectOption("exr");
   await space.selectOption("ACEScct");
-  await expect(target.getByLabel("位深", { exact: true })).toHaveValue("10");
+  await expect(target.getByLabel("位深", { exact: true })).toHaveValue("16");
   await expect(
     target.getByLabel("传递函数 / Gamma", { exact: true }),
   ).toHaveValue("acescct");
@@ -439,15 +446,13 @@ test("Resolve-style ProRes delivery keeps P3 gamma independent and freezes Auto 
   );
   await field("输出色彩空间").selectOption("P3-D65");
   const gamma = field("传递函数 / Gamma");
-  // Changing primaries must retain a compatible Gamma 2.4 rather than imply Display P3.
-  await expect(gamma).toHaveValue("gamma2.4");
-  for (const value of ["gamma2.2", "gamma2.4", "gamma2.6", "srgb", "st2084"])
+  // Preserve the compatible sRGB transfer and require exact native color tags.
+  await expect(gamma).toHaveValue("srgb");
+  for (const value of ["gamma2.2", "srgb", "st2084"])
     await expect(gamma.locator(`option[value="${value}"]`)).toBeEnabled();
   await expect(field("色彩空间标签")).toHaveValue("P3-D65");
-  // Unspecified TRC requires manual import; gama cannot supplement colr.
-  await expect(field("Gamma 标签")).toHaveValue(
-    "未指定（按 Gamma 2.4 手动解读）",
-  );
+  // Unspecified TRC and comment declarations cannot satisfy native-tag policy.
+  await expect(field("Gamma 标签")).toHaveValue("sRGB");
   await expect(field("Gamma 标签")).toHaveAttribute("readonly", "");
   await expect(field("数据级别")).toHaveValue("auto");
   await expect(target).toContainText(
@@ -457,10 +462,9 @@ test("Resolve-style ProRes delivery keeps P3 gamma independent and freezes Auto 
   await page.keyboard.press("Space");
   await page.keyboard.press("Escape");
   await expect(gamma).toBeFocused();
-  await gamma.selectOption("gamma2.6");
-  await expect(field("Gamma 标签")).toHaveValue(
-    "未指定（按 Gamma 2.6 手动解读）",
-  );
+  await expect(gamma.locator('option[value="gamma2.6"]')).toBeDisabled();
+  await gamma.selectOption("gamma2.2");
+  await expect(field("Gamma 标签")).toHaveValue("Gamma 2.2");
   await expect(field("目标显示峰值亮度")).toHaveValue("100 cd/m²（nit）");
   mkdirSync("../reports", { recursive: true });
   await page.screenshot({
@@ -469,7 +473,7 @@ test("Resolve-style ProRes delivery keeps P3 gamma independent and freezes Auto 
   });
   await gamma.selectOption("srgb");
   await expect(target).toContainText("P3-D65 + sRGB 为 Display P3");
-  await gamma.selectOption("gamma2.4");
+  await expect(gamma.locator('option[value="gamma2.4"]')).toBeDisabled();
   await field("封装 / 图像格式").selectOption("mp4");
   await expect(field("输出色彩空间")).toHaveValue("P3-D65");
   await expect(gamma).toHaveValue("srgb");
@@ -482,6 +486,9 @@ test("Resolve-style ProRes delivery keeps P3 gamma independent and freezes Auto 
     ),
   ).toBe(true);
   await expect(field("色彩空间标签")).toHaveValue("P3-D65");
+  // Wait for the codec resolver: the gamut/transfer no longer change as an incidental signal.
+  await expect(field("视频 / 图像编码")).toHaveValue("h264");
+  await expect(field("编码档位")).toHaveValue("high422");
   // Auto and explicit Video freeze to the same MP4; only Full makes it distinct.
   await page.getByRole("button", { name: "添加交付目标", exact: true }).click();
   const second = page.getByRole("group", { name: "交付目标 2", exact: true });

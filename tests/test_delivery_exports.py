@@ -166,6 +166,7 @@ def test_publication_rechecks_changed_directory(tmp_path):
 @pytest.mark.gpu
 @pytest.mark.integration
 def test_worker_exports_frozen_code_thumbnail_video_and_sequence(tmp_path, monkeypatch):
+    # Use an exactly tagged sRGB video alongside the unbaked EXR master.
     external = tmp_path / "外部交付"
     external.mkdir()
     service = Service(tmp_path / "workspace")
@@ -174,7 +175,7 @@ def test_worker_exports_frozen_code_thumbnail_video_and_sequence(tmp_path, monke
     job = service.submit_delivery(
         scene["record"]["id"],
         RenderSettings(width=32, height=32, frames=2, start_frame=12, samples=1),
-        ["h264-review", "exr-16-zip"],
+        ["h264-srgb-preview", "exr-16-zip"],
         "bundle",
         export_directory=str(external / "子文件夹"),
     )["job"]
@@ -205,7 +206,7 @@ def test_worker_exports_frozen_code_thumbnail_video_and_sequence(tmp_path, monke
     target = Path(job["export_path"])
     assert (target / "shader.wgsl").read_text() == scene["scene"]["code"]
     assert json.loads((target / "scene.json").read_text()) == scene["scene"]
-    assert (target / "h264-review.mp4").stat().st_size > 0
+    assert (target / "h264-srgb-preview.mp4").stat().st_size > 0
     assert (target / "exr-16-zip/00000012.exr").exists()
     assert (target / "exr-16-zip/00000013.exr").exists()
     assert (target / "exr-16-zip/sequence.json").exists()

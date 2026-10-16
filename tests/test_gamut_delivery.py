@@ -31,7 +31,7 @@ def test_all_gamuts_and_ranges_remain_discoverable_with_honest_restrictions():
     spaces = {item["value"]: item for item in result["options"]["color_space"]}
     assert {"P3-D65", "Rec.709", "Rec.2020", "ACEScct", "ACEScg"} <= spaces.keys()
     assert not spaces["P3-D65"]["disabled"]
-    assert not spaces["ACEScct"]["disabled"]  # Selecting it promotes H.264 to 10-bit.
+    assert spaces["ACEScct"]["disabled"]  # No native AP1/ACEScct video identifiers.
     assert spaces["ACEScg"]["disabled"] and "EXR" in spaces["ACEScg"]["reason"]
     ranges = result["options"]["data_range"]
     assert [item["value"] for item in ranges] == ["auto", "full", "limited"]
@@ -60,11 +60,11 @@ def test_input_aliases_have_one_canonical_configuration(alias, canonical):
     assert value.data_range == "limited"
 
 
-def test_log_selection_promotes_precision_and_float_selection_preserves_log():
-    value = DeliveryConfiguration().model_copy(update={"color_space": "ACEScct"})
+def test_log_selection_is_available_for_float_exr_only():
+    value = DeliveryConfiguration(container="exr", color_space="ACEScct")
     result = delivery_options(value, "color_space")
     selected = DeliveryConfiguration.model_validate(result["configuration"])
-    assert (selected.color_output, selected.gamma, selected.bit_depth) == ("ACEScct", "acescct", 10)
+    assert (selected.color_output, selected.gamma, selected.bit_depth) == ("ACEScct", "acescct", 16)
     assert configured_output(selected).color.output == "ACEScct"
     assert result["color_encoding"]["reference"] == "scene"
     assert result["color_encoding"]["dynamic_range"] == "scene-log"
@@ -104,11 +104,9 @@ def test_p3_gamut_switch_retains_gamma_and_auto_freezes_the_codec_range():
     draft = DeliveryConfiguration.model_validate(mov["configuration"])
     result = delivery_options(draft.model_copy(update={"color_space": "P3-D65"}), "color_space")
     selected = DeliveryConfiguration.model_validate(result["configuration"])
-    assert (selected.gamma, selected.color_output) == ("gamma2.4", "P3-Gamma2.4")
+    assert (selected.gamma, selected.color_output) == ("srgb", "Display-P3")
     assert {item["value"] for item in result["options"]["gamma"] if not item["disabled"]} == {
         "gamma2.2",
-        "gamma2.4",
-        "gamma2.6",
         "srgb",
         "st2084",
     }
@@ -120,9 +118,8 @@ def test_p3_gamut_switch_retains_gamma_and_auto_freezes_the_codec_range():
         configured_output(DeliveryConfiguration.model_validate(exr["configuration"])).data_range
         == "full"
     )
-    assert result["file_tags"]["gamma"] == "未指定（按 Gamma 2.4 手动解读）"
-    assert result["color_encoding"]["requires_manual_video_interpretation"]
-    assert "手动" in result["color_note"]
+    assert result["file_tags"]["gamma"] == "sRGB"
+    assert not result["color_encoding"]["requires_manual_video_interpretation"]
     assert result["specification"] == "resolve-21-delivery-v1"
 
 
@@ -163,15 +160,16 @@ def test_power_curves_preserve_the_same_rendered_linear_picture_and_alpha(
     assert output_metadata(output)["target_display_peak_nits"] == 100
 
 
-def test_unrepresentable_gamma_is_disabled_and_rejected_outside_mov():
+@pytest.mark.parametrize("container", ["mp4", "mov"])
+def test_unrepresentable_gamma_is_disabled_and_rejected_for_video(container):
     from pydantic import ValidationError
 
-    result = choices(container="mp4", color_space="P3-D65")
+    result = choices(container=container, color_space="P3-D65")
     options = {item["value"]: item for item in result["options"]["gamma"]}
     for gamma in ["gamma2.4", "gamma2.6"]:
-        assert options[gamma]["disabled"] and "MOV" in options[gamma]["reason"]
+        assert options[gamma]["disabled"] and "标准视频标签" in options[gamma]["reason"]
         with pytest.raises(ChromaError, match="不兼容"):
-            configured_output(DeliveryConfiguration(color_space="P3-D65", gamma=gamma))
+            configured_output(DeliveryConfiguration(container=container, color_space="P3-D65", gamma=gamma))
     # The legacy preset operation must not bypass the shared file-metadata limit.
     with pytest.raises(ValidationError, match="manual interpretation"):
         DeliveryPreset(
@@ -266,6 +264,11 @@ def test_prores_native_gamma_and_decoded_pixels(tmp_path, space, gamma, transfer
     from chromascript.color import render_output
 
     result = choices(container="mov", codec="prores", color_space=space, gamma=gamma)
+    if gamma in {"gamma2.4", "gamma2.6"}:
+        # These former comment-only deliveries now fail before encoding.
+        with pytest.raises(ChromaError, match="不兼容"):
+            configured_output(DeliveryConfiguration(container="mov", codec="prores", color_space=space, gamma=gamma))
+        return
     preset = configured_output(DeliveryConfiguration.model_validate(result["configuration"]))
     settings = RenderSettings(width=320, height=180, frames=1)
     linear = np.full((180, 320, 4), 0.18, np.float32)
@@ -359,6 +362,10 @@ def test_acescct_matches_the_spec_and_float_exr_preserves_unbounded_codes(tmp_pa
     ],
 )
 def test_native_encodings_and_range_levels(tmp_path, space, gamma, codec, container, data_range):
+    if space == "ACEScct":
+        with pytest.raises(ChromaError, match="不兼容"):
+            configured_output(DeliveryConfiguration(container=container, codec=codec, color_space=space, gamma=gamma))
+        return
     result = choices(
         container=container, codec=codec, color_space=space, gamma=gamma, data_range=data_range
     )
@@ -406,12 +413,12 @@ def test_native_encodings_and_range_levels(tmp_path, space, gamma, codec, contai
         assert y[40:140, 200:300].mean() == pytest.approx(white, abs=2)
 
 
-def test_integer_acescct_cannot_silently_clip_code_values(tmp_path):
-    result = choices(codec="hevc", color_space="ACEScct")
-    preset = configured_output(DeliveryConfiguration.model_validate(result["configuration"]))
+def test_integer_acescct_cannot_bypass_native_tag_policy(tmp_path):
+    # A legacy preset must fail even when bypassing the linked option resolver.
+    preset = DeliveryPreset(id="legacy-log", name="legacy", family="test", container="mp4", codec="libx265", pixel_format="yuv420p10le", color={"output": "ACEScct"})
     settings = RenderSettings(width=32, height=32, frames=1)
     frame = np.ones((32, 32, 4), np.float32)
     frame[0, 0, 0] = -0.1
-    with pytest.raises(ChromaError, match="float EXR"):
+    with pytest.raises(ChromaError, match="标准视频标签"):
         encode(preset, settings, tmp_path / "out.mp4", [frame], lambda n: None)
     assert not (tmp_path / "out.partial.mp4").exists()

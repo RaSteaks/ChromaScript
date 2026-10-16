@@ -20,7 +20,8 @@ from pydantic import ValidationError
 
 from .appearance import ColorAppearanceRequest, resolve_color
 from .artifacts import archive_members, artifact_path, stream_zip
-from .color import color_info, transform
+from .audio import AudioOperations, freeze_audio
+from .color import color_info, transform, video_tag_issue
 from .desktop import choose_directory, directory_picker_available, open_directory
 from .encoding import available_encoders, pixel_format_info, probe
 from .environment import runtime_identity
@@ -48,7 +49,7 @@ from .store import Store, canonical, identifier, now
 from .templates import TEMPLATES, blank_scene, template_list
 
 
-class Service(MotionOperations):
+class Service(MotionOperations, AudioOperations):
     def __init__(self, root: Path, export_roots: list[Path] | None = None):
         self.operation_lock = threading.RLock()
         self.store = Store(root)
@@ -109,6 +110,11 @@ class Service(MotionOperations):
                 "directory_picker": directory_picker_available(),
             },
             "gpu": self.renderer.info,
+            "audio": {"sample_rate": 48000, "channels": 2,
+                      "storage": "signed 32-bit PCM WAV", "max_asset_seconds": 600,
+                      "max_input_bytes": 128 * 1024**2,
+                      "waveforms": ["sine", "triangle", "noise"],
+                      "timeline": "project-wide; frozen by each delivery; previews are silent"},
             "encoders": sorted(available_encoders()),
             "resolutions": RESOLUTIONS,
             "frame_rates": FRAME_RATES,
@@ -178,6 +184,9 @@ class Service(MotionOperations):
         p = Project(
             id=identifier(), name=name, description=description, created_at=stamp, updated_at=stamp
         )
+        # Persist the new-project default explicitly; implicit legacy pipelines
+        # and built-in presets retain their original Gamma 2.4 interpretation.
+        self.store.put("pipeline", p.id, ColorPipeline(output="sRGB").model_dump())
         return {"project": self.store.put("project", p.id, p.model_dump())}
 
     @operation("List projects with bounded pagination.")
@@ -200,6 +209,7 @@ class Service(MotionOperations):
             "project": self.project(project_id),
             "scenes": [s for s in self.store.list("scene") if s["project_id"] == project_id],
             "color_pipeline": pipeline,
+            "audio": self.get_project_audio(project_id),
         }
 
     @operation("Update project name and description.")
@@ -227,10 +237,8 @@ class Service(MotionOperations):
         for s in self.store.list("scene"):
             if s["project_id"] == project_id:
                 self.create_scene(clone["id"], spec=self.scene(s["id"])[1])
-        try:
-            self.store.put("pipeline", clone["id"], self.store.get("pipeline", project_id))
-        except ChromaError:
-            pass
+        # Clone the effective legacy default too, rather than adopting the new default.
+        self.store.put("pipeline", clone["id"], self.get_project(project_id)["color_pipeline"])
         return self.get_project(clone["id"])
 
     @operation("Archive or restore a project after active jobs finish or are cancelled.")
@@ -510,6 +518,9 @@ class Service(MotionOperations):
         if p.container not in {"exr", "png", "tiff", "dpx"} and p.codec not in available_encoders():
             raise ChromaError("encoder_unavailable", f"Encoder {p.codec} unavailable")
         if p.container not in {"exr", "png", "tiff", "dpx"}:
+            # Legacy presets must satisfy the same exact native-tag policy as direct outputs.
+            if issue := video_tag_issue(p.color.output, p.container):
+                raise ChromaError("video_color_tags", issue)
             descriptor = pixel_format_info(p.pixel_format)
             component_depths = [c["bit_depth"] for c in descriptor.get("components", [])[:3]]
             if not component_depths or min(component_depths) < p.bit_depth:
@@ -608,6 +619,9 @@ class Service(MotionOperations):
             # as the scene/outputs. Changing a destination requires a new request key.
             destination = self.get_delivery_export_options(export_directory)["directory"]
             snapshot.update(export_directory=destination, export_root=destination)
+            # Freeze audio content and edit revision alongside the visual recipe.
+            if audio := freeze_audio(self.store, record["project_id"], settings):
+                snapshot["audio"] = audio
         digest = hashlib.sha256(canonical(snapshot).encode()).hexdigest()
         stamp = now()
         job = Job(
@@ -1143,12 +1157,23 @@ class Service(MotionOperations):
     def submit_default_delivery(
         self, scene_id: str, settings: RenderSettings, idempotency_key: str
     ) -> dict[str, Any]:
+        from .delivery import delivery_options
+
         record, _, _ = self.scene(scene_id)
         pipeline = self.get_project(record["project_id"])["color_pipeline"]
+        if pipeline["output"] == "sRGB":
+            # New SDR defaults use exactly tagged ProRes without redefining prores-3.
+            configuration = DeliveryConfiguration.model_validate(
+                delivery_options(DeliveryConfiguration(container="mov", codec="prores"))[
+                    "configuration"
+                ]
+            )
+            return self.submit_configured_delivery(
+                scene_id, settings, [configuration], idempotency_key
+            )
         selected = {
             "ACEScg": "exr-16-zip",
             "ACES2065-1": "aces2065-archive",
-            "sRGB": "png-16",
             "Rec.709": "prores-3",
             "PQ": "hdr-pq",
             "HLG": "hdr-hlg",

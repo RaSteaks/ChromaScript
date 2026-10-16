@@ -1,6 +1,6 @@
 // Source is compiled as browser code only. Never import/evaluate it in Node.
 import { build, formatMessages } from "esbuild";
-import ts from "typescript";
+import { sourceModules } from "./source-modules.mjs";
 import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -18,50 +18,7 @@ const allowed = new Set([
 const policy =
   "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; media-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'";
 
-function validateImports(code) {
-  const source = ts.createSourceFile(
-    "Animation.tsx",
-    code,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TSX,
-  );
-  function check(specifier) {
-    if (
-      !specifier ||
-      !ts.isStringLiteral(specifier) ||
-      !allowed.has(specifier.text)
-    ) {
-      throw new Error(
-        `仅允许导入：${[...allowed].join(", ")}。动画在本地离线运行，不支持文件路径或网络模块。`,
-      );
-    }
-  }
-  function visit(node) {
-    if (
-      ts.isImportDeclaration(node) ||
-      (ts.isExportDeclaration(node) && node.moduleSpecifier)
-    )
-      check(node.moduleSpecifier);
-    if (ts.isCallExpression(node)) {
-      if (node.expression.kind === ts.SyntaxKind.ImportKeyword)
-        check(node.arguments[0]);
-      if (
-        ts.isIdentifier(node.expression) &&
-        node.expression.text === "require"
-      )
-        throw new Error("请使用静态 import；动画不允许 require()。");
-    }
-    // TypeScript import-equals can otherwise bypass ordinary ES import validation.
-    if (ts.isImportEqualsDeclaration(node))
-      throw new Error("请使用标准 ES import。");
-    ts.forEachChild(node, visit);
-  }
-  visit(source);
-}
-
 async function compile(spec, mode, channel) {
-  validateImports(spec.code);
   const config = {
     width: spec.width,
     height: spec.height,
@@ -97,18 +54,10 @@ async function compile(spec, mode, channel) {
     define: { "process.env.NODE_ENV": '"production"' },
     logLevel: "silent",
     plugins: [
+      sourceModules(spec, allowed, root, mode !== "preview"),
       {
         name: "local-animation",
         setup(plugin) {
-          plugin.onResolve({ filter: /^chromascript:scene$/ }, () => ({
-            path: "Animation.tsx",
-            namespace: "scene",
-          }));
-          plugin.onLoad({ filter: /.*/, namespace: "scene" }, () => ({
-            contents: spec.code,
-            loader: "tsx",
-            resolveDir: root,
-          }));
           plugin.onResolve({ filter: /^chromascript:config$/ }, () => ({
             path: "config",
             namespace: "config",
@@ -117,15 +66,6 @@ async function compile(spec, mode, channel) {
             contents: JSON.stringify(config),
             loader: "json",
           }));
-          plugin.onResolve({ filter: /.*/, namespace: "scene" }, (args) => {
-            if (!allowed.has(args.path))
-              return { errors: [{ text: `不允许导入 ${args.path}。` }] };
-            if (mode !== "preview") return { path: args.path, external: true };
-            return plugin.resolve(args.path, {
-              resolveDir: root,
-              kind: args.kind,
-            });
-          });
         },
       },
     ],
@@ -202,7 +142,8 @@ async function main() {
     imageSequencePattern: "frame-[frame].png",
     concurrency: 1,
     // Single-frame model previews retain the source duration and frame time.
-    frameRange: request.frame === undefined ? undefined : [request.frame, request.frame],
+    frameRange:
+      request.frame === undefined ? undefined : [request.frame, request.frame],
     scale: request.scale ?? 1,
     muted: true,
     timeoutInMilliseconds: 15000,

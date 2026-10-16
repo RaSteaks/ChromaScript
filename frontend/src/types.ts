@@ -231,6 +231,8 @@ export type Operation = {
 };
 // Three.js source has an explicit float contract; masters share the ACEScg pipeline.
 export type MotionSpec = {
+  // Optional for historical single-file revisions. New saves include every chapter.
+  files?: Record<string, string>;
   engine: "three-float-v1" | "remotion-sdr-v1";
   schema_version?: number;
   name: string;
@@ -244,6 +246,20 @@ export type MotionReply = {
   record: SceneRecord;
   scene: MotionSpec;
   revision_id: string;
+  color_review?: MotionColorReview;
+};
+// A revision-bound reviewer attestation is separate from measured float precision.
+export type MotionColorReview = {
+  status: "reviewed" | "unreviewed" | "not_applicable";
+  source_sha256?: string;
+  reviewer?: string;
+  notes?: string;
+};
+export type MotionVerification = {
+  float_pipeline_verified?: boolean;
+  source_color_contract?: MotionColorReview;
+  native_color_tags_verified?: boolean;
+  video?: { native_color_tags_verified?: boolean };
 };
 export type MotionCapabilities = {
   engines: Record<MotionSpec["engine"], { imports: string[] }>;
@@ -256,14 +272,23 @@ export type MotionCapabilities = {
 };
 
 export type MotionOutput = {
+  // null selects direct encoding without an EXR sequence.
   master_bit_depth: 16 | 32 | null;
   video: "none" | "pq" | "hlg" | "srgb" | "rec709";
+  render_scale?: 1 | 2 | 4;
 };
 export type MotionDeliveryOptions = {
   engine: MotionSpec["engine"];
   default: MotionOutput;
   contract: "motion-dual-v1";
   master_bit_depths: (16 | 32)[];
+  video_only?: boolean;
   master_archive?: "zip-stream" | null;
-  videos: { value: MotionOutput["video"]; label: string; available: boolean }[];
+  render_scales?: (1 | 2 | 4)[];
+  videos: {
+    value: MotionOutput["video"];
+    label: string;
+    available: boolean;
+    reason?: string;
+  }[];
 };

@@ -156,6 +156,34 @@ class RenderSettings(Model):
         return self.frames * self.fps.denominator / self.fps.numerator
 
 
+class MotionRate(Rational):
+    """Custom animation timebase bounded by FFmpeg's signed 32-bit rationals."""
+
+    numerator: int = Field(default=30, ge=1, le=2_147_483_647, strict=True)
+    denominator: int = Field(default=1, ge=1, le=2_147_483_647, strict=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def from_rate(cls, value: Any) -> Any:
+        # Python callers may reuse the narrower WGSL Rational model.
+        return value.model_dump() if isinstance(value, Rational) else value
+
+    @model_validator(mode="after")
+    def canonical(self) -> MotionRate:
+        rate = Fraction(self.numerator, self.denominator)
+        self.numerator, self.denominator = rate.numerator, rate.denominator
+        return self
+
+
+class MotionRenderSettings(RenderSettings):
+    """Animation specifications are custom; actual GPU/codec limits are checked at render."""
+
+    width: int = Field(default=1920, ge=1, le=2_147_483_647, strict=True)
+    height: int = Field(default=1080, ge=1, le=2_147_483_647, strict=True)
+    frames: int = Field(default=150, ge=1, le=2_147_483_647, strict=True)
+    fps: MotionRate = Field(default_factory=MotionRate)
+
+
 # Display encodings and scene-referred ACES encodings remain distinct. ACEScct
 # shares AP1 with ACEScg, but its log curve must never receive a display tone map.
 OutputColorSpace = Literal["P3-D65", "Rec.709", "Rec.2020", "ACEScct", "ACEScg", "ACES2065-1"]
@@ -365,12 +393,12 @@ class DeliveryConfiguration(Model):
         description="Output RGB primaries/gamut; linked with gamma by get_delivery_options.",
     )
     gamma: OutputGamma = Field(
-        default="gamma2.4",
+        default="srgb",
         description="Output transfer encoding; linear, acescct (AP1 log), gamma2.2, gamma2.4, gamma2.6, srgb, st2084 (PQ), or hlg. Gamut and transfer are independent; container support is validated.",
     )
     # Keep the combined output alias for existing scripts and frozen presets.
     color_output: OutputTransform = Field(
-        default="Rec.709",
+        default="sRGB",
         description="Legacy combined alias; new callers select color_space and gamma. The resolved alias must agree with the pair.",
     )
     # Auto remains a draft choice; DeliveryPreset freezes the concrete codec range.
@@ -387,7 +415,8 @@ class DeliveryConfiguration(Model):
         if not isinstance(value, dict):
             return value
         fields = {field: normalize_delivery_field(field, item) for field, item in value.items()}
-        legacy = fields.get("color_output", "Rec.709")
+        # New default video output has exact Rec.709 primaries + sRGB transfer tags.
+        legacy = fields.get("color_output", "sRGB")
         if not isinstance(legacy, str) or legacy not in OUTPUT_ENCODINGS:
             return fields  # Let the strict literal field report an unknown legacy value.
         if "color_space" not in fields and "gamma" not in fields:
@@ -426,7 +455,7 @@ class Job(Model):
     status: Literal["queued", "running", "completed", "failed", "cancelled", "interrupted"]
     stage: str = "queued"
     progress: float = 0
-    settings: RenderSettings
+    settings: RenderSettings | MotionRenderSettings
     outputs: list[DeliveryPreset] = Field(default_factory=list)
     frame_indices: list[int] | None = None
     completed_frames: int = 0

@@ -229,15 +229,12 @@ def _colors(codec: str, depth: int = 32, container: str | None = None) -> list[s
         return ["sRGB"]
     if codec == "dpx":
         return ["Rec.709"]
-    outputs = ["Rec.709", "sRGB", "Display-P3", "Rec.709-Gamma2.2", "P3-Gamma2.2"]
-    if container == "mov":
-        # Keep the implemented MOV-only declaration workflow. These curves still
-        # require manual import: a comment is not an automatic transfer-function tag.
-        outputs += ["P3-Gamma2.4", "P3-Gamma2.6", "Rec.709-Gamma2.6"]
-    # Integer log exports need useful precision and a container with explicit
-    # user metadata. Float EXR remains available for values outside [0, 1].
-    if depth >= 10 and container != "mxf":
-        outputs += ["ACEScct"]
+    # Video deliveries require exact native primaries and transfer identifiers.
+    # Pure gamma 2.4/2.6 and AP1/log declarations remain image-only choices.
+    outputs = ["sRGB", "Display-P3", "Rec.709-Gamma2.2", "P3-Gamma2.2"]
+    if container == "mxf":
+        # Native round-trip tests show this writer drops the sRGB transfer ID.
+        outputs = ["Rec.709-Gamma2.2", "P3-Gamma2.2"]
     if depth >= 10 and codec != "h264":
         outputs += ["PQ", "HLG", "P3-PQ"]
     return outputs
@@ -451,7 +448,7 @@ def delivery_options(
         reason = ""
         if gamma not in available_gammas:
             reason = (
-                "当前仅支持 MOV 声明，需手动解释 Gamma"
+                "缺少精确标准视频标签"
                 if gamma in {"gamma2.4", "gamma2.6"}
                 else "当前格式不可用"
             )

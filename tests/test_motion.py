@@ -25,12 +25,14 @@ from chromascript.worker import run
 @pytest.mark.parametrize(
     "changes",
     [
-        {"width": 15},
-        {"height": 4098},
+        {"width": 0},
+        {"height": 2_147_483_648},
         {"frames": 0},
         {"code": ""},
         {"unexpected": True},
-        {"fps": {"numerator": 241}},
+        {"fps": {"numerator": 0}},
+        {"width": True},
+        {"fps": {"numerator": 24.5}},
     ],
 )
 def test_strict_browser_spec(changes):
@@ -168,7 +170,8 @@ def test_output_contract_rejects_sdr_and_invalid_depth(tmp_path):
     spec = templates()["radiance"].model_copy(update={"width": 31, "height": 17, "frames": 1})
     saved = service.create_motion_scene(project, spec=spec)
     with pytest.raises(ChromaError, match="偶数"):
-        service.submit_motion_render(saved["record"]["id"], saved["revision_id"], "invalid")
+        # The default is master-only; explicitly request a subsampled video.
+        service.submit_motion_render(saved["record"]["id"], saved["revision_id"], "invalid", output=MotionOutput(video="pq"))
     job = service.submit_motion_render(
         saved["record"]["id"], saved["revision_id"], "exr", output=MotionOutput(video="none")
     )["job"]
@@ -393,10 +396,10 @@ def test_legacy_sdr_revisions_open_without_migration_or_source_changes(tmp_path)
 @pytest.mark.integration
 @pytest.mark.parametrize(
     "template,video",
-    [("title", "srgb"), ("sdr-three", "rec709"), ("radiance", "srgb"), ("three", "rec709")],
+    [("title", "srgb"), ("sdr-three", "srgb"), ("radiance", "srgb"), ("three", "srgb")],
 )
 def test_all_source_families_export_actual_sdr_video(tmp_path, template, video):
-    service = Service(tmp_path)
+    service = Service(tmp_path / "workspace")
     project = service.create_project("SDR delivery")["project"]["id"]
     spec = templates()[template].model_copy(update={"width": 64, "height": 36, "frames": 2})
     saved = service.create_motion_scene(project, spec=spec)
@@ -405,12 +408,18 @@ def test_all_source_families_export_actual_sdr_video(tmp_path, template, video):
         saved["record"]["id"],
         saved["revision_id"],
         template,
+        export_directory=str(tmp_path / "chosen-disk"),
         output=MotionOutput(master_bit_depth=32 if floating else None, video=video),
     )["job"]
-    run(tmp_path, job["id"])
+    run(service.store.root, job["id"])
     result = service.get_job(job["id"])
     assert result["job"]["status"] == "completed", result["job"]["error"]
     bundle = Path(result["job"]["export_path"])
+    # Real SDR and float browser exports never stage their media in workspace.
+    assert bundle.parent == tmp_path / "chosen-disk"
+    assert all(a["storage"] == "delivery" for a in result["artifacts"])
+    assert not list(service.store.root.glob("jobs/**/*.png"))
+    assert not list(service.store.root.glob("jobs/**/*.mp4"))
     report = json.loads((bundle / "verification.json").read_text())
     assert report["verification"]["scene_linear_master"] == floating
     assert report["probe"]["streams"][0]["codec_name"] == "h264"

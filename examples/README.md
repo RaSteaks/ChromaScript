@@ -7,3 +7,5 @@
 MCP 创建示例：`chromascript.create_scene({"request": {"project_id": "项目 ID", "spec": <scene.json 内容>}})`。已有场景修改时须带上 `expected_revision_id`，防止覆盖其他客户端修改。
 
 场景接口与创作流程通过 `chromascript://docs/scene` 和 `chromascript://docs/workflow` 读取。色彩参数可以声明为 sRGB，工具先转换到线性 ACEScg；示例中的 RGB 默认已是 ACEScg。
+
+[动画分章示例](motion-chapters/README.md) 提供浮点与 SDR 的多文件联合渲染规格，包含入口、分章与共享模块。
