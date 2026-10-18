@@ -43,7 +43,14 @@ import {
 } from "./ColorField";
 import { LIVE_PLAYBACK_INTERVAL, useLivePreview } from "./livePreview";
 import { useDeliveryTargets } from "./delivery";
-import { Button, Field, Modal, Notice, Textarea } from "./components";
+import {
+  Button,
+  Field,
+  Modal,
+  Notice,
+  PreviewPanel,
+  Textarea,
+} from "./components";
 import type {
   Artifact,
   Capability,
@@ -710,7 +717,12 @@ export default function App() {
         setLivePlaying(false);
         setShowMotion(false);
       }
-      const scale = Math.min(1, 960 / s.width, 720 / s.height);
+      // Keep stored web previews at the same orientation-aware 720p budget as live previews.
+      const scale = Math.min(
+        1,
+        1280 / Math.max(s.width, s.height),
+        720 / Math.min(s.width, s.height),
+      );
       const small = {
         ...s,
         width: Math.max(16, Math.round((s.width * scale) / 2) * 2),
@@ -987,7 +999,11 @@ export default function App() {
               <h1>{draft?.name || "尚未选择场景"}</h1>
             </div>
             <div className="context-actions">
-              <ProjectAudio key={projectId} projectId={projectId} disabled={!!pending} />
+              <ProjectAudio
+                key={projectId}
+                projectId={projectId}
+                disabled={!!pending}
+              />
               <span className={"save-state " + (dirty ? "unsaved" : "")}>
                 {dirty
                   ? "未保存"
@@ -1180,358 +1196,369 @@ export default function App() {
               <>
                 <div className="editor-layout">
                   <div className="canvas-column">
-                    <div className="preview-commandbar">
-                      <div
-                        className="segmented"
-                        role="group"
-                        aria-label="预览方式"
-                      >
-                        <Button
-                          className={liveEnabled ? "selected" : ""}
-                          aria-pressed={liveEnabled}
-                          onClick={() => {
-                            setLiveEnabled(true);
-                            setShowMotion(false);
-                          }}
-                        >
-                          <Activity size={14} />
-                          实时预览
-                        </Button>
-                        <Button
-                          className={
-                            !liveEnabled && !showMotion ? "selected" : ""
-                          }
-                          aria-pressed={!liveEnabled && !showMotion}
-                          onClick={() => {
-                            setLiveEnabled(false);
-                            setShowMotion(false);
-                          }}
-                        >
-                          <FileImage size={14} />
-                          关键帧
-                        </Button>
-                        <Button
-                          disabled={!motion}
-                          className={showMotion ? "selected" : ""}
-                          aria-pressed={showMotion}
-                          title={
-                            motion
-                              ? "播放已验证的 sRGB 视频"
-                              : "请生成 sRGB 运动预览；其他 Gamma 或未验证视频不可用于网页预览"
-                          }
-                          onClick={() => {
-                            setLiveEnabled(false);
-                            setShowMotion(true);
-                          }}
-                        >
-                          <Film size={14} />
-                          运动预览
-                        </Button>
-                      </div>
-                      {/* Stored renders use the saved revision and fill the two views beside live preview. */}
-                      <div
-                        className="preview-actions"
-                        role="group"
-                        aria-label="渲染已保存版本"
-                      >
-                        <span className="tiny-label" aria-hidden="true">
-                          渲染已保存版本
-                        </span>
-                        <Button
-                          className="primary"
-                          disabled={!!pending || dirty || !!settingsError}
-                          onClick={() => void render("frame")}
-                        >
-                          <Play size={14} />
-                          渲染当前帧
-                        </Button>
-                        <Button
-                          disabled={!!pending || dirty || !!settingsError}
-                          onClick={() => void render("keyframes")}
-                        >
-                          预览三帧
-                        </Button>
-                        <Button
-                          disabled={!!pending || dirty || !!settingsError}
-                          onClick={() => void render("preview")}
-                        >
-                          前 2 秒动画
-                        </Button>
-                      </div>
-                    </div>
-                    <div className="preview-toolbar">
-                      <p
-                        className={
-                          "preview-guidance " + (dirty ? "warning-text" : "")
-                        }
-                      >
-                        {dirty
-                          ? "修改无需保存即可实时预览；保存后可渲染关键帧与动画。"
-                          : "实时预览使用低分辨率与单次采样，交付按完整规格渲染。"}
-                      </p>
-                      <span>
-                        sRGB 显示预览{" "}
-                        <span className="dim">
-                          {liveEnabled
-                            ? " / 草稿 · 低精度"
-                            : dirty
-                              ? " / 修改尚未渲染"
-                              : activeJob &&
-                                  saved &&
-                                  activeJob.revision_id !== saved.revision_id
-                                ? " / 上一版本"
-                                : " / 原始值见下方"}
-                        </span>
-                      </span>
-                    </div>
-                    <div
-                      className="preview-stage"
-                      aria-busy={
-                        liveEnabled
-                          ? live.loading
-                          : activeJob?.status === "running"
-                      }
-                    >
-                      {liveEnabled && live.reply ? (
-                        <img
-                          className="live-preview-image"
-                          src={`data:image/png;base64,${live.reply.images[0].data}`}
-                          alt={draft.name + "的低精度实时 sRGB 预览"}
-                        />
-                      ) : liveEnabled ? (
-                        <div className="preview-empty">
-                          <div className="preview-mark">
-                            <Activity size={36} />
-                          </div>
-                          <strong>
-                            {live.error ? "实时预览未完成" : "正在准备实时预览"}
-                          </strong>
-                          <p>直接显示当前草稿，无需先保存场景。</p>
-                        </div>
-                      ) : showMotion && motion ? (
-                        <video
-                          src={artifactUrl(motion.id)}
-                          controls
-                          preload="metadata"
-                          aria-label="SDR 运动预览"
-                        />
-                      ) : preview ? (
-                        <button
-                          type="button"
-                          className="sample-surface"
-                          onClick={(e) => void sample(e)}
-                          aria-label="在预览中取样，按回车可取中心像素"
-                        >
-                          <img
-                            src={artifactUrl(preview.id)}
-                            alt={draft?.name + "的 sRGB 显示预览"}
-                          />
-                        </button>
-                      ) : (
-                        <div className="preview-empty">
-                          <div className="preview-mark">
-                            <Braces size={36} />
-                          </div>
-                          <strong>
-                            {draft ? "场景代码已就绪" : "画面从一段代码开始"}
-                          </strong>
-                          <p>
-                            {draft
-                              ? "渲染关键帧，查看经过 ACES 显示变换的结果。"
-                              : "创建项目，从空白场景或可选示例开始编辑。"}
-                          </p>
-                        </div>
-                      )}
-                      {!liveEnabled &&
-                        activeJob &&
-                        ["queued", "running"].includes(activeJob.status) && (
-                          <div className="preview-progress">
-                            <span>
-                              {STATUS[activeJob.status]} · {activeJob.stage}
-                            </span>
-                            <progress
-                              max={1}
-                              value={activeJob.progress}
-                              aria-label="当前预览任务进度"
-                            />
-                          </div>
-                        )}
-                    </div>
-                    {liveEnabled && (
-                      <div className="live-preview-status">
-                        <span role="status">
-                          {live.error
-                            ? live.reply
-                              ? "更新失败 · 保留上一画面"
-                              : "实时预览失败"
-                            : !validLiveFrame || settingsError
-                              ? "请填写有效的画面规格与当前帧"
-                              : composing
-                                ? "输入完成后更新画面"
-                                : offline
-                                  ? "服务未连接 · 保留草稿"
-                                  : livePlaying
-                                    ? "实时播放中 · 低精度"
-                                    : live.loading
-                                      ? live.reply
-                                        ? "更新中 · 保留上一画面"
-                                        : "正在生成实时预览…"
-                                      : live.stale
-                                        ? "上一画面"
-                                        : "实时预览已更新"}
-                        </span>
-                        <span className="mono">
-                          {live.reply
-                            ? `${live.reply.images[0].width} × ${live.reply.images[0].height} · 1 样本 · 帧 ${live.reply.frame}`
-                            : "长边 ≤ 480 px · 1 样本"}
-                        </span>
-                      </div>
-                    )}
-                    {liveEnabled && live.error && (
-                      <>
-                        <Notice error text={live.error} />
-                        <Button onClick={live.retry}>重试实时预览</Button>
-                      </>
-                    )}
-                    {liveEnabled && (
-                      <PreviewAudio
-                        key={`${projectId}:${sceneId}`}
-                        ref={previewAudio}
-                        projectId={projectId}
-                        active={live.active}
-                        playing={livePlaying && !live.error}
-                        seconds={Number(frame) / frameRate}
-                        duration={Number(frames) / frameRate}
-                        frameDuration={1 / frameRate}
-                        clockKey={sceneId}
-                      />
-                    )}
-                    <div className="frame-strip">
-                      {liveEnabled ? (
-                        <>
-                          <Button
-                            aria-label={
-                              livePlaying ? "暂停实时预览" : "播放实时预览"
-                            }
-                            aria-pressed={livePlaying}
-                            disabled={
-                              !live.active || !!live.error || Number(frames) < 2
-                            }
-                            onClick={() => {
-                              if (!livePlaying) previewAudio.current?.unlock();
-                              setLivePlaying((value) => !value);
-                            }}
+                    <PreviewPanel
+                      label="场景预览"
+                      toolbar={
+                        <div className="preview-commandbar">
+                          <div
+                            className="segmented"
+                            role="group"
+                            aria-label="预览方式"
                           >
-                            {livePlaying ? (
-                              <Pause size={14} />
-                            ) : (
-                              <Play size={14} />
-                            )}
-                          </Button>
-                          <label className="sr-only" htmlFor="live-timeline">
-                            实时预览播放位置
-                          </label>
-                          <input
-                            id="live-timeline"
-                            className="live-timeline"
-                            type="range"
-                            min={0}
-                            max={Math.max(0, Number(frames) - 1)}
-                            step={1}
-                            value={
-                              validLiveFrame
-                                ? Math.min(Number(frame), Number(frames) - 1)
-                                : 0
-                            }
-                            disabled={!!settingsError}
-                            onChange={(e) => {
-                              setLivePlaying(false);
-                              setFrame(e.target.value);
-                            }}
-                          />
-                        </>
-                      ) : (
-                        <div className="frame-buttons">
-                          {previewImages.map((a, i) => (
                             <Button
-                              key={a.id}
-                              className={i === previewIndex ? "selected" : ""}
+                              className={liveEnabled ? "selected" : ""}
+                              aria-pressed={liveEnabled}
                               onClick={() => {
-                                setPreviewIndex(i);
-                                setFrame(String(a.metadata.frame));
+                                setLiveEnabled(true);
                                 setShowMotion(false);
                               }}
                             >
-                              帧 {String(a.metadata.frame)}
+                              <Activity size={14} />
+                              实时预览
                             </Button>
-                          ))}
+                            <Button
+                              className={
+                                !liveEnabled && !showMotion ? "selected" : ""
+                              }
+                              aria-pressed={!liveEnabled && !showMotion}
+                              onClick={() => {
+                                setLiveEnabled(false);
+                                setShowMotion(false);
+                              }}
+                            >
+                              <FileImage size={14} />
+                              关键帧
+                            </Button>
+                            <Button
+                              disabled={!motion}
+                              className={showMotion ? "selected" : ""}
+                              aria-pressed={showMotion}
+                              title={
+                                motion
+                                  ? "播放已验证的 sRGB 视频"
+                                  : "请生成 sRGB 运动预览；其他 Gamma 或未验证视频不可用于网页预览"
+                              }
+                              onClick={() => {
+                                setLiveEnabled(false);
+                                setShowMotion(true);
+                              }}
+                            >
+                              <Film size={14} />
+                              运动预览
+                            </Button>
+                          </div>
+                          {/* Stored renders use the saved revision and fill the two views beside live preview. */}
+                          <div
+                            className="preview-actions"
+                            role="group"
+                            aria-label="渲染已保存版本"
+                          >
+                            <span className="tiny-label" aria-hidden="true">
+                              渲染已保存版本
+                            </span>
+                            <Button
+                              className="primary"
+                              disabled={!!pending || dirty || !!settingsError}
+                              onClick={() => void render("frame")}
+                            >
+                              <Play size={14} />
+                              渲染当前帧
+                            </Button>
+                            <Button
+                              disabled={!!pending || dirty || !!settingsError}
+                              onClick={() => void render("keyframes")}
+                            >
+                              预览三帧
+                            </Button>
+                            <Button
+                              disabled={!!pending || dirty || !!settingsError}
+                              onClick={() => void render("preview")}
+                            >
+                              前 2 秒动画
+                            </Button>
+                          </div>
+                        </div>
+                      }
+                    >
+                      <div className="preview-toolbar">
+                        <p
+                          className={
+                            "preview-guidance " + (dirty ? "warning-text" : "")
+                          }
+                        >
+                          {dirty
+                            ? "修改无需保存即可实时预览；保存后可渲染关键帧与动画。"
+                            : "实时预览最高 720p 级、单次采样，交付按完整规格渲染。"}
+                        </p>
+                        <span>
+                          sRGB 显示预览{" "}
+                          <span className="dim">
+                            {liveEnabled
+                              ? " / 草稿 · 低精度"
+                              : dirty
+                                ? " / 修改尚未渲染"
+                                : activeJob &&
+                                    saved &&
+                                    activeJob.revision_id !== saved.revision_id
+                                  ? " / 上一版本"
+                                  : " / 原始值见下方"}
+                          </span>
+                        </span>
+                      </div>
+                      <div
+                        className="preview-stage"
+                        aria-busy={
+                          liveEnabled
+                            ? live.loading
+                            : activeJob?.status === "running"
+                        }
+                      >
+                        {liveEnabled && live.reply ? (
+                          <img
+                            className="live-preview-image"
+                            src={`data:image/png;base64,${live.reply.images[0].data}`}
+                            alt={draft.name + "的低精度实时 sRGB 预览"}
+                          />
+                        ) : liveEnabled ? (
+                          <div className="preview-empty">
+                            <div className="preview-mark">
+                              <Activity size={36} />
+                            </div>
+                            <strong>
+                              {live.error
+                                ? "实时预览未完成"
+                                : "正在准备实时预览"}
+                            </strong>
+                            <p>直接显示当前草稿，无需先保存场景。</p>
+                          </div>
+                        ) : showMotion && motion ? (
+                          <video
+                            src={artifactUrl(motion.id)}
+                            controls
+                            preload="metadata"
+                            aria-label="SDR 运动预览"
+                          />
+                        ) : preview ? (
+                          <button
+                            type="button"
+                            className="sample-surface"
+                            onClick={(e) => void sample(e)}
+                            aria-label="在预览中取样，按回车可取中心像素"
+                          >
+                            <img
+                              src={artifactUrl(preview.id)}
+                              alt={draft?.name + "的 sRGB 显示预览"}
+                            />
+                          </button>
+                        ) : (
+                          <div className="preview-empty">
+                            <div className="preview-mark">
+                              <Braces size={36} />
+                            </div>
+                            <strong>
+                              {draft ? "场景代码已就绪" : "画面从一段代码开始"}
+                            </strong>
+                            <p>
+                              {draft
+                                ? "渲染关键帧，查看经过 ACES 显示变换的结果。"
+                                : "创建项目，从空白场景或可选示例开始编辑。"}
+                            </p>
+                          </div>
+                        )}
+                        {!liveEnabled &&
+                          activeJob &&
+                          ["queued", "running"].includes(activeJob.status) && (
+                            <div className="preview-progress">
+                              <span>
+                                {STATUS[activeJob.status]} · {activeJob.stage}
+                              </span>
+                              <progress
+                                max={1}
+                                value={activeJob.progress}
+                                aria-label="当前预览任务进度"
+                              />
+                            </div>
+                          )}
+                      </div>
+                      {liveEnabled && (
+                        <div className="live-preview-status">
+                          <span role="status">
+                            {live.error
+                              ? live.reply
+                                ? "更新失败 · 保留上一画面"
+                                : "实时预览失败"
+                              : !validLiveFrame || settingsError
+                                ? "请填写有效的画面规格与当前帧"
+                                : composing
+                                  ? "输入完成后更新画面"
+                                  : offline
+                                    ? "服务未连接 · 保留草稿"
+                                    : livePlaying
+                                      ? "实时播放中 · 低精度"
+                                      : live.loading
+                                        ? live.reply
+                                          ? "更新中 · 保留上一画面"
+                                          : "正在生成实时预览…"
+                                        : live.stale
+                                          ? "上一画面"
+                                          : "实时预览已更新"}
+                          </span>
+                          <span className="mono">
+                            {live.reply
+                              ? `${live.reply.images[0].width} × ${live.reply.images[0].height} · 1 样本 · 帧 ${live.reply.frame}`
+                              : "最高 1280 × 720（竖屏旋转）· 1 样本"}
+                          </span>
                         </div>
                       )}
-                      <label htmlFor="frame-index">当前帧</label>
-                      <input
-                        id="frame-index"
-                        type="number"
-                        min={0}
-                        max={10_000_000}
-                        value={frame}
-                        aria-invalid={!validLiveFrame}
-                        aria-describedby={
-                          !validLiveFrame ? "live-frame-error" : undefined
-                        }
-                        onChange={(e) => {
-                          setLivePlaying(false);
-                          setFrame(e.target.value);
-                        }}
-                      />
-                      <Button
-                        disabled={!draft || !!pending || dirty}
-                        onClick={() => void render("frame")}
-                        aria-label="渲染所选帧"
-                      >
-                        <RefreshCw size={14} />
-                      </Button>
-                    </div>
-                    {!validLiveFrame && (
-                      <Notice error text="当前帧需为 0–10000000 的整数。" />
-                    )}
-                    {!validLiveFrame && (
-                      <span id="live-frame-error" className="sr-only">
-                        当前帧需为 0–10000000 的整数。
-                      </span>
-                    )}
-                    <Notice error text={inspectionError} />
-                    <div className="pixel-readout">
-                      <div>
-                        <span className="tiny-label">原始 ACEScg 数值</span>
-                        <strong>
-                          {liveEnabled
-                            ? "渲染当前帧后可取样"
-                            : pixel
-                              ? "像素 " + pixel.x + ", " + pixel.y
-                              : "点击预览取样"}
-                        </strong>
+                      {liveEnabled && live.error && (
+                        <>
+                          <Notice error text={live.error} />
+                          <Button onClick={live.retry}>重试实时预览</Button>
+                        </>
+                      )}
+                      {liveEnabled && (
+                        <PreviewAudio
+                          key={`${projectId}:${sceneId}`}
+                          ref={previewAudio}
+                          projectId={projectId}
+                          active={live.active}
+                          playing={livePlaying && !live.error}
+                          seconds={Number(frame) / frameRate}
+                          duration={Number(frames) / frameRate}
+                          frameDuration={1 / frameRate}
+                          clockKey={sceneId}
+                        />
+                      )}
+                      <div className="frame-strip">
+                        {liveEnabled ? (
+                          <>
+                            <Button
+                              aria-label={
+                                livePlaying ? "暂停实时预览" : "播放实时预览"
+                              }
+                              aria-pressed={livePlaying}
+                              disabled={
+                                !live.active ||
+                                !!live.error ||
+                                Number(frames) < 2
+                              }
+                              onClick={() => {
+                                if (!livePlaying)
+                                  previewAudio.current?.unlock();
+                                setLivePlaying((value) => !value);
+                              }}
+                            >
+                              {livePlaying ? (
+                                <Pause size={14} />
+                              ) : (
+                                <Play size={14} />
+                              )}
+                            </Button>
+                            <label className="sr-only" htmlFor="live-timeline">
+                              实时预览播放位置
+                            </label>
+                            <input
+                              id="live-timeline"
+                              className="live-timeline"
+                              type="range"
+                              min={0}
+                              max={Math.max(0, Number(frames) - 1)}
+                              step={1}
+                              value={
+                                validLiveFrame
+                                  ? Math.min(Number(frame), Number(frames) - 1)
+                                  : 0
+                              }
+                              disabled={!!settingsError}
+                              onChange={(e) => {
+                                setLivePlaying(false);
+                                setFrame(e.target.value);
+                              }}
+                            />
+                          </>
+                        ) : (
+                          <div className="frame-buttons">
+                            {previewImages.map((a, i) => (
+                              <Button
+                                key={a.id}
+                                className={i === previewIndex ? "selected" : ""}
+                                onClick={() => {
+                                  setPreviewIndex(i);
+                                  setFrame(String(a.metadata.frame));
+                                  setShowMotion(false);
+                                }}
+                              >
+                                帧 {String(a.metadata.frame)}
+                              </Button>
+                            ))}
+                          </div>
+                        )}
+                        <label htmlFor="frame-index">当前帧</label>
+                        <input
+                          id="frame-index"
+                          type="number"
+                          min={0}
+                          max={10_000_000}
+                          value={frame}
+                          aria-invalid={!validLiveFrame}
+                          aria-describedby={
+                            !validLiveFrame ? "live-frame-error" : undefined
+                          }
+                          onChange={(e) => {
+                            setLivePlaying(false);
+                            setFrame(e.target.value);
+                          }}
+                        />
+                        <Button
+                          disabled={!draft || !!pending || dirty}
+                          onClick={() => void render("frame")}
+                          aria-label="渲染所选帧"
+                        >
+                          <RefreshCw size={14} />
+                        </Button>
                       </div>
-                      <div className="channels">
-                        {["R", "G", "B", "A"].map((c, i) => (
-                          <span key={c}>
-                            <b>{c}</b>
-                            {!liveEnabled && pixel
-                              ? pixel.values[i]?.toFixed(6)
-                              : "—"}
-                          </span>
-                        ))}
+                      {!validLiveFrame && (
+                        <Notice error text="当前帧需为 0–10000000 的整数。" />
+                      )}
+                      {!validLiveFrame && (
+                        <span id="live-frame-error" className="sr-only">
+                          当前帧需为 0–10000000 的整数。
+                        </span>
+                      )}
+                      <Notice error text={inspectionError} />
+                      <div className="pixel-readout">
+                        <div>
+                          <span className="tiny-label">原始 ACEScg 数值</span>
+                          <strong>
+                            {liveEnabled
+                              ? "渲染当前帧后可取样"
+                              : pixel
+                                ? "像素 " + pixel.x + ", " + pixel.y
+                                : "点击预览取样"}
+                          </strong>
+                        </div>
+                        <div className="channels">
+                          {["R", "G", "B", "A"].map((c, i) => (
+                            <span key={c}>
+                              <b>{c}</b>
+                              {!liveEnabled && pixel
+                                ? pixel.values[i]?.toFixed(6)
+                                : "—"}
+                            </span>
+                          ))}
+                        </div>
+                        <div className="range-summary">
+                          <span>最小 / 最大</span>
+                          <strong>
+                            {!liveEnabled && stats
+                              ? fmt(Math.min(...stats.minimum.slice(0, 3))) +
+                                " / " +
+                                fmt(Math.max(...stats.maximum.slice(0, 3)))
+                              : "— / —"}
+                          </strong>
+                        </div>
                       </div>
-                      <div className="range-summary">
-                        <span>最小 / 最大</span>
-                        <strong>
-                          {!liveEnabled && stats
-                            ? fmt(Math.min(...stats.minimum.slice(0, 3))) +
-                              " / " +
-                              fmt(Math.max(...stats.maximum.slice(0, 3)))
-                            : "— / —"}
-                        </strong>
-                      </div>
-                    </div>
+                    </PreviewPanel>
                     {/* Code follows the picture in the same column, independent of inspector height. */}
                     <details className="code-disclosure">
                       <summary>

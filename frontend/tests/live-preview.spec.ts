@@ -3,7 +3,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { mkdirSync } from "node:fs";
 import type { SceneReply } from "../src/types";
 
-// Use the real native renderer with a small, time-varying shader. Intercept only
+// Use the real 720p native renderer with a small, time-varying shader. Intercept only
 // timing/failures when a test needs deterministic concurrency or recovery evidence.
 async function scene(page: Page) {
   const session = await (await page.request.get("/api/session")).json();
@@ -54,10 +54,10 @@ test("live draft changes update immediately without saving or creating jobs", as
   const { call, created, project, image } = await scene(page);
   expect(
     await image.evaluate((img: HTMLImageElement) => img.naturalWidth),
-  ).toBe(480);
+  ).toBe(1280);
   expect(
     await image.evaluate((img: HTMLImageElement) => img.naturalHeight),
-  ).toBe(270);
+  ).toBe(720);
   const original = await image.getAttribute("src");
   const response = page.waitForResponse(
     (r) =>
@@ -174,7 +174,7 @@ test("canvas specifications are edited in preview and shared with delivery", asy
   );
   await expect
     .poll(() => image.evaluate((img: HTMLImageElement) => img.naturalHeight))
-    .toBe(480);
+    .toBe(1280);
   await settings.getByLabel("宽度", { exact: true }).fill("320");
   await settings.getByLabel("高度", { exact: true }).fill("180");
   await settings.getByLabel("帧率", { exact: true }).selectOption("24000/1001");

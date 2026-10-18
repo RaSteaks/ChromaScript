@@ -84,10 +84,15 @@ function main() {
     );
   probeTarget.dispose();
   probeMaterial.dispose();
-  const limit = config.preview
-    ? 960
-    : config.maxDimension || Math.max(config.width, config.height);
-  const scale = Math.min(1, limit / Math.max(config.width, config.height));
+  const limit = config.maxDimension || Math.max(config.width, config.height);
+  // Match live WGSL's orientation-aware 720p budget; final rendering is unchanged.
+  const scale = config.preview
+    ? Math.min(
+        1,
+        1280 / Math.max(config.width, config.height),
+        720 / Math.min(config.width, config.height),
+      )
+    : Math.min(1, limit / Math.max(config.width, config.height));
   // Logical scene dimensions/time never change with preview or final sampling.
   // Export uses an integer pixel grid; CPU integration filters associated light.
   const renderScale = config.preview ? 1 : config.renderScale || 1;
@@ -328,6 +333,11 @@ function main() {
   });
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) pause();
+  });
+  // Keyboard events inside the sandbox do not bubble to the parent viewer.
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !event.isComposing)
+      send("exit-expanded-preview");
   });
   draw();
   send("ready");

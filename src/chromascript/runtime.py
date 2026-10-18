@@ -77,7 +77,8 @@ def call(
         # destination creation prevents a retry from overwriting the first export.
         timeout=(
             httpx.Timeout(60, read=None)
-            if name.removeprefix("chromascript.") in {"export_artifact", "create_audio", "import_audio"}
+            # Music rendering and local model reviews enforce their own processing timeouts.
+            if name.removeprefix("chromascript.") in {"export_artifact", "create_audio", "import_audio", "create_music", "inspect_soundfont", "review_audio"}
             else 330 if name.removeprefix("chromascript.") == "choose_export_directory" else 60
         ),
     )

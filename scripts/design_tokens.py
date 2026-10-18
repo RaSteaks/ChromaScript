@@ -13,6 +13,8 @@ for name, value in data["typography"].items():
     lines.append(f"  --font-{name}: {value['fontFamily']};")
 for name, value in data["spacing"].items():
     lines.append(f"  --space-{name}: {value};")
+# The stable media viewer owns a modal layer without moving its iframe/player DOM.
+lines.append(f"  --layer-preview: {data['layers']['preview']};")
 lines.extend(["  --radius: " + data["rounded"]["DEFAULT"] + ";", "}", ""])
 text = "\n".join(lines)
 destination = root / "frontend" / "src" / "tokens.css"

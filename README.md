@@ -7,6 +7,7 @@
 - **场景创作**：从模板开始，用 JSON 和 WGSL 定义画面，调整参数、颜色与关键帧。
 - **HDR / SDR 动画代码**：同时提供浮点 Three.js、SDR React 文字和 ThreeCanvas 模板；统一预览，按源类型导出 HDR/SDR 视频或浮点母版。
 - **实时预览**：播放、暂停和逐帧查看动画，检查原始像素值。
+- **大屏查看**：场景与动画预览均可放大至网页视口，保留播放位置和监听状态；点击“退出大屏”或按 Esc 返回。实时 WGSL 与浮点动画采用最高 1280×720（竖屏 720×1280）的预览尺寸，小画面不放大渲染，交付仍使用原规格。
 - **色彩管理**：WGSL 生成与母版处理使用 float32 线性 ACEScg（AP1）；Three.js 动画以线性 Rec.709 生成，再转换为 ACEScg，网页使用 sRGB 预览，输出色彩空间在交付时选择；统一通过 OCIO / ACES 2.0 转换，原始浮点数据与显示预览分别保留。
 - **多格式交付**：导出 EXR、PNG、TIFF、DPX 图像序列，以及 H.264、HEVC、ProRes、DNxHR 等视频；可用组合由本机能力决定。
 - **项目音频**：导入本地音频，或用代码生成音调、节奏与音效；设置音轨裁切、起点和音量，随视频混音或作为独立 WAV 交付。
@@ -19,7 +20,51 @@
 
 Agent 先调用 `chromascript.get_audio_guidelines(project_id)` 获取项目对应的本地保存目录与制作规范（CLI 同名操作）。建议将脚本、源音频和制作清单保存在返回的 `source_directory`，用 `intro-chime-v001.wav` 等版本化名称，保留种子、来源、实际格式与峰值。导入/生成后由服务保存到 `<workspace>/audio/<asset_id>.wav`，禁止直接覆盖；通过 `get_artifact(asset.id).local_path` 查询实际路径。制作优先采用无损 48 kHz 双声道 WAV，使用短淡入淡出，给叠加留出余量；帧位置按 `frame × fps.denominator / fps.numerator` 换算秒，不累加逐帧舍入误差。
 
-Agent 可以通过 `chromascript.create_audio` 程序化生成音频。以下是相同操作的 CLI 示例（替换项目 ID）：
+配乐使用 `inspect_soundfont` + `create_music`：agent 根据动画编曲，FluidSynth 使用本地 SoundFont 演奏。`create_audio` 继续用于基础音调和音效。先通过 `get_audio_guidelines.music` 或 `get_capabilities.audio.music` 检查 FluidSynth 的可用状态、版本及限制；FluidSynth 是可选的本机依赖，服务不下载或捆绑音源。FFmpeg 用于验证和解码输出。
+
+```sh
+.venv/bin/chromascript call inspect_soundfont --arguments '{"soundfont_path":"/absolute/path/instruments.sf2"}'
+.venv/bin/chromascript call create_music --arguments @examples/music-score.json
+```
+
+调用前修改 [四声部乐谱示例](examples/music-score.json) 中的项目 ID、音源路径和 bank/program。`inspect_soundfont` 读取实际 SF2 预设名称、从零开始的 bank/program、大小与 SHA-256；名称来自文件，不认证真实乐器身份。不要假定所有音源均遵守 GM 编号。当前接受本地绝对路径的 SF2，最多 512 MiB，检查预设头不要求安装 FluidSynth。
+
+`create_music(project_id,name,soundfont_path,score)` 支持最多 15 个声部（例如钢琴、小提琴、中提琴、大提琴）、每声部 4096 音符、总计 16384 音符和 600 秒。声部名称须唯一；声部含 `bank`、`program`、MIDI `volume`（0–127）及 `pan`（-1–1）。音符含 MIDI `pitch`（0–127）、`start_seconds`、`duration_seconds`、`velocity`（1–127）。整体含 `duration_seconds`、`gain_db`（-96–12，默认 0）和 `fade_out_seconds`（0–10 秒，默认 0.02，不超过总时长）。所有音符必须在总时长内，同声部同音高的按键区间不能重叠。
+
+`score.constraints` 将动画制作要求与乐谱一起保存：
+
+- `theme`：主题与情绪文字，由 agent 理解和实现。
+- `instrumentation`：必须存在的声部名称列表；实际音色还需匹配音源预设。
+- `hit_points`：`label`、`time_seconds`、`tolerance_seconds`（默认 0.05，范围 0–1）及可选 `track_name`。服务要求指定声部或任一非静音声部在容差内有起音。
+- `reading_windows`：`label`、`start_seconds`、`end_seconds`、`max_velocity`（默认 64）和 `allow_note_onsets`（默认 true）。窗口内重叠的按键音符不能超过力度限制；设为 false 可禁止窗口内起音。
+
+约束时间相对于音乐素材，编曲时从场景时间中减去预定的音轨起点；窗口含起点、不含终点。服务校验乐谱时间与落点，不分析画面或认证听感；阅读窗口不检查音源释放尾音。MIDI 时间使用每秒 48000 ticks，但 FluidSynth 内部调度仍有时间量化，音色本身也可能缓慢起音，需试听。音符时长指按键时间，应在总时长内给释放尾音留余量；最后按指定总时长裁切并淡出。当前固定关闭混响/合唱、合成器增益 0.2、256 发声数、单 CPU 核心、无延音踏板，原生渲染超时为 300 秒。
+
+返回的 `generation_report` 同时保存在 `asset.metadata.generation_report`，记录实际样本数、时长、采样率、声道、PCM 样本峰值/dBFS、饱和前峰值、削波声道样本数、WAV 哈希、音源快照哈希与预设、完整乐谱及约束、落点检查、FluidSynth 版本/选项/输出探测和实现哈希。输出增益与淡出在浮点域完成后才转换为 32-bit 整数 PCM，不自动归一化。静音的 `peak_dbfs` 为 null；未进行 LUFS 或真峰值分析。保留原音源与乐谱以便重复生成，不保证跨 FluidSynth 版本或平台逐位一致。分轨、片段预览、公开 MIDI 导入/导出和多版本自动试配留待后续扩展。
+
+本地 Qwen2.5-Omni / llama.cpp 可作为配乐听审模型，MCP 与 CLI 提供同名操作：
+
+```sh
+.venv/bin/chromascript call get_audio_model
+.venv/bin/chromascript call configure_audio_model --arguments '{"config":{"base_url":"http://127.0.0.1:8080","model":"ggml-org/Qwen2.5-Omni-7B-GGUF:F16"}}'
+.venv/bin/chromascript call review_audio --arguments @examples/audio-review.json
+```
+
+配置前从 `get_audio_model.models[].id` 复制完整 ID，保留 `:F16` 等后缀；上面的 ID 只是本机当前示例，不能用模型仓库名替代服务提供的 ID。服务重新部署后若 ID 改变，需重新配置。
+
+运行音频辅助 Python 脚本时，使用 ChromaScript 仓库中的 `.venv/bin/python`。本机 Mido 安装在该环境中；Mido 是外部 MIDI 制作脚本的可选依赖，内置 `create_music` 不依赖它，也不要求 agent 先手工生成 MIDI。
+
+`get_audio_model` 检查服务就绪状态、实际模型 ID 与声明的音频输入能力；不能仅凭模型名称判断支持。`configure_audio_model` 验证成功后将连接配置保存到当前工作区，固定模型 ID，不下载、启动或切换模型。服务需已加载音频投影并接受本机无认证请求；仅连接 HTTP 回环地址（`127.0.0.1`、`::1`、`localhost`），不经环境代理、不跟随重定向。默认地址为 `http://127.0.0.1:8080`。可配置 `timeout_seconds`（5–600，默认 180）、`max_tokens`（128–4096，默认 1536）、`temperature`（0–1，默认 0.2）与 `seed`（默认 42）。
+
+编曲反馈流程为 **生成素材 → `review_audio` → agent 根据反馈修改乐谱 → 生成新版本并复查 → 保存选中的音轨**。调用传入 `project_id`、`asset_id`，可选 `review` 中指定 `start_seconds`、`duration_seconds`、`brief` 和 `focus`，见[听审参数示例](examples/audio-review.json)。每次检查 0.1–30 秒；未指定时长表示检查剩余全部素材，超过 30 秒会明确拒绝，不会静默只听开头。长配乐应按章节、公式阅读窗口和转场分段检查，保留覆盖范围。
+
+真实音频以 base64 WAV 传给模型；监听副本转换为 16 kHz 单声道 16-bit PCM，不做响度归一化，原始 48 kHz 双声道素材不变。生成时的主题、配器及相关落点/阅读窗口会作为“创作目标”附带；它们不代表模型实际听到了这些内容。模型未收到画面，不能认证音画同步，也不能通过监听副本认证原始声像、高频质量、LUFS、真峰值或削波。
+
+结果直接反馈给调用 agent：`report.objective` 是源片段的实测样本峰值、每声道 RMS 和满幅样本计数；`report.feedback` 是模型的总结、优点、问题、建议和不确定性。满幅样本数不等于已证实削波。问题时间是片段内近似秒数，加上 `objective.start_seconds` 才是素材时间。`feedback_status="complete"` 仅表示结构有效；截断、无效 JSON、越界时间或模型切换会返回 `invalid`、原始回答和原因。网络或模型拒绝请求则明确报错，不伪造听审结果。模型意见可能出错，agent 应结合客观结果和制作要求判断；不会自动修改音符、覆盖素材或替换音轨。
+
+听审报告作为 `audio-review` JSON 成果保存在 `<workspace>/audio-reviews/`，可通过现有 `get_artifact`、`export_artifact` 读取/导出。报告记录素材与监听副本哈希、检查范围、上下文、模型 ID/配置/服务版本、token 使用量及提示词/实现指纹；不认证模型权重哈希或跨运行环境的逐位重现。每个服务同时执行一项听审，不阻塞普通编辑操作。模型协议依据 [llama.cpp 服务文档](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)。
+
+基础音效可通过 `chromascript.create_audio` 生成。以下是相同操作的 CLI 示例（替换项目 ID）：
 
 ```sh
 .venv/bin/chromascript call create_audio --arguments '{

@@ -84,7 +84,8 @@ async function main() {
     // Opaque iframe origin plus CSP keep source away from editor cookies/tokens
     // and network requests. Escaping script terminators prevents HTML injection.
     const script = javascript.replace(/<\/script/gi, "<\\/script");
-    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${policy}"><style>html,body,#root{color-scheme:dark;margin:0;width:100%;height:100%;overflow:hidden;background:transparent}*{box-sizing:border-box}</style></head><body><div id="root"></div><script>${script}</script></body></html>`;
+    // The sandbox keeps its own landmark/heading when the expanded viewer makes the host inert.
+    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>动画预览</title><meta http-equiv="Content-Security-Policy" content="${policy}"><style>html,body,#root{color-scheme:dark;margin:0;width:100%;height:100%;overflow:hidden;background:transparent}*{box-sizing:border-box}</style></head><body><main style="width:100%;height:100%"><h1 style="position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap">动画预览</h1><div id="root"></div></main><script>${script}</script></body></html>`;
     process.stdout.write(JSON.stringify({ html, channel }));
     return;
   }

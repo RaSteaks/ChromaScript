@@ -64,6 +64,117 @@ class AudioSynthesis(Model):
         return self
 
 
+class MusicNote(Model):
+    # Duration is key-down time. SoundFont release tails need room before the score ends.
+    pitch: int = Field(ge=0, le=127, strict=True)
+    start_seconds: float = Field(default=0, ge=0, le=MAX_SECONDS)
+    duration_seconds: float = Field(ge=0.001, le=MAX_SECONDS)
+    velocity: int = Field(default=72, ge=1, le=127, strict=True)
+
+    def bounds(self) -> tuple[int, int]:
+        # Round absolute boundaries once, including rational addition of decimal inputs.
+        return samples(self.start_seconds), samples(
+            Fraction(str(self.start_seconds)) + Fraction(str(self.duration_seconds))
+        )
+
+
+class MusicTrack(Model):
+    name: str = Field(min_length=1, max_length=120, pattern=r"\S")
+    bank: int = Field(default=0, ge=0, le=16383, strict=True)
+    program: int = Field(ge=0, le=127, strict=True)
+    volume: int = Field(default=100, ge=0, le=127, strict=True)
+    pan: float = Field(default=0, ge=-1, le=1)
+    notes: list[MusicNote] = Field(min_length=1, max_length=4096)
+
+
+class MusicHit(Model):
+    label: str = Field(default="", max_length=240)
+    time_seconds: float = Field(ge=0, le=MAX_SECONDS)
+    tolerance_seconds: float = Field(default=0.05, ge=0, le=1)
+    track_name: str | None = Field(default=None, min_length=1, max_length=120)
+
+
+class MusicReadingWindow(Model):
+    label: str = Field(default="", max_length=240)
+    start_seconds: float = Field(ge=0, le=MAX_SECONDS)
+    end_seconds: float = Field(gt=0, le=MAX_SECONDS)
+    max_velocity: int = Field(default=64, ge=1, le=127, strict=True)
+    allow_note_onsets: bool = True
+
+
+class MusicConstraints(Model):
+    theme: str = Field(default="", max_length=4000)
+    # Instrumentation references unique track names, never assumed GM instrument numbers.
+    instrumentation: list[str] = Field(default_factory=list, max_length=15)
+    hit_points: list[MusicHit] = Field(default_factory=list, max_length=256)
+    reading_windows: list[MusicReadingWindow] = Field(default_factory=list, max_length=128)
+
+
+class MusicScore(Model):
+    duration_seconds: float = Field(ge=0.001, le=MAX_SECONDS)
+    tracks: list[MusicTrack] = Field(min_length=1, max_length=15)
+    gain_db: float = Field(default=0, ge=-96, le=12)
+    fade_out_seconds: float = Field(default=0.02, ge=0, le=10)
+    constraints: MusicConstraints = Field(default_factory=MusicConstraints)
+
+    def hit_report(self) -> list[dict[str, Any]]:
+        report = []
+        for hit in self.constraints.hit_points:
+            candidates = [
+                (abs(note.bounds()[0] - samples(hit.time_seconds)), track.name, note.bounds()[0])
+                for track in self.tracks
+                if track.volume > 0 and hit.track_name in (None, track.name)
+                for note in track.notes
+            ]
+            nearest = min(candidates) if candidates else None
+            report.append({
+                "label": hit.label,
+                "target_seconds": hit.time_seconds,
+                "track_name": nearest[1] if nearest else None,
+                "note_on_seconds": nearest[2] / RATE if nearest else None,
+                "error_seconds": nearest[0] / RATE if nearest else None,
+                "matched": nearest is not None and nearest[0] <= samples(hit.tolerance_seconds),
+            })
+        return report
+
+    @model_validator(mode="after")
+    def score_bounds(self) -> MusicScore:
+        total = samples(self.duration_seconds)
+        names = [track.name for track in self.tracks]
+        if len(set(names)) != len(names):
+            raise ValueError("Music track names must be unique")
+        if sum(len(track.notes) for track in self.tracks) > 16384:
+            raise ValueError("A score supports at most 16384 notes")
+        if self.fade_out_seconds > self.duration_seconds:
+            raise ValueError("fade_out_seconds must fit inside duration_seconds")
+        if not set(self.constraints.instrumentation) <= set(names):
+            raise ValueError("Required instrumentation must reference existing track names")
+        for window in self.constraints.reading_windows:
+            if not 0 <= samples(window.start_seconds) < samples(window.end_seconds) <= total:
+                raise ValueError("Reading windows must fit inside duration_seconds")
+        for track in self.tracks:
+            ends: dict[int, int] = {}
+            for note in sorted(track.notes, key=lambda n: n.start_seconds):
+                start, end = note.bounds()
+                if end > total:
+                    raise ValueError("Music notes must fit inside duration_seconds")
+                # MIDI note-off cannot independently release overlapping unisons on one channel.
+                if start < ends.get(note.pitch, -1):
+                    raise ValueError("Same-pitch notes must not overlap within a track")
+                ends[note.pitch] = end
+                for window in self.constraints.reading_windows:
+                    left, right = samples(window.start_seconds), samples(window.end_seconds)
+                    if start < right and end > left and note.velocity > window.max_velocity:
+                        raise ValueError("Note exceeds reading window max_velocity")
+                    if not window.allow_note_onsets and left <= start < right:
+                        raise ValueError("Note onset falls inside a protected reading window")
+        if any(samples(hit.time_seconds) >= total for hit in self.constraints.hit_points):
+            raise ValueError("Hit points must fall before the score ends")
+        if not all(hit["matched"] for hit in self.hit_report()):
+            raise ValueError("Every hit point needs a note onset within its tolerance on the requested track")
+        return self
+
+
 class AudioClip(Model):
     asset_id: str = Field(min_length=1, max_length=64)
     start_seconds: float = Field(default=0, ge=0, le=86_400)
@@ -419,7 +530,7 @@ class AudioOperations:
             )
 
     @operation(
-        "Create offline audio from timed sine/triangle/noise events, gain, pan and fades. Empty events create silence. No speech/music model or network service."
+        "Create basic tones/effects from sine/triangle/noise events. Prefer create_music with a SoundFont for instrumental scores. Empty events create silence. No speech/music model or network service."
     )
     def create_audio(self, project_id: str, name: str, spec: AudioSynthesis) -> dict[str, Any]:
         self._audio_project(project_id, True)
@@ -429,10 +540,39 @@ class AudioOperations:
             return self._save_audio(project_id, name, path, {"source": "synthesis", **metadata})
 
     @operation(
+        "Inspect an absolute local SF2 SoundFont: actual preset names, zero-based bank/program, size and SHA-256. Reads headers without requiring FluidSynth; does not certify sound quality or instrument identity."
+    )
+    def inspect_soundfont(self, soundfont_path: str) -> dict[str, Any]:
+        from .music import inspect_soundfont
+
+        return inspect_soundfont(soundfont_path, self.store.root)
+
+    @operation(
+        "Render a timed MusicScore offline with FluidSynth and a local SF2 SoundFont. Up to 15 tracks / 16384 notes; validates hit points, reading windows and instrumentation. Returns immutable 48 kHz stereo WAV and generation_report; attach separately with set_project_audio."
+    )
+    def create_music(
+        self, project_id: str, name: str, soundfont_path: str, score: MusicScore
+    ) -> dict[str, Any]:
+        from .music import render_music
+
+        self._audio_project(project_id, True)
+        if not name.strip() or len(name) > 120:
+            raise ChromaError("invalid_name", "Audio name needs 1..120 characters")
+        with tempfile.TemporaryDirectory(dir=self.store.root, prefix="music-create-") as temp:
+            path = Path(temp) / "created.wav"
+            report = render_music(path, soundfont_path, score)
+            result = self._save_audio(
+                project_id, name, path, {"source": "fluidsynth", "generation_report": report}
+            )
+            return {**result, "generation_report": report}
+
+    @operation(
         "Read project-specific local audio storage and production rules before creating sound. Returns absolute source/managed directories, format requirements and the attach-to-timeline workflow."
     )
     def get_audio_guidelines(self, project_id: str) -> dict[str, Any]:
+        from .audio_review import review_capabilities
         from .documentation import DOCUMENTS
+        from .music import music_environment
 
         self._audio_project(project_id)
         # Suggested authoring paths are not created by discovery. Only import/
@@ -447,6 +587,9 @@ class AudioOperations:
             "sample_format": "signed 32-bit little-endian integer PCM",
             "max_asset_seconds": MAX_SECONDS,
             "max_input_bytes": MAX_INPUT_BYTES,
+            "music": music_environment(),
+            # Discovery exposes the listening loop without starting model inference.
+            "model_review": review_capabilities(self.store),
             "documentation": DOCUMENTS["audio"],
         }
 

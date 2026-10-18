@@ -42,6 +42,9 @@
     "lg": "20px",
     "xl": "28px"
   },
+  "layers": {
+    "preview": 600
+  },
   "components": {
     "button": {
       "height": "34px",
@@ -117,6 +120,8 @@ Flat panels with fine borders. Modal dialogs alone use a restrained shadow and a
 6px controls and 8px preview frames. No ornamental pill cards.
 
 ## Components
+PreviewPanel in components.tsx owns the shared expanded-preview modal variant for native and animation viewers. “大屏查看” expands the same mounted media and playback controls to the viewport; “退出大屏” and Escape restore its inline layout and trigger focus. Keep the neutral image surround, existing Button/Notice/spacing/type roles, and contain the picture without cropping. In this variant the section itself provides modal focus containment, inert sibling branches and document scroll locking so opaque iframes and audio clocks are never reparented or remounted. Its header stays reachable on short/narrow screens; only the expanded viewer scrolls while open. The layers.preview extension generates --layer-preview through scripts/design_tokens.py; native Modal dialogs retain the browser top layer. Live WGSL and float-animation rasters fit 1280×720 landscape or 720×1280 portrait (square: 720×720), without upscaling small sources. SDR DOM previews rerender to the available viewport. Original color/alpha, source dimensions, rational time and final delivery settings remain separate from this viewing budget.
+
 MotionStorageEstimate owns the read-only disk budget inside animation export, below DeliveryDestination. Reuse section-heading, Button, Notice, specification-summary and the native technical-note disclosure. Show uncompressed EXR size separately from the destination budget and observed free space; separate volumes show workspace space independently. Existing palette/type/spacing tokens remain unchanged; regenerate/check tokens.css together. Keep loading/status geometry reserved, wrap narrow summary values, and never present compressed size as known.
 
 ProjectAudio owns one shared “项目音频” dialog for native and animation workspaces. Reuse Button, Field, Modal, Notice and native selects/file/audio controls. Two-column timing/gain fields collapse to one below 560px; bounded asset pages show five native audio players, without autoplay. The existing dark neutral palette, spacing, mono/sans typography and focus roles remain unchanged. Regenerate/check tokens.css from the unchanged frontmatter. Timeline editing is explicit and revision checked, separate from source audition. PreviewAudio owns synchronized saved-track monitoring for both live WGSL and animation previews, with a native 0–100% volume slider, speaker state icon and fixed-width percentage below playback. Zero means mute; the slider reuses existing focus and primary tokens and fits narrow previews. Keep shared Button retry actions and Notice errors. Use existing tokens; no palette or layout redesign.

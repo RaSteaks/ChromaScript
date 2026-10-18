@@ -1,0 +1,43 @@
+{
+  "project_id": "PROJECT_ID",
+  "name": "公式讲解四重奏-v001",
+  "soundfont_path": "/absolute/path/instruments.sf2",
+  "score": {
+    "duration_seconds": 8,
+    "gain_db": -6,
+    "fade_out_seconds": 1,
+    "constraints": {
+      "theme": "温和而清晰：钢琴提出主题，弦乐托住公式阅读，六秒处呼应镜头切换。",
+      "instrumentation": ["piano", "violin", "viola", "cello"],
+      "hit_points": [
+        {"label": "开场", "time_seconds": 0, "track_name": "piano"},
+        {"label": "镜头切换", "time_seconds": 6, "track_name": "piano"}
+      ],
+      "reading_windows": [
+        {"label": "公式阅读", "start_seconds": 2, "end_seconds": 5, "max_velocity": 56, "allow_note_onsets": false}
+      ]
+    },
+    "tracks": [
+      {
+        "name": "piano", "bank": 0, "program": 0, "volume": 90, "pan": -0.2,
+        "notes": [
+          {"pitch": 60, "start_seconds": 0, "duration_seconds": 0.7, "velocity": 68},
+          {"pitch": 64, "start_seconds": 0.8, "duration_seconds": 0.7, "velocity": 64},
+          {"pitch": 67, "start_seconds": 6, "duration_seconds": 0.8, "velocity": 70}
+        ]
+      },
+      {
+        "name": "violin", "bank": 0, "program": 40, "volume": 65, "pan": -0.45,
+        "notes": [{"pitch": 67, "start_seconds": 1.5, "duration_seconds": 4, "velocity": 48}]
+      },
+      {
+        "name": "viola", "bank": 0, "program": 41, "volume": 65, "pan": 0.1,
+        "notes": [{"pitch": 64, "start_seconds": 1.5, "duration_seconds": 4, "velocity": 48}]
+      },
+      {
+        "name": "cello", "bank": 0, "program": 42, "volume": 70, "pan": 0.4,
+        "notes": [{"pitch": 48, "start_seconds": 1.5, "duration_seconds": 4, "velocity": 52}]
+      }
+    ]
+  }
+}

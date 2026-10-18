@@ -21,6 +21,7 @@ from pydantic import ValidationError
 from .appearance import ColorAppearanceRequest, resolve_color
 from .artifacts import archive_members, artifact_path, stream_zip
 from .audio import AudioOperations, freeze_audio
+from .audio_review import AudioReviewOperations, review_capabilities
 from .color import color_info, transform, video_tag_issue
 from .desktop import choose_directory, directory_picker_available, open_directory
 from .encoding import available_encoders, pixel_format_info, probe
@@ -42,6 +43,7 @@ from .models import (
     SceneSpec,
 )
 from .motion import MotionOperations, motion_identity
+from .music import music_environment
 from .operations import catalogue, operation
 from .presets import FRAME_RATES, RESOLUTIONS, builtins
 from .preview import LivePreviewRequest, preview_image
@@ -49,9 +51,11 @@ from .store import Store, canonical, identifier, now
 from .templates import TEMPLATES, blank_scene, template_list
 
 
-class Service(MotionOperations, AudioOperations):
+class Service(MotionOperations, AudioOperations, AudioReviewOperations):
     def __init__(self, root: Path, export_roots: list[Path] | None = None):
         self.operation_lock = threading.RLock()
+        # Slow local listening reviews run independently of project editing/preview requests.
+        self.audio_review_lock = threading.Lock()
         self.store = Store(root)
         self.export_roots = [self.store.root, *[p.resolve() for p in export_roots or []]]
         self._renderer: Renderer | None = None
@@ -114,6 +118,9 @@ class Service(MotionOperations, AudioOperations):
                       "storage": "signed 32-bit PCM WAV", "max_asset_seconds": 600,
                       "max_input_bytes": 128 * 1024**2,
                       "waveforms": ["sine", "triangle", "noise"],
+                      # Discovery reports the real local runtime, without downloading instruments.
+                      "music": music_environment(),
+                      "model_review": review_capabilities(self.store),
                       "timeline": "project-wide; frozen by each delivery; web previews synchronize saved tracks",
                       "guidelines_operation": "chromascript.get_audio_guidelines",
                       "documentation_resource": "chromascript://docs/audio",

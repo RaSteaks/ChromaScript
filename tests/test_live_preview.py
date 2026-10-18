@@ -1,4 +1,4 @@
-"""Live proxies are bounded, revision-free and faithful to color/alpha/frame semantics."""
+"""720p proxies stay bounded, revision-free and faithful to color/alpha/frame semantics."""
 
 import base64
 import subprocess
@@ -30,11 +30,11 @@ def renderer():
 @pytest.mark.parametrize(
     "size, expected",
     [
-        ((7680, 4320), (480, 270)),
-        ((4320, 7680), (270, 480)),
-        ((8192, 8192), (480, 480)),
+        ((7680, 4320), (1280, 720)),
+        ((4320, 7680), (720, 1280)),
+        ((8192, 8192), (720, 720)),
         ((32, 16), (32, 16)),
-        ((8192, 16), (480, 16)),
+        ((8192, 16), (1280, 16)),
     ],
 )
 def test_preview_budget_and_rational_time(size, expected):
@@ -116,7 +116,7 @@ def test_preview_draft_never_writes_revisions_jobs_or_artifacts(tmp_path, render
     result = execute(service, "render_live_preview", args)
     assert result["transient"] and result["samples"] == 1 and result["frame"] == 12
     with Image.open(BytesIO(base64.b64decode(result["images"][0]["data"]))) as png:
-        assert png.size == (480, 270)
+        assert png.size == (1280, 720)
         expected = transform(
             np.array([[[-0.25, 12 * 1001 / 24000, 8.0, 0.375]]], np.float32), "sRGB"
         )

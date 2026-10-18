@@ -2198,6 +2198,68 @@ input[type="search"]::-webkit-search-cancel-button {
 .motion-preview-panel .technical-note {
   margin-top: var(--space-md);
 }
+/* One mounted media tree serves both inline and expanded viewing. Only its
+   containing geometry changes; preview clocks, audio and draft state survive. */
+.preview-panel,
+.preview-panel-content {
+  min-width: 0;
+}
+.preview-panel-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+}
+.preview-panel-toolbar > .preview-commandbar,
+.preview-panel-toolbar > .section-heading {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+}
+.preview-expand {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.preview-panel.is-expanded {
+  position: fixed;
+  inset: 0;
+  z-index: var(--layer-preview);
+  display: flex;
+  flex-direction: column;
+  padding: max(var(--space-md), env(safe-area-inset-top))
+    max(var(--space-md), env(safe-area-inset-right))
+    max(var(--space-md), env(safe-area-inset-bottom))
+    max(var(--space-md), env(safe-area-inset-left));
+  border: 0;
+  border-radius: 0;
+  background: var(--color-background);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.is-expanded > .preview-panel-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  flex-shrink: 0;
+  background: var(--color-background);
+}
+.is-expanded > .preview-panel-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.is-expanded > .preview-panel-content > * {
+  flex-shrink: 0;
+}
+.is-expanded .preview-stage,
+.is-expanded .motion-preview-surface {
+  flex: 1 0 180px;
+  min-height: 180px;
+  max-height: none;
+  aspect-ratio: auto;
+}
 .motion-spec-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

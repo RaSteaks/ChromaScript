@@ -1,0 +1,10 @@
+{
+  "project_id": "PROJECT_ID",
+  "asset_id": "ASSET_ID_FROM_CREATE_MUSIC",
+  "review": {
+    "start_seconds": 0,
+    "duration_seconds": 8,
+    "brief": "用于公式讲解动画。钢琴提出主题，弦乐承托阅读；2–5秒需要平静克制，6秒处呼应镜头切换。",
+    "focus": "实际听到的音色与配器层次、阅读区间的起音密度、动态变化以及结尾是否自然；无法确认的部分请明确说明。"
+  }
+}

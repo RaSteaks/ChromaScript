@@ -43,6 +43,12 @@ function Preview() {
     ref.addEventListener("play", play);
     ref.addEventListener("pause", pause);
     window.addEventListener("message", command);
+    // Preserve the shared viewer's Escape behavior while focus is in the sandbox.
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !event.isComposing)
+        send("exit-expanded-preview");
+    };
+    window.addEventListener("keydown", escape);
     // Report readiness after the first committed picture. Compile/runtime errors
     // leave the editor's previous successful iframe mounted and usable.
     // Hidden/offscreen iframes may suspend requestAnimationFrame. Readiness is
@@ -80,6 +86,7 @@ function Preview() {
       ref.removeEventListener("play", play);
       ref.removeEventListener("pause", pause);
       window.removeEventListener("message", command);
+      window.removeEventListener("keydown", escape);
     };
   }, []);
   return (

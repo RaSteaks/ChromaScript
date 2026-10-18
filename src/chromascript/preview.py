@@ -14,7 +14,8 @@ from pydantic import Field
 from .color import SDR_VIEW, transform
 from .models import Model, Rational, RenderSettings, SceneSpec
 
-PREVIEW_MAX_DIMENSION = 480
+PREVIEW_MAX_DIMENSION = 1280
+PREVIEW_SHORT_DIMENSION = 720
 
 
 class LivePreviewRequest(Model):
@@ -25,8 +26,12 @@ class LivePreviewRequest(Model):
     frame: int = Field(default=0, ge=0, le=10_000_000)
 
     def settings(self) -> RenderSettings:
-        # Bound work before GPU allocation, even if a client requests an 8K draft.
-        scale = min(1.0, PREVIEW_MAX_DIMENSION / max(self.width, self.height))
+        # Fit a landscape/portrait 720p raster without upscaling small sources.
+        # Bounding both edges also prevents square drafts exceeding the pixel budget.
+        scale = min(
+            1.0, PREVIEW_MAX_DIMENSION / max(self.width, self.height),
+            PREVIEW_SHORT_DIMENSION / min(self.width, self.height),
+        )
         return RenderSettings(
             width=max(16, round(self.width * scale)),
             height=max(16, round(self.height * scale)),
