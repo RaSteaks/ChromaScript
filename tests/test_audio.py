@@ -3,7 +3,6 @@
 import base64
 import wave
 from fractions import Fraction
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -184,11 +183,13 @@ def test_mux_audio_actual_streams(audio_project, tmp_path, preset_id):
     assert info["audio_verification"]["passed"]
 
 
+@pytest.mark.gpu
 def test_sequence_delivery_freezes_and_exports_audio(audio_project):
     service, project, asset = audio_project
     service.set_project_audio(project, "0", AudioTimeline(clips=[AudioClip(asset_id=asset["id"])]))
-    service._renderer = SimpleNamespace(info={"backend_type": "test"})
     scene = service.create_scene(project)["record"]["id"]
+    # This test runs the real worker, so submission must freeze the real adapter
+    # identity too; a fabricated submission backend would correctly be rejected.
     job = service.submit_delivery(
         scene, RenderSettings(width=16, height=16, frames=2, samples=1), ["exr-16-zip"], "audio-job"
     )["job"]

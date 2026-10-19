@@ -34,6 +34,101 @@ function material(fragmentShader, uniforms = {}) {
     toneMapped: false,
   });
 }
+
+const shaderAlphaGuards = new WeakMap();
+function opaqueFragment(source, glslVersion) {
+  // Wrap main rather than rewriting assignments: early returns still force opaque
+  // coverage, while discard still discards the fragment. RGB remains untouched.
+  const clean = source.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+  let output = "gl_FragColor";
+  if (glslVersion === THREE.GLSL3 || /^\s*#version\s+300\s+es/m.test(clean)) {
+    const outputs = [
+      ...clean.matchAll(
+        /(?:layout\s*\(([^)]*)\)\s*)?\bout\s+(?:(?:lowp|mediump|highp)\s+)?(\w+)\s+([^;{}]+);/g,
+      ),
+    ].filter((match) => {
+      // Function prototypes may also contain `out vec4`; only global variables
+      // name framebuffer outputs. Comments were removed before counting scopes.
+      let depth = 0;
+      for (const character of clean.slice(0, match.index)) {
+        if (character === "(" || character === "{") depth++;
+        if (character === ")" || character === "}") depth--;
+      }
+      return depth === 0;
+    });
+    const declaration = outputs[0];
+    if (
+      outputs.length !== 1 ||
+      declaration[2] !== "vec4" ||
+      !/^[A-Za-z_]\w*$/.test(declaration[3].trim()) ||
+      (declaration[1] &&
+        !declaration[1]
+          .split(",")
+          .every((value) => /^\s*(?:location|index)\s*=\s*0\s*$/.test(value)))
+    )
+      throw new Error(
+        "不透明 HDR 自定义着色器须有唯一 vec4 颜色输出；其他输出形式请使用 transparent:true 和 NormalBlending。",
+      );
+    output = declaration[3].trim();
+  }
+  // Raw shaders may own their #version directive, which must remain first.
+  const version =
+    source.match(
+      /^(?:(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n))*#version[^\n]*(?:\n|$)/,
+    )?.[0] || "";
+  return `${version}#define main chromascriptOpaqueMain\n${source.slice(version.length)}
+#undef main
+void main(){chromascriptOpaqueMain(); ${output}.a=1.0;}`;
+}
+
+function guardShaderAlpha(m) {
+  if (!m.isShaderMaterial) return;
+  const previous = shaderAlphaGuards.get(m);
+  if (
+    previous &&
+    m.onBeforeCompile === previous.compile &&
+    m.customProgramCacheKey === previous.key
+  ) {
+    // Three does not automatically invalidate a program when transparent changes.
+    if (previous.transparent !== m.transparent) {
+      previous.transparent = m.transparent;
+      m.needsUpdate = true;
+    }
+    return;
+  }
+  const originalCompile =
+    m.onBeforeCompile === previous?.compile
+      ? previous.originalCompile
+      : m.onBeforeCompile;
+  const originalKey =
+    m.customProgramCacheKey === previous?.key
+      ? previous.originalKey
+      : m.customProgramCacheKey;
+  const compile = function (shader, renderer) {
+    originalCompile.call(this, shader, renderer);
+    if (!this.transparent)
+      shader.fragmentShader = opaqueFragment(
+        shader.fragmentShader,
+        this.glslVersion,
+      );
+  };
+  const key = function () {
+    return `${originalKey.call(this)}:${originalCompile.toString()}:chroma-alpha-${this.transparent}`;
+  };
+  shaderAlphaGuards.set(m, {
+    compile,
+    key,
+    originalCompile,
+    originalKey,
+    transparent: m.transparent,
+  });
+  m.onBeforeCompile = compile;
+  m.customProgramCacheKey = key;
+  // Only the compiled copy is wrapped; authored source, draw ordering and depth
+  // behavior stay intact. Normal transparent blending associates RGB as before.
+  m.needsUpdate = true;
+}
+
 function main() {
   const renderer = new THREE.WebGLRenderer({
     alpha: true,
@@ -199,7 +294,7 @@ function main() {
         if (!m) continue;
         if (
           m.blending !== THREE.NormalBlending &&
-          m.blending !== THREE.NoBlending
+          (m.transparent || m.blending !== THREE.NoBlending)
         )
           throw new Error(
             "HDR 母版要求 NormalBlending 或不透明材质；不支持自定义 Alpha 混合。",
@@ -208,6 +303,7 @@ function main() {
           throw new Error(
             "半透明材质必须启用 transparent，以保持线性预乘 Alpha 契约。",
           );
+        guardShaderAlpha(m);
       }
     });
     renderer.setRenderTarget(target);

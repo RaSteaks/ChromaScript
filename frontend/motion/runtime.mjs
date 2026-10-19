@@ -210,6 +210,15 @@ main().catch(async (error) => {
       color: false,
     });
     process.stderr.write(messages.join("\n"));
-  } else process.stderr.write(String(error.stack || error));
+  } else {
+    // Puppeteer embeds the whole bundled page in data-URL stack locations. Keep
+    // the message/frames readable so Python's bounded log tail retains the cause.
+    process.stderr.write(
+      String(error.stack || error).replace(
+        /data:text\/html;base64,[A-Za-z0-9+/=]+/g,
+        "data:text/html;base64,[inline scene]",
+      ),
+    );
+  }
   process.exitCode = 1;
 });

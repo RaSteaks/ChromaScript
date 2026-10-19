@@ -136,6 +136,8 @@ MCP 使用 `chromascript.estimate_motion_render`，CLI 使用同名操作：
 
 所有新视频必须使用能准确标记色域和传递函数的组合。默认 SDR 为 Rec.709 色域 / sRGB，HDR 为 Rec.2020 / PQ 或 HLG；通用交付也保留受支持的 P3-D65 和 Gamma 2.2。纯 Gamma 2.4/2.6 及 AP1/ACEScct 没有精确的标准视频标签，不能通过备注或错误套用 BT.709 标签发布；这些旧视频组合禁用，EXR 与有原生数字 Gamma 字段的 DPX 不受影响。回读验证码流的 primaries、transfer、matrix、range，MOV/MP4 还核对实际 colr 字段；报告、CLI 和 MCP 使用同一规则。
 
+HLG 高饱和高光可能产生大于 1 的编码值。Limited YCbCr 交付以 32-bit float RGB 送入矩阵／范围转换，保留窄范围允许的超白，不在 RGB 阶段裁切；Alpha 独立处理。Full／RGB 整数输出遇到无法表示的 HLG 超白会明确拒绝，请改用 Limited YCbCr；超出窄范围实际码位的信号同样拒绝。HDR 4:2:0 按 BT.2100 使用 top-left 色度共址，并核对原生位置标记。视频交付还须完整严格解码，解码错误即使不改变帧数也不能通过验证；报告以 `decode_verified` 单独记录结果。
+
 Three.js 接受 sRGB 编码颜色（如 Hex/CSS），转换后在默认线性 Rec.709/D65 中计算；线性并不等于 SDR 或 0–1。当前宿主固定这一工作空间再由 OCIO 转为 ACEScg，禁止源码修改全局工作空间而破坏解释。其他色域/Log/PQ 输入需先正确转换，不能只改标签。
 
 ## 安装方法
@@ -160,6 +162,8 @@ cd /absolute/path/ChromaScript
 制作动画时，点击顶部“动画代码”，选择 SDR 网页或浮点渲染类型，点击“新建空白动画”；“示例模板（可选）”中保留文字、几何、光能等起点。修改 TypeScript 后自动预览；保存后选择“保留 EXR 母版”或“仅视频”。保留母版时可选 16-bit Half 或 32-bit Float，并可另输出视频；仅视频时选择 PQ、HLG 或 sRGB，点击“导出动画”。EXR 保留直通 Alpha，视频在场景线性空间合成黑底。视频要求偶数宽高及相应本机编码器（HDR 用 libx265，sRGB 用 libx264）；EXR 可使用奇数尺寸。浏览器预览始终为 sRGB SDR，不作为 HDR 亮度参考。
 
 HDR 浮点代码的外部包仅允许 `three`，默认导出同步 `createScene({width,height,frames,fps,frameRate})`，返回 `{scene,camera,update({frame,time,fps,width,height})}`。工厂与 update 另提供 `rasterWidth/rasterHeight` 表示实际采样尺寸；使用 `gl_FragCoord` 的 shader 应用它们归一化坐标，布局仍使用逻辑 width/height。每帧直接设置状态，时间为 `frame × 帧率分母 / 分子`。Three 数值颜色采用线性 Rec.709/D65，允许超过 1；交由宿主转换为 ACEScg/AP1。材质不得烘焙 tone mapping 或显示编码。透明材质使用 NormalBlending，输出小于 1 的 Alpha 时必须启用 transparent。允许导入同一动画的分章模块；禁止网络素材及宿主文件导入，代码只在隔离浏览器运行。
+
+不透明自定义 shader 的实际覆盖率固定为 1，宿主只调整编译副本，不改变保存的源码和 RGB。需要半透明时使用 `transparent:true` 与 `NormalBlending`；透明材质的 `NoBlending` 会被拒绝。不透明 GLSL3 自定义 shader 需要唯一可识别的 vec4 颜色输出。透明自定义 shader 默认 `premultipliedAlpha:false`，应输出非预乘 RGB，由混合阶段乘以 Alpha；若设置 `premultipliedAlpha:true`，作者必须输出已经乘过 Alpha 的 RGB，宿主不会自动判断或修正不一致的声明。Three 内置材质保留其原有预乘处理。
 
 单场景支持多个分章文件联合渲染。在“源码文件”中切换入口与分章，用“添加分章文件”拆分长动画；入口通过 `import ... from "./chapters/intro"` 引用分章并安排时间。浮点场景共享同一 scene/camera，SDR 可用 Remotion `Sequence` 组织各章。全部文件一起预览、保存、检查修订冲突并冻结到渲染任务，交付中附带完整 `sources/` 源码树。CLI/MCP 的 `MotionSpec` 新增可选 `files: {相对路径: 源码}`，旧 `code` 仍是入口；参见 [多文件示例与调用方式](examples/motion-chapters/README.md)。
 
@@ -211,6 +215,8 @@ MCP 自动启动的网页固定使用 [http://127.0.0.1:8765](http://127.0.0.1:8
 **渲染中断后如何继续？**
 
 运行 `.venv/bin/chromascript resume <job-id>`，将 `<job-id>` 替换为任务 ID。MCP 断开不会停止后台任务；依赖或数值实现变化导致恢复被拒绝时，需重新提交任务。
+
+恢复还会核对实际 worker GPU 与提交时冻结的后端身份；后端变化时不复用旧母版。编码和封装处理代码也属于运行时指纹，相关实现更新后须重新提交旧任务。
 
 **如何更改数据或导出目录？**
 

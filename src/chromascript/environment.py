@@ -12,8 +12,10 @@ PACKAGES = ("numpy", "wgpu", "opencolorio", "OpenImageIO", "mcp", "fastapi", "py
 def runtime_identity() -> dict:
     versions = {name: importlib.metadata.version(name) for name in PACKAGES}
     digest = hashlib.sha256()
-    # Numerical modules are included; UI and transport-only edits do not invalidate frames.
-    for name in ("gpu.py", "color.py", "images.py", "models.py"):
+    # Freeze both master generation and delivery processing: chroma sampling,
+    # alpha flattening and encoder changes must not resume under an old identity.
+    # UI and transport-only edits still leave numerical jobs unchanged.
+    for name in ("gpu.py", "color.py", "images.py", "models.py", "encoding.py", "worker.py"):
         digest.update(name.encode())
         digest.update(Path(__file__).with_name(name).read_bytes())
     return {

@@ -117,6 +117,14 @@ def run(root: Path, job_id: str) -> None:
             raise ChromaError("snapshot_corrupt", "Job snapshot checksum mismatch")
         progress("compiling", 0)
         renderer = Renderer()
+        # The worker can select a different adapter from the submitting daemon
+        # or a previous attempt. Refuse drift before reading any cached masters;
+        # their hashes prove file integrity, not which GPU generated the pixels.
+        if renderer.info != snapshot.get("gpu_backend"):
+            raise ChromaError(
+                "gpu_changed", "Frozen GPU backend differs from the worker; submit a new job",
+                expected=snapshot.get("gpu_backend"), actual=renderer.info,
+            )
         renderer.validate(scene)
         source_path = directory / "scene-snapshot.json"
         atomic_json(source_path, snapshot)

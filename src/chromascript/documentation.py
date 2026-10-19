@@ -21,7 +21,11 @@ DOCUMENTS = {
         "owns WebGL and RGBA32F targets. Three numeric RGB is scene-linear Rec.709/D65, not "
         "encoded sRGB or AP1; use values above 1 for radiance. No tone mapping/output encoding "
         "in materials. NormalBlending only for transparency; fractional-alpha shaders must set "
-        "transparent=true. The host unassociates linear RGB and converts through pinned OCIO "
+        "transparent=true. Opaque custom shaders have coverage fixed to one in the compiled copy. "
+        # Keep the author-facing contract identical across browser, CLI and MCP.
+        "Transparent custom shaders output straight RGB with premultipliedAlpha=false (default); "
+        "premultipliedAlpha=true explicitly requires already-associated RGB from the author. "
+        "Built-in Three materials retain their own premultiplication. The host unassociates linear RGB and converts through pinned OCIO "
         "to ACEScg/AP1; alpha never enters OCIO. No DOM, CSS, SVG screenshot, remote asset or "
         "Node/file import. GPU capability is actually tested with negative, high and non-half "
         "float values; unsupported float readback fails rather than silently downgrading. "
@@ -159,7 +163,12 @@ DOCUMENTS["delivery"] += (
     "requires exact native gamut and transfer identifiers. Pure Gamma 2.4/2.6 and AP1/ACEScct video are "
     "disabled, including MOV, legacy preset and direct encoder calls. Comments are not a substitute. "
     "Use sRGB, Gamma 2.2, PQ or HLG where supported, or scene-referred EXR masters. "
-    "Missing or inconsistent stream tags or MOV/MP4 colr makes native_color_tags_verified false and blocks publication."
+    "Missing or inconsistent stream tags or MOV/MP4 colr makes native_color_tags_verified false and blocks publication. "
+    # Numerical headroom and error-free decoding are distinct from correct tags.
+    "HLG Limited YCbCr keeps float RGB through matrix/range conversion to preserve super-whites; "
+    "Full/RGB integer delivery rejects HLG values outside 0..1, and narrow delivery rejects values "
+    "outside its representable video codes. HDR 4:2:0 uses top-left chroma co-siting in pixels and tags. "
+    "Video delivery requires a complete strict decode; decode_verified is separate from metadata inspection."
 )
 
 # Audio is authored outside visual code, then frozen with each delivery. Browser

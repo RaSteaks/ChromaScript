@@ -62,6 +62,54 @@ def _encoding_declaration(preset: DeliveryPreset) -> dict[str, str] | None:
     return None
 
 
+def _hdr_chroma_location(preset: DeliveryPreset) -> str | None:
+    # BT.2100's 4:2:0 lattice is co-sited at the top-left luma sample.
+    # The resampler and the encoder must describe the same physical positions.
+    return "topleft" if (
+        OUTPUT_ENCODINGS[preset.color.output][1] in {"st2084", "hlg"}
+        and "420" in preset.pixel_format
+    ) else None
+
+
+def _hlg_float_input(preset: DeliveryPreset) -> bool:
+    # Narrow YCbCr has headroom above nominal white. Full-range integer RGB/YUV
+    # cannot promise that headroom; those outputs reject unrepresentable HLG.
+    return preset.color.output == "HLG" and preset.data_range == "limited" and not (
+        preset.pixel_format.startswith(("gbr", "rgb", "bgr"))
+    )
+
+
+def _validate_hlg_storage(frame: NDArray[np.float32], preset: DeliveryPreset) -> None:
+    """Reject unrepresentable HLG instead of silently changing its color volume."""
+    rgb = frame[..., :3]
+    if not _hlg_float_input(preset):
+        # Allow only floating-point roundoff around black/white for integer Full.
+        if np.min(rgb) < -1e-6 or np.max(rgb) > 1 + 1e-6:
+            raise ChromaError(
+                "hlg_storage_range",
+                "HLG 超白超出 Full/RGB 整数输出范围；请选择 Limited YCbCr 输出以保留高光。",
+            )
+        return
+    # Test the actual BT.2020 NCL components, not RGB against nominal 0..1.
+    # BT.2100 narrow 10-bit permits codes 4..1019 (scaled for other depths),
+    # including the overshoots needed by saturated 1000-nit HLG colors.
+    scale = 2 ** (preset.bit_depth - 8)
+    maximum = (1 << preset.bit_depth) - scale - 1
+    luma = rgb[..., 0] * 0.2627 + rgb[..., 1] * 0.6780 + rgb[..., 2] * 0.0593
+    for component in ("Y", "Cb", "Cr"):
+        signal = luma if component == "Y" else (
+            (rgb[..., 2] - luma) / 1.8814 if component == "Cb"
+            else (rgb[..., 0] - luma) / 1.4746
+        )
+        codes = np.rint((signal * (219 if component == "Y" else 224)
+                         + (16 if component == "Y" else 128)) * scale)
+        if np.min(codes) < scale or np.max(codes) > maximum:
+            raise ChromaError(
+                "hlg_storage_range", "HLG 信号超出所选位深的窄范围超白存储范围，请调整画面。",
+                component=component, minimum=int(np.min(codes)), maximum=int(np.max(codes)),
+            )
+
+
 def _boxes(stream: BinaryIO, start: int, end: int) -> Iterator[tuple[bytes, int, int]]:
     """Walk bounded box headers, skipping media payloads even for large exports."""
     while start + 8 <= end:
@@ -137,14 +185,38 @@ def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path)
     pixel = preset.pixel_format
     rgb = pixel.startswith(("gbr", "rgb", "bgr"))
     alpha = preset.alpha
+    chroma_location = _hdr_chroma_location(preset)
+    floating = _hlg_float_input(preset)
     if rgb:
         video_filter = f"format={pixel}"
     else:
         source_format = "gbrap16le" if alpha else "gbrp16le"
-        video_filter = (
-            f"format={source_format},zscale=matrixin=gbr:matrix={color_tags['zscale_matrix']}:"
-            f"rangein=full:range={preset.data_range}:dither=error_diffusion,format={pixel}"
+        conversion = (
+            f"zscale=matrixin=gbr:matrix={color_tags['zscale_matrix']}:"
+            f"rangein=full:range={preset.data_range}:dither=error_diffusion"
+            + (f":chromal={chroma_location}" if chroma_location else "")
         )
+        if floating and alpha:
+            # Dropping float Alpha via format/swscale clips RGB super-whites.
+            # Rewire RGB planes without conversion, process coverage separately,
+            # then merge individual planes (alphamerge would reduce to 8 bits).
+            color_pixel = pixel.replace("yuva", "yuv", 1)
+            alpha_depth = pixel_format_info(pixel)["components"][3]["bit_depth"]
+            gray = "gray" if alpha_depth == 8 else f"gray{alpha_depth}le"
+            video_filter = (
+                "split[rgbin][ain];[rgbin]"
+                "mergeplanes=map0p=0:map1p=1:map2p=2:format=gbrpf32le,"
+                f"{conversion},format={color_pixel},extractplanes=y+u+v[y][u][v];"
+                f"[ain]alphaextract,format={gray}[a];[y][u][v][a]"
+                f"mergeplanes=map0s=0:map1s=1:map2s=2:map3s=3:format={pixel}"
+            )
+        else:
+            # Keep HLG floating point until matrix/range conversion and final
+            # codec quantization. An integer RGB intermediate would clip >1.
+            video_filter = (
+                ("" if floating else f"format={source_format},")
+                + f"{conversion},format={pixel}"
+            )
     # Frame metadata from filters takes precedence over encoder defaults. Stamp the
     # already-rendered transfer/primaries on frames without applying another curve.
     video_filter += (
@@ -162,7 +234,7 @@ def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path)
         "-f",
         "rawvideo",
         "-pixel_format",
-        "rgba64le",
+        ("gbrapf32le" if alpha else "gbrpf32le") if floating else "rgba64le",
         "-video_size",
         f"{settings.width}x{settings.height}",
         "-framerate",
@@ -208,6 +280,8 @@ def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path)
         "-color_range",
         "pc" if preset.data_range == "full" else "tv",
     ]
+    if chroma_location:
+        args += ["-chroma_sample_location", chroma_location]
     if preset.container in {"mov", "mp4"}:
         # QuickTime forbids relying on gama alongside colr: compliant readers
         # ignore gama in that combination. Never emit it as a gamma certificate.
@@ -258,6 +332,7 @@ def encode(
                 if (
                     frame.shape != (settings.height, settings.width, 4)
                     or not np.isfinite(frame).all()
+                    or np.any((frame[..., 3] < 0) | (frame[..., 3] > 1))
                 ):
                     raise ChromaError("encoder_input", "Invalid frame delivered to encoder")
                 if preset.color.output == "ACEScct" and (
@@ -267,9 +342,16 @@ def encode(
                         "log_storage_range",
                         "ACEScct code values exceed integer storage; choose float EXR to preserve them.",
                     )
-                # Quantization occurs after the ACES output transform, preserving 16-bit
-                # encoder input. Lossy output precision is reported separately.
-                pixels = np.rint(np.clip(frame, 0, 1) * 65535).astype("<u2")
+                if preset.color.output == "HLG":
+                    _validate_hlg_storage(frame, preset)
+                if _hlg_float_input(preset):
+                    # FFmpeg planar GBR(A) is G, B, R, then coverage. Preserve
+                    # HLG overshoots; Alpha never enters the color/range transform.
+                    channels = [1, 2, 0, 3] if preset.alpha else [1, 2, 0]
+                    pixels = np.ascontiguousarray(frame[..., channels].transpose(2, 0, 1), dtype="<f4")
+                else:
+                    # SDR/PQ retain the established 16-bit display RGB transport.
+                    pixels = np.rint(np.clip(frame, 0, 1) * 65535).astype("<u2")
                 process.stdin.write(pixels.tobytes())
                 count += 1
                 progress(count)
@@ -355,6 +437,40 @@ def decode_audio_evidence(path: Path) -> dict[str, Any]:
     return {"decoded_samples": count // 8, "decoded_peak": peak / 2**31}
 
 
+def strict_video_decode_evidence(path: Path) -> dict[str, Any]:
+    """Fully decode the first video stream without accepting concealed bitstream errors."""
+    executable = shutil.which("ffmpeg")
+    if not executable:
+        raise ChromaError("ffmpeg_unavailable", "ffmpeg is required for strict video verification")
+    # A damaged stream can retain its advertised properties and frame count while
+    # FFmpeg conceals missing references. Abort on decoder errors and discard frame
+    # payloads; spill diagnostics to disk so malformed input cannot grow RAM usage.
+    # Full decoding has no duration-independent timeout: valid long deliveries may
+    # take longer than a metadata probe, especially for high-resolution intra codecs.
+    with tempfile.TemporaryFile() as errors:
+        result = subprocess.run(
+            [
+                executable, "-v", "error", "-nostdin", "-xerror",
+                "-abort_on", "empty_output", "-err_detect", "explode",
+                "-i", str(path), "-map", "0:v:0", "-an", "-sn", "-dn",
+                "-fps_mode", "passthrough", "-f", "null", "-",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=errors,
+        )
+        error_bytes = errors.tell()
+        errors.seek(max(0, error_bytes - 4000))
+        diagnostic = errors.read(4000).decode(errors="replace")
+        if result.returncode or error_bytes:
+            raise ChromaError(
+                "video_decode_verification",
+                "Video stream did not fully decode without errors",
+                diagnostic=diagnostic,
+                return_code=result.returncode,
+            )
+    return {"passed": True, "complete": True, "method": "ffmpeg-strict-full-decode", "stream": "0:v:0"}
+
+
 def probe(path: Path, count_frames: bool = True) -> dict[str, Any]:
     executable = shutil.which("ffprobe")
     if not executable:
@@ -362,10 +478,25 @@ def probe(path: Path, count_frames: bool = True) -> dict[str, Any]:
     args = [executable, "-v", "error", "-show_streams", "-show_format", "-of", "json"]
     if count_frames:
         args += ["-count_frames"]
-    result = subprocess.run([*args, str(path)], capture_output=True, text=True, timeout=180)
-    if result.returncode:
-        raise ChromaError("probe_failed", result.stderr[-4000:])
+    # FFprobe may emit decoder errors yet return zero after error concealment.
+    # Preserve the exact counted-frame metadata, but fail closed on its error log.
+    # Counting decodes the whole file, so only the metadata-only path has a fixed
+    # timeout. Diagnostics use a temporary file and a bounded excerpt in errors.
+    with tempfile.TemporaryFile() as errors:
+        result = subprocess.run(
+            [*args, str(path)], stdout=subprocess.PIPE, stderr=errors,
+            text=True, timeout=None if count_frames else 180,
+        )
+        error_bytes = errors.tell()
+        errors.seek(max(0, error_bytes - 4000))
+        diagnostic = errors.read(4000).decode(errors="replace")
+        if result.returncode or error_bytes:
+            raise ChromaError("probe_failed", diagnostic or "ffprobe failed", return_code=result.returncode)
     info = json.loads(result.stdout)
+    # Audio callers share this metadata helper. Strict video evidence is only
+    # added for an actual video stream and never for count_frames=False inspection.
+    if count_frames and any(stream.get("codec_type") == "video" for stream in info["streams"]):
+        info["video_decode_verification"] = strict_video_decode_evidence(path)
     if path.suffix.lower() in {".mov", ".mp4"}:
         info["container_color"] = quicktime_color_metadata(path)
     return info
@@ -380,6 +511,19 @@ def check_probe(
     if not video:
         raise ChromaError("delivery_verification", "Output has no video stream")
     issues = []
+    # Stream headers and a counted frame total cannot prove error-free decode.
+    # Metadata-only inspection must never certify a delivery as fully verified.
+    decode = info.get("video_decode_verification", {})
+    decode_verified = (
+        decode.get("passed") is True and decode.get("complete") is True
+        and decode.get("method") == "ffmpeg-strict-full-decode"
+        and decode.get("stream") == "0:v:0"
+    )
+    if not decode_verified:
+        issues.append("missing or incomplete strict video decode verification")
+    if location := _hdr_chroma_location(preset):
+        if video.get("chroma_location") != location:
+            issues.append(f"chroma location mismatch: expected {location}, got {video.get('chroma_location')}")
     if issue := video_tag_issue(preset.color.output, preset.container):
         issues.append(issue)
     expected_codec = {"libx264": "h264", "libx265": "hevc", "prores_ks": "prores"}.get(
@@ -527,11 +671,14 @@ def check_probe(
     return {
         "passed": not issues,
         "issues": issues,
+        "decode_verified": decode_verified,
+        "video_decode_verification": decode,
         "video": video,
         "frame_rate_source": rate_source,
         "verified_frame_rate": str(actual_rate) if actual_rate is not None else None,
         "render_precision": "float32",
-        "encoder_input_precision": "16-bit RGB",
+        "encoder_input_precision": "32-bit float RGB" if _hlg_float_input(preset) else "16-bit RGB",
+        "hlg_extended_range": _hlg_float_input(preset),
         "codec_input_precision": f"{preset.bit_depth}-bit",
         "decoded_storage_precision": f"{actual_depth}-bit",
         "range_signaling": "codec convention" if implicit_range else "explicit",
