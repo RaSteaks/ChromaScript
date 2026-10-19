@@ -754,11 +754,6 @@ export function MotionWorkbench({
             预览；按源类型选择母版与视频输出。
           </p>
         </div>
-        <ProjectAudio
-          key={projectId}
-          projectId={projectId}
-          disabled={!!pending}
-        />
         <span className={"save-state " + (dirty ? "unsaved" : "")}>
           {dirty
             ? "未保存"
@@ -777,44 +772,52 @@ export function MotionWorkbench({
             : status}
       </div>
       <div className="motion-library">
-        <Field label="动画项目" id="motion-project">
-          <select
-            id="motion-project"
-            disabled={!!pending || projectLoad === "loading"}
-            value={projectId}
-            onChange={(event) => {
-              const id = event.target.value;
-              // Native and programmatic selection can reselect the current value;
-              // clearing its list would not trigger a new project-dependent fetch.
-              if (id === projectId) return;
-              guard("切换项目", () => {
-                savedRef.current = null;
-                draftRef.current = null;
-                setProjectId(id);
-                setSaved(null);
-                setDraft(null);
-                setScenes([]);
-                setScenePage(0);
-                setJobPage(0);
-                setJobId("");
-                setJob(null);
-                setHistory([]);
-                setArtifacts([]);
-              });
-            }}
-          >
-            <option value="" disabled>
-              {projectLoad === "failed" && !projects.length
-                ? "项目列表暂不可用，请重试"
-                : "选择项目"}
-            </option>
-            {projects.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.name}
+        {/* Audio belongs to the project, so keep its action beside that picker. */}
+        <div className="motion-project-controls">
+          <Field label="动画项目" id="motion-project">
+            <select
+              id="motion-project"
+              disabled={!!pending || projectLoad === "loading"}
+              value={projectId}
+              onChange={(event) => {
+                const id = event.target.value;
+                // Native and programmatic selection can reselect the current value;
+                // clearing its list would not trigger a new project-dependent fetch.
+                if (id === projectId) return;
+                guard("切换项目", () => {
+                  savedRef.current = null;
+                  draftRef.current = null;
+                  setProjectId(id);
+                  setSaved(null);
+                  setDraft(null);
+                  setScenes([]);
+                  setScenePage(0);
+                  setJobPage(0);
+                  setJobId("");
+                  setJob(null);
+                  setHistory([]);
+                  setArtifacts([]);
+                });
+              }}
+            >
+              <option value="" disabled>
+                {projectLoad === "failed" && !projects.length
+                  ? "项目列表暂不可用，请重试"
+                  : "选择项目"}
               </option>
-            ))}
-          </select>
-        </Field>
+              {projects.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <ProjectAudio
+            key={projectId}
+            projectId={projectId}
+            disabled={!!pending}
+          />
+        </div>
         <Field label="已保存的动画" id="motion-scene">
           <select
             id="motion-scene"
