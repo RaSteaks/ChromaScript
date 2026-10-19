@@ -306,6 +306,9 @@ def motion_identity() -> dict[str, Any]:
         Path(__file__).with_name("motion_sources.py"),
         Path(__file__).with_name("motion_color.py"),
         Path(__file__).with_name("models.py"),
+        # Workers resolve video presets at execution time. A preset change must
+        # reject queued/retried jobs rather than silently change frozen delivery.
+        Path(__file__).with_name("presets.py"),
         Path(__file__).with_name("color.py"),
         FRONTEND / "package-lock.json",
         Path(__file__),

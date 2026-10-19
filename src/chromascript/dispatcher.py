@@ -61,16 +61,26 @@ class Dispatcher:
             if alive:
                 running = True
             else:
-                self.store.update(
-                    "job",
-                    job["id"],
-                    lambda j: {
+                # The worker may finish after list() but before this transaction.
+                # Only interrupt the same still-running process we actually checked.
+                def interrupt_if_current(
+                    j: dict[str, Any], observed: dict[str, Any] = job
+                ) -> dict[str, Any]:
+                    if (
+                        j["status"] != "running"
+                        or j.get("pid") != observed.get("pid")
+                        or j.get("process_started") != observed.get("process_started")
+                    ):
+                        return j
+                    return {
                         **j,
                         "status": "interrupted",
                         "stage": "interrupted",
                         "updated_at": now(),
-                    },
-                )
+                    }
+
+                current = self.store.update("job", job["id"], interrupt_if_current)
+                running = running or current["status"] == "running"
         if running:
             return
         queued = [j for j in reversed(self.store.list("job")) if j["status"] == "queued"]

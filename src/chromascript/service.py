@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -20,7 +21,7 @@ from pydantic import ValidationError
 
 from .appearance import ColorAppearanceRequest, resolve_color
 from .artifacts import archive_members, artifact_path, stream_zip
-from .audio import AudioOperations, freeze_audio
+from .audio import AudioOperations, AudioTimeline, freeze_audio
 from .audio_review import AudioReviewOperations, review_capabilities
 from .color import color_info, transform, video_tag_issue
 from .desktop import choose_directory, directory_picker_available, open_directory
@@ -30,8 +31,9 @@ from .errors import ChromaError
 from .exports import bundle_name
 from .exports import export_directory as resolve_export_directory
 from .gpu import Renderer
-from .images import read_image
+from .images import file_hash, read_image
 from .models import (
+    Artifact,
     ColorPipeline,
     DeliveryConfiguration,
     DeliveryPreset,
@@ -241,16 +243,139 @@ class Service(MotionOperations, AudioOperations, AudioReviewOperations):
 
         return {"project": self.store.update("project", project_id, change)}
 
-    @operation("Clone current scene revisions into a new project, without render files.")
+    @operation(
+        "Clone current WGSL/animation scenes, audio assets and timeline into a new project, without render jobs or revision history."
+    )
     def clone_project(self, project_id: str, name: str) -> dict[str, Any]:
         original = self.project(project_id)
-        clone = self.create_project(name, original["description"])["project"]
-        for s in self.store.list("scene"):
-            if s["project_id"] == project_id:
-                self.create_scene(clone["id"], spec=self.scene(s["id"])[1])
-        # Clone the effective legacy default too, rather than adopting the new default.
-        self.store.put("pipeline", clone["id"], self.get_project(project_id)["color_pipeline"])
-        return self.get_project(clone["id"])
+        if not name.strip() or len(name) > 120:
+            raise ChromaError("invalid_name", "Project name needs 1..120 characters")
+        stamp, pid = now(), identifier()
+        clone = Project(
+            id=pid, name=name, description=original["description"], created_at=stamp, updated_at=stamp
+        )
+        rows = [
+            ("project", pid, canonical(clone.model_dump())),
+            ("pipeline", pid, canonical(self.get_project(project_id)["color_pipeline"])),
+        ]
+        # Clone only current source revisions. Review attestations belong to the
+        # original revision, and render jobs/artifacts must not move to a new owner.
+        for kind, history in (("scene", "revision"), ("motion_scene", "motion_revision")):
+            for scene in self.store.list(kind):
+                if scene["project_id"] != project_id:
+                    continue
+                _, spec, _ = (
+                    self.scene(scene["id"]) if kind == "scene" else self._motion_scene(scene["id"])
+                )
+                sid, rid = identifier(), identifier()
+                rows.extend(
+                    [
+                        (
+                            kind,
+                            sid,
+                            canonical(
+                                {
+                                    "id": sid,
+                                    "project_id": pid,
+                                    "name": spec.name,
+                                    "revision_id": rid,
+                                    "updated_at": stamp,
+                                }
+                            ),
+                        ),
+                        (
+                            history,
+                            rid,
+                            canonical(
+                                {
+                                    "id": rid,
+                                    "scene_id": sid,
+                                    "project_id": pid,
+                                    "parent_revision_id": None,
+                                    "scene": spec.model_dump(),
+                                    "created_at": stamp,
+                                }
+                            ),
+                        ),
+                    ]
+                )
+        audio = self.get_project_audio(project_id)
+        asset_ids: dict[str, str] = {}
+        copied: list[Path] = []
+        try:
+            for asset in audio["assets"]:
+                aid = identifier()
+                target = self.store.file(f"audio/{aid}.wav")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                # Independent bytes prevent either project from losing its sources
+                # when the other's files change. Verify the copy against saved content.
+                with (
+                    self.store.file(asset["relative_path"]).open("rb") as src,
+                    target.open("xb") as dst,
+                ):
+                    copied.append(target)
+                    shutil.copyfileobj(src, dst)
+                if file_hash(target) != asset["sha256"]:
+                    raise ChromaError(
+                        "audio_asset_changed",
+                        "Audio source changed; cannot clone project",
+                        asset_id=asset["id"],
+                    )
+                cloned = {
+                    **copy.deepcopy(asset),
+                    "id": aid,
+                    "project_id": pid,
+                    "relative_path": str(target.relative_to(self.store.root)),
+                    "created_at": stamp,
+                }
+                artifact = Artifact(
+                    id=aid,
+                    project_id=pid,
+                    job_id="",
+                    name=asset["name"],
+                    kind="audio-source",
+                    relative_path=cloned["relative_path"],
+                    mime_type="audio/wav",
+                    size_bytes=target.stat().st_size,
+                    created_at=stamp,
+                    metadata=cloned,
+                )
+                rows.extend(
+                    [
+                        ("audio_asset", aid, canonical(cloned)),
+                        ("artifact", aid, canonical(artifact.model_dump())),
+                    ]
+                )
+                asset_ids[asset["id"]] = aid
+            timeline = AudioTimeline.model_validate(audio["timeline"])
+            for clip in timeline.clips:
+                clip.asset_id = asset_ids[clip.asset_id]
+            rows.append(
+                (
+                    "audio_timeline",
+                    pid,
+                    canonical(
+                        {
+                            "project_id": pid,
+                            "revision_id": identifier(),
+                            "timeline": timeline.model_dump(),
+                        }
+                    ),
+                )
+            )
+            # Publish all cloned records together; failures leave no partial project
+            # or orphaned audio copies, and never delete or move original files.
+            with self.store.connect() as connection:
+                connection.executemany("INSERT INTO records VALUES (?,?,?)", rows)
+        except Exception as exc:
+            for path in copied:
+                path.unlink(missing_ok=True)
+            if isinstance(exc, (OSError, KeyError)):
+                raise ChromaError(
+                    "project_clone_failed", "Project copy failed; check audio sources and disk space"
+                ) from exc
+            raise
+        return self.get_project(pid)
 
     @operation("Archive or restore a project after active jobs finish or are cancelled.")
     def archive_project(self, project_id: str, archived: bool = True) -> dict[str, Any]:

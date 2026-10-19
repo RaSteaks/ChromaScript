@@ -29,6 +29,7 @@ import {
   Workflow,
 } from "lucide-react";
 import { artifactUrl, call, connect } from "./api";
+import { loadProjects } from "./projects";
 import { PreviewAudio, type PreviewAudioHandle } from "./PreviewAudio";
 import { ProjectAudio } from "./ProjectAudio";
 import { WorkflowNav, WORKFLOW, type WorkflowStep } from "./WorkflowNav";
@@ -334,7 +335,7 @@ export default function App() {
     await connect();
     const [c, p, t, o] = await Promise.all([
       call<Capability>("get_capabilities"),
-      call<{ items: Project[] }>("list_projects"),
+      loadProjects(),
       call<{ templates: Template[] }>("list_templates"),
       fetch("/api/operations").then((r) => r.json()) as Promise<{
         operations: Operation[];
@@ -641,7 +642,7 @@ export default function App() {
     configurations: delivery.configurations,
   });
   async function refreshProjects(selectedId?: string) {
-    const p = await call<{ items: Project[] }>("list_projects");
+    const p = await loadProjects();
     setProjects(p.items);
     if (selectedId) setProjectId(selectedId);
   }

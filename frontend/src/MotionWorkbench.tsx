@@ -12,6 +12,7 @@ import {
   Square,
 } from "lucide-react";
 import { ApiError, artifactUrl, call, connect } from "./api";
+import { loadProjects } from "./projects";
 import { Button, Field, Modal, Notice, Textarea } from "./components";
 import { MotionSourceEditor, sourceFilesError } from "./MotionSourceEditor";
 import { DeliveryDestination } from "./DeliveryDestination";
@@ -380,11 +381,12 @@ export function MotionWorkbench({
     // Revalidate on returning from project creation without replacing any draft.
     if (!active) return;
     let stopped = false;
+    const projectRequest = new AbortController();
     setProjectLoad("loading");
     // Discovery calls are independent: missing animation routes on an old
     // daemon must not erase a successfully loaded project list or an editor draft.
     void Promise.allSettled([
-      call<Page<Project>>("list_projects", { limit: 200 }),
+      loadProjects(projectRequest.signal),
       call<{ items: Template[] }>("list_motion_templates"),
       call<MotionCapabilities>("get_motion_capabilities"),
 
@@ -436,6 +438,7 @@ export function MotionWorkbench({
       });
     return () => {
       stopped = true;
+      projectRequest.abort();
     };
   }, [active, refresh]);
 

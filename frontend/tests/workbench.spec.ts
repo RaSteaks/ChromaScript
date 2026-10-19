@@ -567,7 +567,8 @@ test("workflow stages retain drafts and provide clear prerequisites", async ({
 
 test("empty workflow directs users to create a scene", async ({ page }) => {
   await page.route("**/api/operations/list_projects", (route) =>
-    route.fulfill({ json: { items: [] } }),
+    // Project discovery now follows the API's total across all bounded pages.
+    route.fulfill({ json: { items: [], total: 0 } }),
   );
   await page.goto("/");
   await expect(page.locator(".engine-state")).toContainText("Metal");

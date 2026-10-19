@@ -8,6 +8,7 @@
     "build": "python3 ../scripts/design_tokens.py && tsc --noEmit && vite build",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
+    "test:unit": "node --test unit/*.test.mjs",
     "test:e2e": "playwright test",
     "test:a11y": "playwright test -g accessibility"
   },
