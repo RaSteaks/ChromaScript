@@ -1,6 +1,85 @@
 """Model-facing guidance ships with the tool, independent of any chat transcript."""
 
+# One guide is shared by MCP resources/prompts and get_documentation on HTTP/CLI.
+# Keep source-space conversion distinct from reinterpreting numbers or video encoding.
+MOTION_COLOR_GUIDE = """Native linear animation authoring and color-preserving upgrades
+
+1. Discover first: call get_motion_capabilities and read engines.three-float-v1.source_color_spaces.
+   Supported source_color_space values are exactly: Linear Rec.709 (sRGB), Linear Rec.2020,
+   ACEScg (AP1/D60), ACES2065-1 (AP0/D60). If discovery or upgrade_motion_scene is missing,
+   the daemon/MCP connection needs an update/restart; do not guess or silently reinterpret source.
+
+2. New native content: call create_motion_scene with engine=three-float-v1 and an explicit
+   source_color_space. New blank float scenes default to Linear Rec.2020, but an explicit
+   MotionSpec omitting source_color_space retains the historical Linear Rec.709 (sRGB) meaning.
+   When passing spec, put source_color_space inside spec as well; conflicting declarations fail.
+   Numeric THREE.Color(r,g,b), lights and shader RGB use the selected scene-linear basis from
+   module initialization onward. A factory returns scene/camera/update, and receives
+   sourceColorSpace and workingColorSpace. No author-side Rec.709 bridge matrix is needed.
+   Preserve negative and >1 RGB. Hex/CSS colors remain sRGB inputs. Foreign tagged color
+   textures need conversion to working-linear samples/NoColorSpace; they are not auto-certified.
+
+3. Existing animation: call get_motion_scene(scene_id) and retain the returned full scene and
+   revision_id. Only three-float-v1 can be upgraded; an SDR screenshot is not native HDR.
+   Call upgrade_motion_scene(scene_id, expected_revision_id=revision_id, source_color_space=target).
+   This creates a revision preserving original source graphs in preserved_layers with their
+   original linear spaces and opens an empty native foreground in the target space. Empty
+   foregrounds need no additional retained layer. Old revisions remain immutable.
+   Do not implement a color-preserving upgrade by only changing spec.source_color_space in
+   update_motion_scene: that reinterprets existing numeric RGB and can change the picture.
+   Do not mechanically rewrite arbitrary shader literals as colors.
+
+4. Continue editing the complete spec returned by the upgrade. New code/files use the target
+   space. Existing source remains editable in preserved_layers[i].code/files in its declared
+   original space. Preserve every other layer, source_color_space, canvas size and rational fps
+   when calling update_motion_scene with the NEW revision_id. Dropping preserved_layers removes
+   the old picture. Layers composite premultiplied light through linear matrices, keep alpha
+   separate and have independent depth buffers; cross-layer 3D occlusion is not shared.
+   At most 16 retained layers and 2,000,000 total source characters are supported.
+
+5. On a revision conflict, keep the local proposed edits, re-read the latest revision and
+   reconcile deliberately. On uncertain upgrade completion, re-read before retrying; do not
+   blindly submit the old revision again. Upgrading to the current source space is a no-op.
+
+6. Preview with compile_motion_preview(spec) in an allowed sandbox browser. Follow the
+   workspace browser policy: use the built-in browser or headless Playwright WebKit/Firefox
+   where Chrome testing is forbidden. Renderer-backed render_motion_frame and submit_motion_render
+   currently launch the installed Chrome/Chromium, so do not invoke them as tests under that policy.
+   The UI auto-selects low-resolution PQ/HEVC streaming for BT.2020/AP1/AP0 on capable HDR
+   devices, otherwise sRGB. Explicit sRGB selection is available. Source iframe stays opaque
+   and network/media-disabled; the parent owns native video and encoding requests. Compile
+   defaults to sRGB; hdr_preview=true enables bounded low-resolution float capture for a host.
+   encode_motion_hdr_preview(chunk) accepts up to 64 frames / 192 MiB, even rasters up to
+   1280x720 or 720x1280, at the exact project rational fps. input_format is rgba32f-linear
+   (legacy bottom-up associated floats) or p010-pq (top-down, 10-bit limited BT.2020 NCL
+   with top-left chroma, already GPU-rendered through ACES PQ). Binary HTTP and JSON
+   MCP/CLI use the same validation and encoding. P010 must never be tone mapped again.
+   The output applies ACES 1000-nit rendering once after linear black compositing. No jobs or
+   artifacts persist. Decoded metadata is verified; physical HDR screen luminance is not.
+
+7. For an authorized delivery, query get_motion_delivery_options(engine=three-float-v1).
+   submit_motion_render uses the saved scene and latest expected_revision_id plus an idempotency_key.
+   output={"master_bit_depth":32,"video":"pq","render_scale":2} preserves ACEScg EXRs and adds
+   PQ/BT.2020 HEVC; video="prores-hq-pq" selects ProRes HQ/MOV. master_bit_depth=null opts into
+   video-only. Source can remain linear BT.2020/AP1/AP0: PQ is an output encoding, not a source space.
+   Sampling, layer conversion/compositing and ACEScg master processing stay linear. Nonlinear
+   ACES display rendering and display encoding occur only at preview/video exits. AP0 source
+   does not imply an AP0 master here: animation masters remain linear ACEScg, retaining extended RGB.
+
+8. Inspect the actual verification report before claiming delivery: source_color_space,
+   preserved_layer_spaces, float_pipeline_verified, source_color_contract and video decode/color
+   evidence describe different facts. An upgrade preserves old colors; it does not invent new
+   saturation. New source can use the wider gamut. Native file tags alone do not prove the content.
+
+MCP tools wrap arguments under request (HTTP/CLI arguments are flat). Example after reading the
+actual revision:
+chromascript.upgrade_motion_scene:
+{"request":{"scene_id":"SCENE_ID","expected_revision_id":"READ_REVISION_ID","source_color_space":"Linear Rec.2020"}}
+Use "ACEScg" for AP1 or "ACES2065-1" for AP0. Do not guess scene IDs or revision IDs.
+"""
+
 DOCUMENTS = {
+    "motion-color": MOTION_COLOR_GUIDE,
     # Native float generation and display copies have different, explicit contracts.
     "motion": (
         "Animation contract motion-dual-v1 supports both three-float-v1 and remotion-sdr-v1. "
@@ -18,8 +97,8 @@ DOCUMENTS = {
         "createScene({width,height,frames,fps,frameRate}) factory returning {scene,camera,update}. "
         "Factory/update also receive rasterWidth/rasterHeight for gl_FragCoord normalization at preview/export sampling sizes. Logical width/height stay unchanged. update({frame,time,fps,width,height}) must set state from the frame, never integrate deltas "
         "or use wall time/randomness. time=frame*fps.denominator/fps.numerator. The renderer "
-        "owns WebGL and RGBA32F targets. Three numeric RGB is scene-linear Rec.709/D65, not "
-        "encoded sRGB or AP1; use values above 1 for radiance. No tone mapping/output encoding "
+        "owns WebGL and RGBA32F targets. MotionSpec.source_color_space selects Linear Rec.709 (sRGB), Linear Rec.2020, ACEScg or ACES2065-1. Missing fields keep legacy Rec.709; new blank float scenes default to Linear Rec.2020. Three numeric RGB and shaders natively use that linear basis, not "
+        "encoded sRGB or PQ; retain negative values and use values above 1 for radiance. Factory also receives sourceColorSpace and workingColorSpace. Working primaries are configured before source-module evaluation. Hex/CSS colors are sRGB inputs converted to that working space; numeric triples are native. Color textures in new spaces must already contain working-linear samples and use NoColorSpace; foreign tagged textures are rejected rather than mislabeled. No tone mapping/output encoding "
         "in materials. NormalBlending only for transparency; fractional-alpha shaders must set "
         "transparent=true. Opaque custom shaders have coverage fixed to one in the compiled copy. "
         # Keep the author-facing contract identical across browser, CLI and MCP.
@@ -32,8 +111,8 @@ DOCUMENTS = {
         "compile_motion_preview returns offline HTML/channel; embed in allow-scripts WITHOUT "
         "allow-same-origin. Preview uses the pinned OCIO ACES 2.0 SDR shader and is always sRGB. "
         "render_motion_frame(spec,frame) returns a transient native sRGB PNG plus original "
-        "ACEScg range statistics without saving/queueing. create_motion_scene(project_id) creates a blank SDR composition; engine=three-float-v1 creates a blank float scene. Omit template_id (or use null); examples are optional. Passing spec creates directly from source. Explicit engine must match template/spec. create_motion_scene/update_motion_scene "
-        "preserve revisions; updates require expected_revision_id. submit_motion_render requires "
+        "ACEScg range statistics without saving/queueing. create_motion_scene(project_id) creates a blank float scene in Linear Rec.2020; source_color_space can select ACEScg/AP1 or ACES2065-1/AP0. engine=remotion-sdr-v1 explicitly creates SDR. Omit template_id (or use null); examples are optional. Passing spec creates directly from source. Explicit engine must match template/spec. create_motion_scene/update_motion_scene "
+        "preserve revisions; updates require expected_revision_id. upgrade_motion_scene(scene_id, expected_revision_id, source_color_space) preserves old colors by retaining original source graphs in preserved_layers and opening an empty native foreground. Preserved layers (code/files/source_color_space, at most 16) render in order, with independent depth, and composite premultiplied light through OCIO-derived linear matrices. They remain editable/exported/frozen with the revision; do not rewrite arbitrary source literals. Changing source_color_space via update instead reinterprets numeric source and is not a color-preserving upgrade. No gamut expansion is invented: old colors remain, new native content may use the wider basis. Sampling, adaptation and compositing stay linear; nonlinear ACES display rendering/PQ are confined to preview/video exits. submit_motion_render requires "
         "saved scene_id, expected_revision_id, idempotency_key and optional export_directory/output. "
         # ProRes identifiers freeze the codec and transfer; discovery checks the local encoder.
         "Float output={master_bit_depth:16|32|null,video:none|pq|hlg|srgb|prores-hq-srgb|prores-hq-pq|prores-hq-hlg,render_scale:1|2|4}; defaults 32/none/2. Null master depth selects video-only and requires a video format. SDR output={master_bit_depth:null,video:srgb|prores-hq-srgb,render_scale:1|2|4}; defaults null/srgb/2. ProRes is Apple ProRes 422 HQ MOV, prores_ks, 10-bit yuv422p10le, opaque. SDR screenshots retain their 8-bit source precision. ProRes disk budgets use the prores_ks HQ compressed macroblock target, padded 16x16 blocks and exact frame counts, plus 20% margin and mux overhead; not uncompressed storage or H.264/HEVC CRF rates. This planning estimate does not change encoder quality or impose a bitrate cap. Master mode produces straight "
@@ -57,7 +136,7 @@ DOCUMENTS = {
     # Code and picker contracts apply identically to browser, MCP and CLI clients.
     "workflow": "Discover capabilities. Create a project, then call create_scene with only project_id for a blank WGSL canvas, or pass spec directly. Templates are optional examples. Read the revision before editing. Compile WGSL, render keyframes and a low-resolution motion preview. Poll get_job, then get_artifact(include_image=true) for native images. Inspect original EXR values with sample_pixels/inspect_frame. Change parameters using expected_revision_id. Call get_delivery_options with configuration and changed_field to resolve linked format choices. Validate the complete configuration with validate_delivery_configuration and submit_configured_delivery with configurations and an idempotency key, inspect reports and actual streams. Resume interrupted jobs using their frozen snapshots. Rendering is offline; never invent a verified combination.",
     "scene": "Define fn shade(ctx: SceneContext) -> vec4<f32>. Return finite straight-alpha ACEScg linear RGBA with alpha in 0..1; RGB may be negative or above 1. ctx.pixel is global top-left pixel coordinates; ctx.uv is bottom-left normalized coordinates; ctx.resolution is the full canvas; ctx.time is frame_index*fps.denominator/fps.numerator; ctx.frame and ctx.seed are u32. Access named parameters as ctx.params.NAME (number:f32, color:vec3<f32>, boolean:bool). Color parameters are converted from their declared storage encoding to linear ACEScg before shader execution; literal RGB values are also interpreted as linear ACEScg. There is no selectable scene input space. Do not bake sRGB/Rec.709 encoding or an ACES output transform into shade(). Declare no bindings or entry points. Use only supplied time/seed; no previous-frame state. Sampling accumulates premultiplied radiance and coverage, then unassociates. Get templates for compilable examples.",
-    "color": "WGSL code generation and master processing are fixed to float32 linear ACEScg/AP1. Three.js HDR sources use their native linear Rec.709 and cross a pinned OCIO conversion boundary into the same ACEScg master pipeline; see the motion topic. Parameter.color_space identifies only stored color parameter values (sRGB or ACEScg), never the whole generated frame. Choose delivery color_space and gamma independently; output choices never change code interpretation or the fixed sRGB web preview. All color conversions use the pinned OCIO ACES configuration. Fixed ACES 2.0 CG config v4.0.0 is checksummed. EXR can carry unbaked ACEScg, AP0/ACES2065-1 or AP1/ACEScct. Scene encodings use color-space conversion without a display tone map; display deliverables apply one ACES output transform. Live PNGs, stored PNGs and motion previews use the sRGB SDR view. render_preview freezes the dedicated h264-srgb-preview recipe, independently of project/delivery settings. The browser requires verified sRGB output metadata and matching native tags; regenerate legacy Rec.709/Gamma 2.4 motion previews. The historical h264-review preset retains its Rec.709 definition but cannot be newly exported under exact-tag policy; default SDR video uses Rec.709 primaries with the sRGB transfer. P3-D65 uses its actual P3 ACES view; selecting a pure Gamma 2.2/2.4/2.6 changes display encoding only, without another tone map. PQ uses the ACES 2.0 1000-nit Rec.2020-limited view. HLG uses the same rendering with OCIO's official 1000-nit HLG display encoding. Alpha is never color transformed. FFmpeg changes matrix/range/sampling without another output transform. Model-visible PNGs are not calibrated HDR references. No fabricated mastering/MaxCLL/MaxFALL metadata is emitted. resolve_color takes request.color_space (ACEScg or sRGB) and exactly one of rgb (read-only inspection, original extended floats preserved) or oklch (lightness 0..1, chroma 0..0.4, hue 0..360). OKLCH is a D65 perceptual SDR picker, not an HDR appearance model. Out-of-sRGB selections reduce chroma at fixed lightness/hue; the exact ACES sRGB view is inverted and then forward-verified. Returned rgb is in the parameter's declared space, display_rgb is the separate display swatch, and gamut_mapped/round_trip_error/config describe actual conversion. Apply rgb through revision-checked scene operations only when requested. Utility convert_colors is not an inverse display transform.",
+    "color": "WGSL code generation and master processing are fixed to float32 linear ACEScg/AP1. Three.js HDR sources natively select linear Rec.709, linear BT.2020, ACEScg/AP1 or ACES2065-1/AP0 and cross a pinned linear OCIO conversion boundary into the same ACEScg master pipeline; see the motion topic. Parameter.color_space identifies only stored color parameter values (sRGB or ACEScg), never the whole generated frame. Choose delivery color_space and gamma independently; output choices never change code interpretation or the independently selected web preview. All color conversions use the pinned OCIO ACES configuration. Fixed ACES 2.0 CG config v4.0.0 is checksummed. EXR can carry unbaked ACEScg, AP0/ACES2065-1 or AP1/ACEScct. Scene encodings use color-space conversion without a display tone map; display deliverables apply one ACES output transform. Live/stored PNGs and WGSL motion review use the sRGB SDR view; wide-gamut Three.js live previews can stream bounded PQ/HEVC video on capable HDR devices. render_preview freezes the dedicated h264-srgb-preview recipe, independently of project/delivery settings. The browser requires verified sRGB output metadata and matching native tags; regenerate legacy Rec.709/Gamma 2.4 motion previews. The historical h264-review preset retains its Rec.709 definition but cannot be newly exported under exact-tag policy; default SDR video uses Rec.709 primaries with the sRGB transfer. P3-D65 uses its actual P3 ACES view; selecting a pure Gamma 2.2/2.4/2.6 changes display encoding only, without another tone map. PQ uses the ACES 2.0 1000-nit Rec.2020-limited view. HLG uses the same rendering with OCIO's official 1000-nit HLG display encoding. Alpha is never color transformed. FFmpeg changes matrix/range/sampling without another output transform. Model-visible PNGs are not calibrated HDR references. No fabricated mastering/MaxCLL/MaxFALL metadata is emitted. resolve_color takes request.color_space (ACEScg or sRGB) and exactly one of rgb (read-only inspection, original extended floats preserved) or oklch (lightness 0..1, chroma 0..0.4, hue 0..360). OKLCH is a D65 perceptual SDR picker, not an HDR appearance model. Out-of-sRGB selections reduce chroma at fixed lightness/hue; the exact ACES sRGB view is inverted and then forward-verified. Returned rgb is in the parameter's declared space, display_rgb is the separate display swatch, and gamut_mapped/round_trip_error/config describe actual conversion. Apply rgb through revision-checked scene operations only when requested. Utility convert_colors is not an inverse display transform.",
     # Model clients receive the same Resolve-style output, file-tag and Auto-level
     # semantics as the browser; stale prose must not imply that P3 always uses sRGB.
     "delivery": (

@@ -8,7 +8,7 @@
 - **HDR / SDR 动画代码**：同时提供浮点 Three.js、SDR React 文字和 ThreeCanvas 模板；统一预览，按源类型导出 HDR/SDR 视频或浮点母版。
 - **实时预览**：播放、暂停和逐帧查看动画，检查原始像素值。
 - **大屏查看**：场景与动画预览均可放大至网页视口，保留播放位置和监听状态；点击“退出大屏”或按 Esc 返回。实时 WGSL 与浮点动画采用最高 1280×720（竖屏 720×1280）的预览尺寸，小画面不放大渲染，交付仍使用原规格。
-- **色彩管理**：WGSL 生成与母版处理使用 float32 线性 ACEScg（AP1）；Three.js 动画以线性 Rec.709 生成，再转换为 ACEScg，网页使用 sRGB 预览，输出色彩空间在交付时选择；统一通过 OCIO / ACES 2.0 转换，原始浮点数据与显示预览分别保留。
+- **色彩管理**：WGSL 生成与母版处理使用 float32 线性 ACEScg（AP1）；Three.js 动画可原生使用线性 Rec.709、线性 BT.2020、ACEScg/AP1 或 ACES2065-1/AP0，再线性转换为 ACEScg，网页自动选择低分辨率 HDR 视频或 sRGB 预览，输出色彩空间在交付时选择；统一通过 OCIO / ACES 2.0 转换，原始浮点数据与显示预览分别保留。
 - **多格式交付**：导出 EXR、PNG、TIFF、DPX 图像序列，以及 H.264、HEVC、ProRes、DNxHR 等视频；可用组合由本机能力决定。
 - **项目音频**：导入本地音频，或用代码生成音调、节奏与音效；设置音轨裁切、起点和音量，随视频混音或作为独立 WAV 交付。
 - **任务管理**：查看渲染进度、下载成果，恢复符合条件的中断任务。
@@ -159,11 +159,24 @@ cd /absolute/path/ChromaScript
 
 日常只需运行 `./start.sh`，打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)，创建项目并新建空白场景（示例模板可选）。启动不联网安装依赖，数据默认保存在仓库下的 `workspace`，按 `Ctrl+C` 停止服务。
 
-制作动画时，点击顶部“动画代码”，选择 SDR 网页或浮点渲染类型，点击“新建空白动画”；“示例模板（可选）”中保留文字、几何、光能等起点。修改 TypeScript 后自动预览；保存后选择“保留 EXR 母版”或“仅视频”。保留母版时可选 16-bit Half 或 32-bit Float，并可另输出视频；仅视频时选择 PQ、HLG 或 sRGB，点击“导出动画”。EXR 保留直通 Alpha，视频在场景线性空间合成黑底。视频要求偶数宽高及相应本机编码器（HDR 用 libx265，sRGB 用 libx264）；EXR 可使用奇数尺寸。浏览器预览始终为 sRGB SDR，不作为 HDR 亮度参考。
+制作动画时，点击顶部“动画代码”，选择 SDR 网页或浮点渲染类型，点击“新建空白动画”；“示例模板（可选）”中保留文字、几何、光能等起点。修改 TypeScript 后自动预览；保存后选择“保留 EXR 母版”或“仅视频”。保留母版时可选 16-bit Half 或 32-bit Float，并可另输出视频；仅视频时选择 PQ、HLG 或 sRGB，点击“导出动画”。EXR 保留直通 Alpha，视频在场景线性空间合成黑底。视频要求偶数宽高及相应本机编码器（HDR 用 libx265，sRGB 用 libx264）；EXR 可使用奇数尺寸。浏览器「预览显示」默认自动 HDR：线性 BT.2020/AP1/AP0 源在报告 HDR 视频能力且支持实际 HEVC 配置的设备上，以最高 1280×720（竖屏 720×1280）、项目原始帧率 的 PQ/HEVC 10-bit 分段视频预览；其他情况回退 sRGB。可显式选择 sRGB SDR。点击播放开始，暂停/隐藏停止继续生成片段；拖动时间线重建缓冲。编码与解码需要短暂缓冲，不保证实时帧率；自动化测试不能证明实体屏幕 HDR 亮度。
 
-HDR 浮点代码的外部包仅允许 `three`，默认导出同步 `createScene({width,height,frames,fps,frameRate})`，返回 `{scene,camera,update({frame,time,fps,width,height})}`。工厂与 update 另提供 `rasterWidth/rasterHeight` 表示实际采样尺寸；使用 `gl_FragCoord` 的 shader 应用它们归一化坐标，布局仍使用逻辑 width/height。每帧直接设置状态，时间为 `frame × 帧率分母 / 分子`。Three 数值颜色采用线性 Rec.709/D65，允许超过 1；交由宿主转换为 ACEScg/AP1。材质不得烘焙 tone mapping 或显示编码。透明材质使用 NormalBlending，输出小于 1 的 Alpha 时必须启用 transparent。允许导入同一动画的分章模块；禁止网络素材及宿主文件导入，代码只在隔离浏览器运行。
+HDR 浮点代码的外部包仅允许 `three`，默认导出同步 `createScene({width,height,frames,fps,frameRate})`，返回 `{scene,camera,update({frame,time,fps,width,height})}`。工厂与 update 另提供 `rasterWidth/rasterHeight` 表示实际采样尺寸；使用 `gl_FragCoord` 的 shader 应用它们归一化坐标，布局仍使用逻辑 width/height。每帧直接设置状态，时间为 `frame × 帧率分母 / 分子`。Three 数值颜色采用 `source_color_space` 指定的线性空间，保留负值和超过 1 的值；交由宿主线性转换为 ACEScg/AP1。旧源码省略该字段时保持线性 Rec.709/D65，新建空白浮点动画默认线性 BT.2020。材质不得烘焙 tone mapping 或显示编码。透明材质使用 NormalBlending，输出小于 1 的 Alpha 时必须启用 transparent。允许导入同一动画的分章模块；禁止网络素材及宿主文件导入，代码只在隔离浏览器运行。
 
 不透明自定义 shader 的实际覆盖率固定为 1，宿主只调整编译副本，不改变保存的源码和 RGB。需要半透明时使用 `transparent:true` 与 `NormalBlending`；透明材质的 `NoBlending` 会被拒绝。不透明 GLSL3 自定义 shader 需要唯一可识别的 vec4 颜色输出。透明自定义 shader 默认 `premultipliedAlpha:false`，应输出非预乘 RGB，由混合阶段乘以 Alpha；若设置 `premultipliedAlpha:true`，作者必须输出已经乘过 Alpha 的 RGB，宿主不会自动判断或修正不一致的声明。Three 内置材质保留其原有预乘处理。
+
+原生宽色域创作通过 `MotionSpec.source_color_space` 选择 `"Linear Rec.709 (sRGB)"`、`"Linear Rec.2020"`、`"ACEScg"` 或 `"ACES2065-1"`。工作空间在执行入口及分章顶层代码前设置；数值 `THREE.Color(r,g,b)`、灯光和 shader 输出直接采用所选原色，不需手动转换。十六进制/CSS 颜色仍表示 sRGB，由 Three 转入当前工作空间；新宽色域空间的颜色纹理需预先成为工作空间线性采样并使用 `NoColorSpace`，不能仅重标记 sRGB 纹理。工厂额外获得 `sourceColorSpace` 和 `workingColorSpace`。创作空间不接受 PQ、HLG 或 ACEScct；采样、预乘 Alpha 合成、白点适应与母版转换保持线性，显示变换仅发生于 sRGB/HDR 预览或视频出口。AP0/AP1 超出显示设备范围的颜色仍需在显示出口映射。
+
+已有动画通过界面的“管线目标空间 → 升级色彩管线”，或共享 `upgrade_motion_scene(scene_id, expected_revision_id, source_color_space)` 保色升级。旧源码与分章保存在 `preserved_layers`（最多 16 层），各层保留原线性空间并在浮点像素交界处转换；新内容在目标空间原生创作。图层按顺序合成，**图层之间不共享三维深度**；“编辑图层”可继续修改旧内容。换工作空间不自动扩大旧画面的饱和度。直接在 `update_motion_scene` 改 `source_color_space` 则会重新解释数值，需由作者明确选择。升级是新修订，保留历史、冲突检查、完整源码快照和导出；保留图层源码另存于 `preserved-layers/`。
+
+```sh
+.venv/bin/chromascript call create_motion_scene --arguments '{"project_id":"PROJECT_ID","engine":"three-float-v1","source_color_space":"ACEScg"}'
+.venv/bin/chromascript call upgrade_motion_scene --arguments '{"scene_id":"SCENE_ID","expected_revision_id":"REVISION_ID","source_color_space":"ACES2065-1"}'
+```
+
+视频出口继续选择 `output.video="pq"` 或 `"prores-hq-pq"` 获得 PQ 编码 BT.2020；该选择不改变源空间或 EXR 的线性处理。显示输出仍应用一次 ACES 2.0 输出变换，不能将其理解为纯矩阵变换。
+
+Agent 通过 `get_motion_capabilities.color_authoring` 发现保色升级操作和指南；读取 MCP 资源 `chromascript://docs/motion-color`，或调用 `get_documentation(topic="motion-color")` 获取同一套步骤。MCP 还提供 `upgrade_animation_color_space` prompt。先 `get_motion_scene` 取得真实修订，再调用 `upgrade_motion_scene`；编辑后使用返回的新修订保存完整 spec，保留 `preserved_layers`，不能只改颜色空间字段冒充保色转换。原生 MCP 工具参数包装为 `{"request": {...}}`，HTTP/CLI 参数保持扁平结构。服务升级后重启本地服务并重新连接 MCP，使工具目录与指引刷新。
 
 单场景支持多个分章文件联合渲染。在“源码文件”中切换入口与分章，用“添加分章文件”拆分长动画；入口通过 `import ... from "./chapters/intro"` 引用分章并安排时间。浮点场景共享同一 scene/camera，SDR 可用 Remotion `Sequence` 组织各章。全部文件一起预览、保存、检查修订冲突并冻结到渲染任务，交付中附带完整 `sources/` 源码树。CLI/MCP 的 `MotionSpec` 新增可选 `files: {相对路径: 源码}`，旧 `code` 仍是入口；参见 [多文件示例与调用方式](examples/motion-chapters/README.md)。
 
@@ -227,3 +240,9 @@ MCP 自动启动的网页固定使用 [http://127.0.0.1:8765](http://127.0.0.1:8
 SDR 模板使用 `engine=remotion-sdr-v1`，默认导出 React 组件。允许原有 React、Remotion、ThreeCanvas 与 Three.js 导入。`get_motion_delivery_options(engine)` 返回源类型对应的选项；SDR 的 `output` 为 `{"master_bit_depth":null,"video":"srgb"}` 。`rec709`（纯 Gamma 2.4）因缺少精确标准视频标签而禁用。浏览器 SDR 源不会被重新标记为 HDR 或 ACEScg 母版。
 
 不需要通过模板开始：`create_scene` 仅传 `project_id` 即创建空白 WGSL 场景；`create_motion_scene` 仅传 `project_id` 创建空白浮点动画；显式传入 `engine: "remotion-sdr-v1"` 创建 SDR 网页动画。两者均可直接传入 `spec`，也可在创建后使用修订号通过 MCP/CLI 修改源码。空白场景只含可运行的最小透明画面代码，没有示例图形或动画；项目用于归属与历史管理，模板不构成依赖。
+
+HDR 预览通过共享 `encode_motion_hdr_preview(chunk)` 操作在本机编码，HTTP、CLI 和 MCP 使用同一严格模型。输入可为原始线性 RGBA32F 的 Base64 帧，或 GPU 已经显示转换的 P010 PQ。每片段最多 64 帧且不超过 192 MiB，偶数尺寸最高 1280×720（或竖屏 720×1280），保留项目精确有理数帧率。P010 输入不会再执行色调映射。宿主将线性像素转为 ACEScg、合成黑底并应用一次 ACES 2.0 1000-nit PQ 输出变换；验证实际解码属性和 MP4 色彩标签后返回临时 fMP4。无后台导出任务，不保存片段，不修改母版/草稿。`compile_motion_preview(spec, hdr_preview=true)` 启用 720p GPU P010 采集协议；外层播放器负责编码调用和 MSE，源码 iframe 保持 opaque origin、禁止网络和媒体。默认编译调用仍返回独立可用的 sRGB 预览。
+
+Safari 26.2 的 `video-dynamic-range` 查询可能尚未实现。自动 HDR 在 high/standard 均不匹配时改用 `dynamic-range: high`，再核对 HEVC/MSE 以及实际 PQ 编码；已明确报告 SDR 视频平面的设备仍回退 sRGB。
+
+720p HDR 预览通过 transferable buffer 和鉴权二进制接口减少像素复制，优先使用通过实际回读验证的 VideoToolbox Main10；软件回退仍保留原帧率。采集下一片段与编码重叠，播放前缓冲约 2 秒，暂停或跳转只生成一帧清晰 HDR 图像。二进制地址为 `/api/operations/encode_motion_hdr_preview/binary`，`X-Chroma-HDR` 为规格 JSON（含 `frame_count`、`input_format` 和原帧率）；与 MCP/CLI 的 Base64 操作共用处理规则。

@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.types import Receive, Scope, Send
 
@@ -78,6 +79,9 @@ def create_app(root: Path, port: int = 8765, export_roots: list[Path] | None = N
                 yield
         finally:
             dispatcher.close()
+            # Preview encoders are transient and must not outlive this daemon.
+            from .hdr_encoder import close_encoder
+            close_encoder()
 
     app = FastAPI(title="ChromaScript", version="0.1.0", lifespan=lifespan)
     app.state.service = service
@@ -124,6 +128,29 @@ def create_app(root: Path, port: int = 8765, export_roots: list[Path] | None = N
     @app.get("/api/operations")
     def operations():
         return {"operations": catalogue()}
+
+    @app.post("/api/operations/encode_motion_hdr_preview/binary")
+    async def binary_hdr_preview(request: Request):
+        from .motion_hdr_preview import HDRPreviewHeader, encode_hdr_preview_binary
+
+        # This is a transport adapter for the shared encoding operation. The
+        # existing bearer/origin middleware protects it identically to JSON calls.
+        try:
+            declaration = request.headers.get("x-chroma-hdr", "")
+            if len(declaration) > 4096:
+                raise ValueError("HDR 预览声明过长")
+            header = HDRPreviewHeader.model_validate_json(declaration)
+            expected = header.frame_bytes * header.frame_count
+            payload = bytearray()
+            async for block in request.stream():
+                if len(payload) + len(block) > expected:
+                    raise ValueError("HDR 预览片段长度超过声明")
+                payload.extend(block)
+            return await run_in_threadpool(encode_hdr_preview_binary, header, payload)
+        except ChromaError as exc:
+            return JSONResponse({"error": exc.as_dict()}, status_code=400)
+        except (ValidationError, ValueError) as exc:
+            return JSONResponse({"error": {"code": "invalid_arguments", "message": str(exc)}}, status_code=400)
 
     def register(name: str) -> None:
         model = REGISTRY[name].input_model

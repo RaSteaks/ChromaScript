@@ -21,8 +21,9 @@ def create_mcp(root: Path) -> MCPServer:
         "ChromaScript",
         log_level="WARNING",
         version="0.1.0",
+        # Advertise the migration contract at connection time, not only in optional docs.
         instructions=DOCUMENTS["workflow"]
-        + " Read chromascript://docs/scene before authoring WGSL or chromascript://docs/motion before authoring Three.js HDR animations. HDR masters and sRGB preview are separate. Before creating audio, call chromascript.get_audio_guidelines(project_id) and read chromascript://docs/audio for local storage and production rules.",
+        + " Read chromascript://docs/scene before authoring WGSL or chromascript://docs/motion before authoring Three.js HDR animations. For native wide-gamut authoring or upgrading existing animations, discover chromascript.get_motion_capabilities and read chromascript://docs/motion-color. Use get_motion_scene then upgrade_motion_scene with the actual expected_revision_id to preserve old colors; changing source_color_space alone reinterprets RGB. Retain preserved_layers when saving the returned spec. HDR masters and sRGB preview are separate. Before creating audio, call chromascript.get_audio_guidelines(project_id) and read chromascript://docs/audio for local storage and production rules.",
     )
 
     def register(name: str, model: type[BaseModel], description: str) -> None:
@@ -109,6 +110,15 @@ def create_mcp(root: Path) -> MCPServer:
     @server.prompt(name="create_hdr_animation")
     def create_hdr_animation(description: str) -> str:
         # Model authors receive the actual float contract, not legacy React guidance.
-        return f"Create this offline HDR animation: {description}\n" + DOCUMENTS["motion"]
+        return f"Create this offline HDR animation: {description}\n" + DOCUMENTS["motion"] + "\n" + DOCUMENTS["motion-color"]
+
+    @server.prompt(name="upgrade_animation_color_space")
+    def upgrade_animation_color_space(scene_id: str, source_color_space: str = "Linear Rec.2020") -> str:
+        # Returning a prompt does not mutate a revision; the agent must read it first.
+        return (
+            f"Preserve the colors of saved animation {scene_id} while upgrading its linear pipeline "
+            f"to {source_color_space}. Read its actual revision before any mutation.\n"
+            + DOCUMENTS["motion-color"]
+        )
 
     return server

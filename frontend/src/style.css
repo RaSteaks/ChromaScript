@@ -2081,41 +2081,79 @@ input[type="search"]::-webkit-search-cancel-button {
 .motion-workbench[hidden] {
   display: none;
 }
-/* Project audio stays beside its owning picker; creation actions keep the far edge. */
+/* Keep title/save state above description/feedback, without a blank status row. */
+.motion-context {
+  align-items: start;
+  gap: var(--space-md);
+  padding-bottom: var(--space-md);
+}
+.motion-context > .context-title {
+  flex: 1;
+  display: grid;
+  gap: var(--space-xs);
+}
+.motion-context .panel-description {
+  margin: 0;
+}
+.motion-context-feedback {
+  /* Retain room for the revision label just above the compact breakpoint. */
+  flex: 0 1 320px;
+  min-width: 100px;
+  display: grid;
+  justify-items: end;
+  gap: var(--space-xs);
+  text-align: right;
+}
+.motion-context-feedback .save-state {
+  min-height: 29px;
+}
+.motion-context-feedback .status-line {
+  height: auto;
+  min-height: 20px;
+  padding: 0;
+  overflow-wrap: anywhere;
+}
+/* Related controls share a baseline. Flexible pickers use the space between
+   project actions and the separated creation group, including long names. */
 .motion-library {
   display: grid;
-  grid-template-columns: minmax(260px, 360px) minmax(160px, 340px) minmax(
-      0,
-      1fr
-    );
-  gap: var(--space-md);
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) auto;
+  gap: var(--space-lg);
   align-items: end;
-  margin-bottom: var(--space-lg);
+  margin-bottom: var(--space-md);
 }
-.motion-project-controls {
+.motion-project-controls,
+.motion-scene-controls,
+.motion-create-controls {
   display: flex;
   align-items: flex-end;
   gap: var(--space-sm);
   min-width: 0;
 }
-.motion-project-controls > .field {
+.motion-project-controls > .field,
+.motion-scene-controls > .field {
   flex: 1;
 }
-.motion-project-controls > .button {
-  flex-shrink: 0;
+.motion-create-controls {
+  padding-left: var(--space-lg);
+  border-left: 1px solid var(--color-border);
 }
 .motion-template-actions {
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 .motion-workbench > .workflow-empty {
   margin-bottom: var(--space-lg);
 }
-/* Limit picker spacing to the toolbar so the nested audio dialog keeps its fields. */
-.motion-library > .field,
+/* Scope compact spacing to the toolbar, leaving the nested audio dialog intact. */
 .motion-project-controls > .field,
-.motion-library > .motion-template-actions > .field {
+.motion-scene-controls > .field,
+.motion-create-controls > .field {
   margin-bottom: 0;
   min-width: 0;
+}
+/* Native select chrome varies by browser; match the adjacent shared buttons. */
+.motion-library select {
+  height: 34px;
 }
 .motion-template-actions,
 .motion-save-actions,
@@ -2206,6 +2244,14 @@ input[type="search"]::-webkit-search-cancel-button {
   z-index: 0;
   pointer-events: none;
 }
+/* Native HDR video shares the media plane and paints after the opaque sandbox.
+   Hidden/loading video leaves the retained SDR canvas and controls accessible. */
+.motion-hdr-video {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+}
 .motion-preview-status {
   min-height: 48px;
   padding: var(--space-sm) 0;
@@ -2215,6 +2261,7 @@ input[type="search"]::-webkit-search-cancel-button {
 .motion-playback .mono {
   flex: 1;
   text-align: right;
+  white-space: nowrap;
 }
 .motion-preview-panel .technical-note {
   margin-top: var(--space-md);
@@ -2322,9 +2369,11 @@ input[type="search"]::-webkit-search-cancel-button {
   .motion-library {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .motion-template-actions {
+  .motion-create-controls {
     grid-column: 1 / -1;
-    justify-content: flex-start;
+    padding: var(--space-md) 0 0;
+    border-left: 0;
+    border-top: 1px solid var(--color-border);
   }
 }
 @media (max-width: 900px) {
@@ -2343,6 +2392,25 @@ input[type="search"]::-webkit-search-cancel-button {
   }
 }
 @media (max-width: 560px) {
+  .motion-context {
+    flex-direction: column;
+    gap: var(--space-xs);
+  }
+  .motion-context-feedback {
+    flex: none;
+    width: 100%;
+    justify-items: start;
+    text-align: left;
+  }
+  .motion-context-feedback .save-state {
+    min-height: 0;
+  }
+  .motion-create-controls {
+    flex-wrap: wrap;
+  }
+  .motion-create-controls > .field {
+    flex: 1 1 150px;
+  }
   .motion-library {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -2352,6 +2420,17 @@ input[type="search"]::-webkit-search-cancel-button {
   }
   .motion-playback {
     gap: var(--space-xs);
+  }
+  /* Keep the display choice on its own row so frame/time controls do not split. */
+  .motion-playback > .field {
+    flex-basis: 100%;
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+  }
+  .motion-playback > .field select {
+    flex: 1;
+    width: auto;
   }
 }
 

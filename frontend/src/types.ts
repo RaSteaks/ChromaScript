@@ -230,7 +230,17 @@ export type Operation = {
   inputSchema: Record<string, unknown>;
 };
 // Three.js source has an explicit float contract; masters share the ACEScg pipeline.
+export type MotionSourceSpace =
+  "Linear Rec.709 (sRGB)" | "Linear Rec.2020" | "ACEScg" | "ACES2065-1";
+export type MotionSource = {
+  code: string;
+  files?: Record<string, string>;
+  source_color_space?: MotionSourceSpace;
+};
 export type MotionSpec = {
+  // Missing fields are legacy Rec.709; preserved layers keep their own RGB basis.
+  source_color_space?: MotionSourceSpace;
+  preserved_layers?: MotionSource[];
   // Optional for historical single-file revisions. New saves include every chapter.
   files?: Record<string, string>;
   engine: "three-float-v1" | "remotion-sdr-v1";
@@ -262,7 +272,13 @@ export type MotionVerification = {
   video?: { native_color_tags_verified?: boolean };
 };
 export type MotionCapabilities = {
-  engines: Record<MotionSpec["engine"], { imports: string[] }>;
+  engines: Record<
+    MotionSpec["engine"],
+    {
+      imports: string[];
+      source_color_spaces?: { value: MotionSourceSpace; label: string }[];
+    }
+  >;
   contract: "motion-dual-v1";
   preview_available: boolean;
   render_available: boolean;

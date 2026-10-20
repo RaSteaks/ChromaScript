@@ -25,6 +25,8 @@ import type {
   MotionCapabilities,
   MotionReply,
   MotionSpec,
+  MotionSource,
+  MotionSourceSpace,
   MotionOutput,
   MotionDeliveryOptions,
   MotionVerification,
@@ -34,6 +36,8 @@ import type {
 
 type Draft = {
   engine: MotionSpec["engine"];
+  source_color_space: MotionSourceSpace;
+  preserved_layers: MotionSource[];
   name: string;
   code: string;
   files: Record<string, string>;
@@ -78,6 +82,8 @@ const text = (cause: unknown) =>
   cause instanceof Error ? cause.message : String(cause);
 const fromSpec = (spec: MotionSpec): Draft => ({
   engine: spec.engine,
+  source_color_space: spec.source_color_space ?? "Linear Rec.709 (sRGB)",
+  preserved_layers: spec.preserved_layers ?? [],
   name: spec.name,
   code: spec.code,
   files: spec.files ?? {},
@@ -139,6 +145,8 @@ function validate(draft: Draft | null): {
     spec: {
       schema_version: 1,
       engine: draft.engine,
+      source_color_space: draft.source_color_space,
+      preserved_layers: draft.preserved_layers,
       name: draft.name,
       code: draft.code,
       files: draft.files,
@@ -192,6 +200,9 @@ export function MotionWorkbench({
   const savedRef = useRef(saved);
   savedRef.current = saved;
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [layerIndex, setLayerIndex] = useState<number | null>(null);
+  const [targetSpace, setTargetSpace] =
+    useState<MotionSourceSpace>("Linear Rec.2020");
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const [composing, setComposing] = useState(false);
@@ -227,6 +238,17 @@ export function MotionWorkbench({
     !!saved &&
     JSON.stringify(draft) !== JSON.stringify(fromSpec(saved.scene));
   const directory = destination ?? destinationOptions?.default_directory ?? "";
+  // Remote revisions may remove retained layers; never leave an orphaned editor selection.
+  const editingLayer =
+    layerIndex !== null && draft?.preserved_layers[layerIndex]
+      ? layerIndex
+      : null;
+  const source =
+    editingLayer === null ? draft : draft?.preserved_layers[editingLayer];
+  const sourceSpaces =
+    caps?.engines["three-float-v1"].source_color_spaces ?? [];
+  const spaceLabel = (value: MotionSourceSpace) =>
+    sourceSpaces.find((item) => item.value === value)?.label ?? value;
   const savedId = saved?.record.id;
 
   useEffect(() => {
@@ -568,6 +590,7 @@ export function MotionWorkbench({
     else action();
   }
   function select(reply: MotionReply) {
+    setLayerIndex(null);
     savedRef.current = reply;
     draftRef.current = fromSpec(reply.scene);
     setSaved(reply);
@@ -605,6 +628,52 @@ export function MotionWorkbench({
     if (!draftRef.current) return;
     draftRef.current = { ...draftRef.current, [key]: value };
     setDraft(draftRef.current);
+  }
+  function changeSource(
+    key: "code" | "files",
+    value: string | Record<string, string>,
+  ) {
+    if (!draft) return;
+    // Layer edits join the same revision/draft guard as the native foreground.
+    if (editingLayer === null) {
+      if (key === "code") change("code", value as string);
+      else change("files", value as Record<string, string>);
+    } else {
+      change(
+        "preserved_layers",
+        draft.preserved_layers.map((layer, index) =>
+          index === editingLayer ? { ...layer, [key]: value } : layer,
+        ),
+      );
+    }
+  }
+  async function upgrade() {
+    if (!saved || dirty || pending || composing) return;
+    const captured = draftRef.current;
+    const reply = await run("升级色彩管线", () =>
+      call<MotionReply>("upgrade_motion_scene", {
+        scene_id: saved.record.id,
+        expected_revision_id: saved.revision_id,
+        source_color_space: targetSpace,
+      }),
+    );
+    if (reply) {
+      // A late upgrade acknowledgement cannot discard name/time edits made while
+      // the request was in flight. The existing conflict/reload flow owns recovery.
+      if (draftRef.current !== captured) {
+        setConflict(true);
+        setExternalRevision(reply.revision_id);
+        setStatus(
+          "管线已升级；请求期间的本地修改已保留，请复制草稿或载入最新版本。",
+        );
+        return;
+      }
+      select(reply);
+      setRefresh((old) => old + 1);
+      setStatus(
+        "色彩管线已升级，原有颜色与源码已保留。新内容使用目标线性空间。",
+      );
+    }
   }
   function compose(value: boolean) {
     composingRef.current = value;
@@ -747,33 +816,36 @@ export function MotionWorkbench({
       onCompositionStartCapture={() => compose(true)}
       onCompositionEndCapture={() => compose(false)}
     >
-      <div className="workbench-context">
+      <div className="workbench-context motion-context">
         <div className="context-title">
           <h1 ref={heading} tabIndex={-1}>
             动画代码
           </h1>
           <p className="panel-description">
-            支持 HDR 浮点场景与 SDR 网页动画，统一使用 sRGB
-            预览；按源类型选择母版与视频输出。
+            支持 HDR 浮点场景与 SDR 网页动画；自动选择 720p HDR 视频或 sRGB
+            预览，母版与视频输出独立设置。
           </p>
         </div>
-        <span className={"save-state " + (dirty ? "unsaved" : "")}>
-          {dirty
-            ? "未保存"
-            : saved
-              ? "已保存 · " + saved.revision_id.slice(0, 8)
-              : ""}
-        </span>
+        {/* Share the description row with feedback instead of reserving an empty toolbar row. */}
+        <div className="motion-context-feedback">
+          <span className={"save-state " + (dirty ? "unsaved" : "")}>
+            {dirty
+              ? "未保存"
+              : saved
+                ? "已保存 · " + saved.revision_id.slice(0, 8)
+                : ""}
+          </span>
+          <div className="status-line" aria-live="polite">
+            {pending
+              ? pending + "…"
+              : projectLoad === "loading"
+                ? "正在读取动画项目…"
+                : status}
+          </div>
+        </div>
       </div>
       <Notice text={error} error />
       <Notice text={loadError} error />
-      <div className="status-line" aria-live="polite">
-        {pending
-          ? pending + "…"
-          : projectLoad === "loading"
-            ? "正在读取动画项目…"
-            : status}
-      </div>
       <div className="motion-library">
         {/* Audio belongs to the project, so keep its action beside that picker. */}
         <div className="motion-project-controls">
@@ -821,31 +893,48 @@ export function MotionWorkbench({
             disabled={!!pending}
           />
         </div>
-        <Field label="已保存的动画" id="motion-scene">
-          <select
-            id="motion-scene"
-            value={saved?.record.id || ""}
-            disabled={!projectId || !!pending}
-            onChange={(event) => {
-              const id = event.target.value;
-              if (id === saved?.record.id) return;
-              guard("打开其他动画", () => void open(id));
+        {/* Refresh reads the library/connection; it is not part of creating an animation. */}
+        <div className="motion-scene-controls">
+          <Field label="已保存的动画" id="motion-scene">
+            <select
+              id="motion-scene"
+              value={saved?.record.id || ""}
+              disabled={!projectId || !!pending}
+              onChange={(event) => {
+                const id = event.target.value;
+                if (id === saved?.record.id) return;
+                guard("打开其他动画", () => void open(id));
+              }}
+            >
+              <option value="" disabled>
+                {scenes.length ? "选择动画" : "还没有动画，可新建空白动画"}
+              </option>
+              {otherSelected && (
+                <option value={otherSelected.id}>{otherSelected.name}</option>
+              )}
+              {scenes.map((scene) => (
+                <option key={scene.id} value={scene.id}>
+                  {scene.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Button
+            title="刷新动画列表与连接"
+            aria-label="刷新动画列表与连接"
+            disabled={!!pending}
+            onClick={() => {
+              void run("重新连接", async () => {
+                await connect();
+                setSyncPaused(false);
+                setRefresh((old) => old + 1);
+              });
             }}
           >
-            <option value="" disabled>
-              {scenes.length ? "选择动画" : "还没有动画，可新建空白动画"}
-            </option>
-            {otherSelected && (
-              <option value={otherSelected.id}>{otherSelected.name}</option>
-            )}
-            {scenes.map((scene) => (
-              <option key={scene.id} value={scene.id}>
-                {scene.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <div className="motion-template-actions">
+            <RefreshCw size={15} aria-hidden="true" />
+          </Button>
+        </div>
+        <div className="motion-create-controls">
           <Field label="空白动画类型" id="motion-blank-engine">
             <select
               id="motion-blank-engine"
@@ -866,19 +955,6 @@ export function MotionWorkbench({
           >
             <Plus size={15} />
             新建空白动画
-          </Button>
-          <Button
-            aria-label="刷新动画列表与连接"
-            disabled={!!pending}
-            onClick={() => {
-              void run("重新连接", async () => {
-                await connect();
-                setSyncPaused(false);
-                setRefresh((old) => old + 1);
-              });
-            }}
-          >
-            <RefreshCw size={15} />
           </Button>
         </div>
       </div>
@@ -975,20 +1051,87 @@ export function MotionWorkbench({
                   onChange={(event) => change("name", event.target.value)}
                 />
               </Field>
+              {draft.engine === "three-float-v1" && (
+                <div className="frame-settings">
+                  <p className="technical-note">
+                    当前创作空间：{spaceLabel(draft.source_color_space)}
+                    。创作与合成保持线性，PQ 仅在 HDR 预览或视频导出时编码。
+                  </p>
+                  <Field label="管线目标空间" id="motion-target-space">
+                    <select
+                      id="motion-target-space"
+                      value={targetSpace}
+                      disabled={!sourceSpaces.length || !!pending}
+                      onChange={(event) =>
+                        setTargetSpace(event.target.value as MotionSourceSpace)
+                      }
+                    >
+                      {sourceSpaces.map((space) => (
+                        <option key={space.value} value={space.value}>
+                          {space.label}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Button
+                    disabled={
+                      dirty ||
+                      !!pending ||
+                      composing ||
+                      !sourceSpaces.length ||
+                      targetSpace === draft.source_color_space
+                    }
+                    onClick={() => void upgrade()}
+                  >
+                    升级色彩管线
+                  </Button>
+                  <p className="technical-note">
+                    先保存再升级。旧源码保留为背景图层并在线性空间转换，新源码原生使用目标空间；图层之间不共享深度。扩大色域不会自动增加原画面的饱和度。
+                  </p>
+                  {!!draft.preserved_layers.length && (
+                    <Field label="编辑图层" id="motion-source-layer">
+                      <select
+                        id="motion-source-layer"
+                        value={editingLayer ?? "native"}
+                        onChange={(event) =>
+                          setLayerIndex(
+                            event.target.value === "native"
+                              ? null
+                              : Number(event.target.value),
+                          )
+                        }
+                      >
+                        <option value="native">
+                          新内容 · {spaceLabel(draft.source_color_space)}
+                        </option>
+                        {draft.preserved_layers.map((layer, index) => (
+                          <option key={index} value={index}>
+                            保留图层 {index + 1} ·{" "}
+                            {spaceLabel(
+                              layer.source_color_space ??
+                                "Linear Rec.709 (sRGB)",
+                            )}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                  )}
+                </div>
+              )}
               <MotionSourceEditor
-                key={saved!.record.id}
+                key={`${saved!.record.id}:${editingLayer ?? "native"}`}
                 engine={draft.engine}
-                code={draft.code}
-                files={draft.files}
-                onCode={(code) => change("code", code)}
-                onFiles={(files) => change("files", files)}
+                code={source?.code ?? draft.code}
+                files={source?.files ?? {}}
+                onCode={(code) => changeSource("code", code)}
+                onFiles={(files) => changeSource("files", files)}
                 onComposing={compose}
                 disabled={!!pending || composing}
               />
               <p id="motion-code-help" className="technical-note">
                 {draft.engine === "remotion-sdr-v1"
                   ? "SDR 网页动画：默认导出 React 组件，用 useCurrentFrame() 驱动时间；支持 DOM、SVG 与 ThreeCanvas。Tab 键可离开编辑器。"
-                  : "浮点场景：默认导出工厂并返回 scene、camera、update。RGB 为线性 Rec.709，允许超过 1；母版转换为 ACEScg，视频可选 HDR 或 SDR。"}
+                  : `浮点场景：默认导出工厂并返回 scene、camera、update。当前编辑图层的 RGB 为 ${spaceLabel(source?.source_color_space ?? draft.source_color_space)}，保留负值与高光；不在源码中编码 PQ。母版为线性 ACEScg。`}
               </p>
               <div className="motion-save-actions">
                 <Button
@@ -1002,14 +1145,16 @@ export function MotionWorkbench({
                 <Button
                   onClick={() =>
                     void copy(
-                      Object.keys(draft.files).length
+                      Object.keys(draft.files).length ||
+                        draft.preserved_layers.length
                         ? JSON.stringify(valid.spec ?? draft, null, 2)
                         : draft.code,
                     )
                   }
                 >
                   <Copy size={15} />
-                  {Object.keys(draft.files).length
+                  {Object.keys(draft.files).length ||
+                  draft.preserved_layers.length
                     ? "复制全部源码"
                     : "复制代码"}
                 </Button>
@@ -1071,7 +1216,8 @@ export function MotionWorkbench({
               />
               <section className="motion-settings" aria-label="动画规格">
                 <div className="section-heading">
-                  <h3>画面与时间</h3>
+                  {/* This is a sibling panel, including after the iframe's document heading. */}
+                  <h2>画面与时间</h2>
                   <small>
                     {valid.spec
                       ? `${((valid.spec.frames * valid.spec.fps.denominator) / valid.spec.fps.numerator).toFixed(2)} 秒`
@@ -1149,7 +1295,7 @@ export function MotionWorkbench({
               <p className="panel-description">
                 {draft.engine === "remotion-sdr-v1"
                   ? "SDR 网页源为 8-bit sRGB，可输出带完整色域与传递函数标签的 sRGB 视频。"
-                  : "可选择保留 ACEScg EXR 母版，或仅输出 SDR sRGB / HDR PQ、HLG 视频。仅视频不生成 EXR 母版；预览始终为 sRGB。"}
+                  : "可选择保留 ACEScg EXR 母版，或仅输出 SDR sRGB / HDR PQ、HLG 视频。仅视频不生成 EXR 母版；预览显示独立选择。"}
               </p>
             </div>
             <Notice text={outputError} error />
@@ -1529,9 +1675,12 @@ export function MotionWorkbench({
       >
         <p>
           仅记录修订 {reviewTarget?.revision_id.slice(0, 8)} 的审核。请确认最终
-          RGB 为线性 Rec.709 光量，未烘焙显示 Gamma
-          或色调映射，且透明混合符合宿主 Alpha 约定。此记录不会自动检查任意
-          shader，也不会阻止未审核代码渲染。
+          RGB 使用各图层声明的线性空间（当前新内容为
+          {spaceLabel(
+            reviewTarget?.scene.source_color_space ?? "Linear Rec.709 (sRGB)",
+          )}
+          ），未烘焙显示 Gamma 或色调映射，且透明混合符合宿主 Alpha
+          约定。此记录不会自动检查任意 shader，也不会阻止未审核代码渲染。
         </p>
         {/* Reuse the shared modal form padding and native keyboard submission. */}
         <form

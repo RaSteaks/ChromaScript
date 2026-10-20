@@ -1,23 +1,54 @@
 """Pinned OCIO display shader and strict float-frame decoding for the Three bridge."""
 
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import PyOpenColorIO as ocio
 
-from .color import DISPLAYS, SDR_VIEW, config, transform
+from .color import DISPLAYS, HDR_VIEW, SDR_VIEW, config, transform
 from .errors import ChromaError
 
-SOURCE_SPACE = "Linear Rec.709 (sRGB)"
+MotionSourceSpace = Literal["Linear Rec.709 (sRGB)", "ACEScg", "Linear Rec.2020", "ACES2065-1"]
+SOURCE_SPACE: MotionSourceSpace = "Linear Rec.709 (sRGB)"
+SOURCE_SPACES = [
+    {"value": "Linear Rec.2020", "label": "线性 BT.2020 / D65"},
+    {"value": "ACEScg", "label": "ACEScg / AP1 / D60（线性）"},
+    {"value": "ACES2065-1", "label": "ACES2065-1 / AP0 / D60（线性）"},
+    {"value": SOURCE_SPACE, "label": "线性 Rec.709 / D65（兼容）"},
+]
 
 
-@lru_cache(maxsize=1)
-def display_shader() -> dict[str, Any]:
+@lru_cache(maxsize=4)
+def working_space(source: MotionSourceSpace) -> dict[str, Any]:
+    """OCIO owns linear primaries/white adaptation; Three consumes the same matrices."""
+    primaries = {
+        SOURCE_SPACE: [0.64, 0.33, 0.30, 0.60, 0.15, 0.06],
+        "ACEScg": [0.713, 0.293, 0.165, 0.830, 0.128, 0.044],
+        "ACES2065-1": [0.7347, 0.2653, 0.0, 1.0, 0.0001, -0.0770],
+        "Linear Rec.2020": [0.708, 0.292, 0.170, 0.797, 0.131, 0.046],
+    }
+    if source not in primaries:
+        raise ChromaError("motion_color", "动画源码仅支持线性 Rec.709、BT.2020、ACEScg/AP1 或 ACES/AP0。")
+    processor = config().getProcessor(source, SOURCE_SPACE).getDefaultCPUProcessor()
+    # All supported spaces are scene-linear. Basis vectors extract a matrix, not
+    # a fitted display LUT; AP1's D60/D65 adaptation is included by pinned OCIO.
+    matrix = np.array([processor.applyRGB(row.tolist()) for row in np.eye(3)]).T
+    return {
+        "source": source,
+        "primaries": primaries[source],
+        "white_point": [0.32168, 0.33767] if source in {"ACEScg", "ACES2065-1"} else [0.3127, 0.3290],
+        "to_linear_rec709": matrix.tolist(),
+    }
+
+
+@lru_cache(maxsize=8)
+def display_shader(source: MotionSourceSpace = SOURCE_SPACE, hdr: bool = False) -> dict[str, Any]:
     # The preview uses the same OCIO rendering transform as CPU-generated PNGs.
     # No fitted Three.js ACES tone mapper, baked SDR screenshot, or alpha transform.
     processor = config().getProcessor(
-        ocio.DisplayViewTransform(src=SOURCE_SPACE, display=DISPLAYS["sRGB"], view=SDR_VIEW)
+        ocio.DisplayViewTransform(src=source, display=DISPLAYS["PQ" if hdr else "sRGB"],
+                                  view=HDR_VIEW if hdr else SDR_VIEW)
     )
     desc = ocio.GpuShaderDesc.CreateShaderDesc()
     desc.setLanguage(ocio.GPU_LANGUAGE_GLSL_ES_3_0)
@@ -37,6 +68,7 @@ def display_shader() -> dict[str, Any]:
     for texture in desc.getTextures():
         shader = shader.replace(f"/ {texture.width},", f"/ {texture.width}.0,")
     return {
+        "working_space": working_space(source),
         "shader": shader,
         "textures": [
             {
@@ -52,7 +84,11 @@ def display_shader() -> dict[str, Any]:
     }
 
 
-def decode_float_frame(data: bytes, width: int, height: int, render_scale: int = 1) -> np.ndarray:
+def decode_float_frame(
+    data: bytes, width: int, height: int, render_scale: int = 1,
+    source: MotionSourceSpace = SOURCE_SPACE,
+) -> np.ndarray:
+    working_space(source)  # Reject encoded/unknown inputs even for the identity path.
     if render_scale not in (1, 2, 4) or len(data) != width * height * render_scale**2 * 16:
         raise ChromaError("motion_frame", "浮点帧字节数与画面规格不符。")
     pixels = np.frombuffer(data, dtype="<f4").reshape(height * render_scale, width * render_scale, 4).copy()
@@ -71,4 +107,6 @@ def decode_float_frame(data: bytes, width: int, height: int, render_scale: int =
     pixels[..., :3] = np.divide(
         pixels[..., :3], alpha, out=np.zeros_like(pixels[..., :3]), where=alpha > 0
     )
-    return transform(pixels, "ACEScg", source=SOURCE_SPACE)
+    # Native AP1 needs no round trip through Rec.709. Other linear inputs only
+    # change primaries/white point here; display rendering belongs to the exit.
+    return pixels if source == "ACEScg" else transform(pixels, "ACEScg", source=source)

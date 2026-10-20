@@ -53,3 +53,32 @@ export async function call<T>(
 export function artifactUrl(id: string, download = false): string {
   return "/api/artifacts/" + id + (download ? "?download=1" : "");
 }
+
+/** Binary adapter of the same typed HDR operation; avoid Base64/JSON pixel copies. */
+export async function encodeHDRPreview(
+  header: unknown,
+  frames: ArrayBuffer[],
+  signal?: AbortSignal,
+): Promise<unknown> {
+  if (!token) await connect();
+  const response = await fetch(
+    "/api/operations/encode_motion_hdr_preview/binary",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        Authorization: "Bearer " + token,
+        "X-Chroma-HDR": JSON.stringify(header),
+      },
+      body: new Blob(frames),
+      signal,
+    },
+  );
+  const data = await response.json();
+  if (!response.ok)
+    throw new ApiError(
+      data.error?.message || "HDR 预览编码失败",
+      data.error?.code,
+    );
+  return data;
+}

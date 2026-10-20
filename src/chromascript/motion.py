@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import psutil
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, StrictBool, field_validator, model_validator
 
 from .audio import audio_sample_window, freeze_audio, read_timeline
 from .color import color_info, output_metadata, video_tag_issue
@@ -22,7 +22,14 @@ from .errors import ChromaError
 from .exports import DESTINATION_LAYOUT, bundle_name, volume_identity
 from .exports import export_directory as resolve_export_directory
 from .models import ColorPipeline, DeliveryPreset, Job, Model, MotionRate, MotionRenderSettings
-from .motion_color import display_shader
+from .motion_color import (
+    SOURCE_SPACE,
+    SOURCE_SPACES,
+    MotionSourceSpace,
+    display_shader,
+    working_space,
+)
+from .motion_hdr_preview import HDRPreviewChunk, encode_hdr_preview
 from .motion_sources import source_hash, validate_sources
 from .operations import operation
 from .presets import builtins
@@ -108,13 +115,13 @@ def resolve_motion_output(engine: MotionEngine, output: MotionOutput | None) -> 
     return output
 
 
-class MotionSpec(Model):
-    engine: MotionEngine = "three-float-v1"
-    name: str = Field(default="未命名动画", min_length=1, max_length=120)
+class MotionSource(Model):
+    # Omitted fields retain historical linear Rec.709 semantics, never new defaults.
+    source_color_space: MotionSourceSpace = Field(default=SOURCE_SPACE, description="Scene-linear RGB basis for numeric colors, shaders and rendering. No PQ/sRGB encoding here.")
     code: str = Field(
         min_length=1,
         max_length=200_000,
-        description="For three-float-v1: Three.js factory returning scene/camera/update; linear Rec.709 float RGB converts to ACEScg. For remotion-sdr-v1: default React TSX component using useCurrentFrame; display-referred sRGB screenshot.",
+        description="Float: Three.js factory returning scene/camera/update in source_color_space. SDR: default React TSX component, display-referred sRGB screenshot.",
     )
     # Extra modules belong to this revision; code remains the backward-compatible entry.
     files: dict[str, str] = Field(
@@ -122,15 +129,48 @@ class MotionSpec(Model):
         max_length=128,
         description="Relative TS/TSX/JS/JSX chapter paths mapped to source; import them from code.",
     )
+    @model_validator(mode="after")
+    def valid_sources(self) -> MotionSource:
+        validate_sources(self.code, self.files)
+        return self
+
+
+class MotionSpec(MotionSource):
+    engine: MotionEngine = "three-float-v1"
+    name: str = Field(default="未命名动画", min_length=1, max_length=120)
+    # Preserved source graphs render as ordered background layers in their original
+    # linear basis. New source renders natively on top; layers do not share depth.
+    preserved_layers: list[MotionSource] = Field(default_factory=list, max_length=16)
     width: int = Field(default=1920, ge=1, le=2_147_483_647, strict=True)
     height: int = Field(default=1080, ge=1, le=2_147_483_647, strict=True)
     frames: int = Field(default=150, ge=1, le=2_147_483_647, strict=True)
     fps: MotionRate = Field(default_factory=MotionRate)
 
     @model_validator(mode="after")
-    def valid_sources(self) -> MotionSpec:
-        validate_sources(self.code, self.files)
+    def valid_pipeline(self) -> MotionSpec:
+        if self.engine == "remotion-sdr-v1" and (self.source_color_space != SOURCE_SPACE or self.preserved_layers):
+            raise ValueError("SDR 网页源不支持场景线性颜色空间或浮点升级图层")
+        graphs = [self, *self.preserved_layers]
+        if sum(len(s.code) + sum(map(len, s.files.values())) for s in graphs) > 2_000_000:
+            raise ValueError("包含保留图层在内的全部源码最多 2000000 字符")
         return self
+
+    def source_digest(self) -> str:
+        # Preserve historical attestations, while binding all new color semantics
+        # and retained source graphs to the evidence exported with a revision.
+        if self.source_color_space == SOURCE_SPACE and not self.preserved_layers:
+            return source_hash(self.code, self.files)
+        return hashlib.sha256(canonical({
+            "code": self.code, "files": self.files, "source_color_space": self.source_color_space,
+            "preserved_layers": [layer.model_dump() for layer in self.preserved_layers],
+        }).encode()).hexdigest()
+
+    def display(self, hdr_preview: bool = False) -> dict[str, Any]:
+        return {**display_shader(self.source_color_space),
+                **({"hdr": display_shader(self.source_color_space, hdr=True)} if hdr_preview else {}),
+                "layers": [
+            working_space(layer.source_color_space) for layer in self.preserved_layers
+        ]}
 
     def settings(self) -> MotionRenderSettings:
         return MotionRenderSettings(
@@ -138,7 +178,9 @@ class MotionSpec(Model):
         )
 
 
-def blank_motion(engine: MotionEngine = "three-float-v1") -> MotionSpec:
+def blank_motion(
+    engine: MotionEngine = "three-float-v1", source_color_space: MotionSourceSpace | None = None,
+) -> MotionSpec:
     """An empty runnable contract, without example objects, text, lights or animation."""
     if engine == "remotion-sdr-v1":
         code = """// An empty SDR composition. Add React, SVG or ThreeCanvas content here.
@@ -162,6 +204,7 @@ export default function createScene({width, height}: {width: number; height: num
     return MotionSpec(
         name="空白 SDR 动画" if engine == "remotion-sdr-v1" else "空白浮点动画",
         engine=engine,
+        source_color_space=source_color_space or ("Linear Rec.2020" if engine == "three-float-v1" else SOURCE_SPACE),
         code=code,
     )
 
@@ -262,9 +305,24 @@ def motion_environment() -> dict[str, Any]:
             "entry": {"three-float-v1": "Animation.ts", "remotion-sdr-v1": "Animation.tsx"},
         },
         "contract": "motion-dual-v1",
+        # Discoverable workflow pointers are identical through the shared registry.
+        "color_authoring": {
+            "documentation_topic": "motion-color",
+            "documentation_resource": "chromascript://docs/motion-color",
+            "upgrade_operation": "chromascript.upgrade_motion_scene",
+            "read_operation": "chromascript.get_motion_scene",
+            "requires_expected_revision_id": True,
+            "upgrade_preserves_colors": True,
+            "preserved_layers_share_depth": False,
+            "master_space": "ACEScg",
+            "display_encoding_stage": "preview/video exits only",
+        },
         "engines": {
             "three-float-v1": {
                 "imports": ["three"],
+                "source_color_spaces": SOURCE_SPACES,
+                "default_source_color_space": "Linear Rec.2020",
+                "upgrade": "preserve source as a linear-composited background layer; new source uses target space",
                 "source_precision": "RGBA32F",
                 "scene_linear_master": True,
             },
@@ -282,7 +340,16 @@ def motion_environment() -> dict[str, Any]:
             },
         },
         "output": "HDR and SDR templates; engine-specific EXR, H.264, HEVC and ProRes 422 HQ MOV delivery",
-        "preview": "sRGB: OCIO ACES view for float scenes; native sRGB for SDR scenes",
+        "preview": "Automatic low-resolution PQ/HEVC video for wide-gamut float scenes on HDR-capable browsers; OCIO sRGB fallback. Native sRGB for SDR scenes.",
+        "hdr_preview": {
+            "operation": "chromascript.encode_motion_hdr_preview",
+            "max_dimensions": [1280, 720], "fps": "project rational rate; no sampling", "max_chunk_frames": 64,
+            "binary_operation": "/api/operations/encode_motion_hdr_preview/binary",
+            "input_formats": ["rgba32f-linear", "p010-pq"],
+            "output": "PQ", "target_peak_nits": 1000, "transient": True,
+            "input": "JSON Base64 or authenticated binary P010 PQ; legacy bottom-up premultiplied RGBA32F remains supported",
+            "display_verified": False,
+        },
         "source_precision": "engine-specific: RGBA32F float or 8-bit sRGB screenshot",
         "specification": {
             "integer_max": 2_147_483_647,
@@ -302,6 +369,9 @@ def motion_identity() -> dict[str, Any]:
         FRONTEND / "motion" / "preview.tsx",
         Path(__file__).with_name("motion_sdr_worker.py"),
         FRONTEND / "motion" / "float-runtime.mjs",
+        FRONTEND / "motion" / "hdr-preview.mjs",
+        FRONTEND / "motion" / "hdr-capture.mjs",
+        FRONTEND / "motion" / "source-color.mjs",
         FRONTEND / "motion" / "source-modules.mjs",
         Path(__file__).with_name("motion_sources.py"),
         Path(__file__).with_name("motion_color.py"),
@@ -349,7 +419,9 @@ def motion_identity() -> dict[str, Any]:
 
 
 @lru_cache(maxsize=4)
-def compile_preview(payload: str, renderer_fingerprint: str = "") -> dict[str, Any]:
+def compile_preview(
+    payload: str, renderer_fingerprint: str = "", hdr_preview: bool = False,
+) -> dict[str, Any]:
     # Compilation only handles source as data. User JavaScript executes in an
     # opaque-origin sandbox, never in Node or the authenticated editor document.
     env = motion_environment()
@@ -366,7 +438,8 @@ def compile_preview(payload: str, renderer_fingerprint: str = "") -> dict[str, A
                 ),
                 "preview",
             ],
-            input=canonical({"spec": json.loads(payload), "display": display_shader()}),
+            input=canonical({"spec": json.loads(payload), "display": MotionSpec.model_validate_json(payload).display(hdr_preview),
+                             "hdr_preview": hdr_preview}),
             capture_output=True,
             text=True,
             cwd=FRONTEND,
@@ -404,7 +477,7 @@ class MotionOperations:
         return record, MotionSpec.model_validate(source), revision["id"]
 
     @operation(
-        "Discover HDR/SDR source engines, per-engine imports and precision, dependencies and preview/master color spaces."
+        "Discover source engines, native linear Rec.709/BT.2020/AP1/AP0 authoring spaces, color-preserving upgrade operation and agent guide, dependencies and preview/master spaces."
     )
     def get_motion_capabilities(self) -> dict[str, Any]:
         return motion_environment()
@@ -519,7 +592,7 @@ class MotionOperations:
             if exc.as_dict()["code"] != "not_found":
                 raise
             review = None
-        digest = source_hash(spec.code, spec.files)
+        digest = spec.source_digest()
         if review and review.get("source_sha256") == digest:
             return review
         return {
@@ -541,7 +614,8 @@ class MotionOperations:
             raise ChromaError("motion_review", "请填写审核人（1–120 字）和审核依据（1–4000 字）。")
         self.store.put("motion_color_review", rid, {
             "id": rid, "scene_id": scene_id, "status": "reviewed",
-            "source_sha256": source_hash(spec.code, spec.files),
+            "source_sha256": spec.source_digest(),
+            "source_color_space": spec.source_color_space,
             "reviewer": reviewer.strip(), "notes": notes.strip(), "reviewed_at": now(),
             "basis": "explicit reviewer attestation; not automatic semantic verification",
         })
@@ -556,11 +630,14 @@ class MotionOperations:
         template_id: str | None = None,
         spec: MotionSpec | None = None,
         engine: MotionEngine | None = None,
+        source_color_space: MotionSourceSpace | None = None,
     ) -> dict[str, Any]:
         self._motion_project(project_id, True)
+        if engine == "remotion-sdr-v1" and source_color_space not in {None, SOURCE_SPACE}:
+            raise ChromaError("motion_color", "SDR 网页源不支持场景线性颜色空间。请选择浮点动画。")
         if spec is None:
             if template_id is None:
-                spec = blank_motion(engine or "three-float-v1")
+                spec = blank_motion(engine or "three-float-v1", source_color_space)
             else:
                 if template_id not in templates():
                     raise ChromaError(
@@ -569,6 +646,8 @@ class MotionOperations:
                 spec = templates()[template_id]
         if engine is not None and spec.engine != engine:
             raise ChromaError("motion_engine", "所选引擎与模板或源码的引擎不一致。")
+        if source_color_space is not None and spec.source_color_space != source_color_space:
+            raise ChromaError("motion_color", "源码颜色空间与模板或 spec 不一致；已有动画请使用升级操作以保持颜色。")
         sid, rid = identifier(), identifier()
         self.store.put(
             "motion_revision",
@@ -619,12 +698,40 @@ class MotionOperations:
         )
         return self.get_motion_scene(scene_id)
 
+    @operation("Upgrade a saved float animation to another linear source space without reinterpreting old RGB. Preserve original source graphs as background layers; create an empty native foreground for continued authoring. Revision checked; old revisions remain unchanged.")
+    def upgrade_motion_scene(
+        self, scene_id: str, expected_revision_id: str, source_color_space: MotionSourceSpace,
+    ) -> dict[str, Any]:
+        record, spec, rid = self._motion_scene(scene_id)
+        self._motion_project(record["project_id"], True)
+        if rid != expected_revision_id:
+            raise ChromaError("revision_conflict", "动画修订已改变，请保留草稿并重新读取。", current_revision_id=rid)
+        if spec.engine != "three-float-v1":
+            raise ChromaError("motion_color", "SDR 截图不能升级为原生宽色域场景。")
+        if source_color_space == spec.source_color_space:
+            return self.get_motion_scene(scene_id)
+        previous = MotionSource(code=spec.code, files=spec.files, source_color_space=spec.source_color_space)
+        native = blank_motion(source_color_space=source_color_space)
+        layers = list(spec.preserved_layers)
+        if spec.code != native.code or spec.files:
+            if len(layers) >= 16:
+                raise ChromaError("motion_color", "已达 16 个保留图层；请整理源码后再升级。")
+            layers.append(previous)
+        # Keep arbitrary shader algorithms intact. Source literals cannot safely be
+        # rewritten as colors, so conversion happens once at a linear image boundary.
+        upgraded = MotionSpec.model_validate({
+            **spec.model_dump(), "source_color_space": source_color_space,
+            "code": native.code, "files": {},
+            "preserved_layers": [layer.model_dump() for layer in layers],
+        })
+        return self.update_motion_scene(scene_id, upgraded, expected_revision_id)
+
     @operation(
         "Compile an unsaved HDR/SDR scene into a network-disabled sandbox preview, without saving or submitting a job."
     )
-    def compile_motion_preview(self, spec: MotionSpec) -> dict[str, Any]:
+    def compile_motion_preview(self, spec: MotionSpec, hdr_preview: StrictBool = False) -> dict[str, Any]:
         # Changing the compiler/bridge cannot resurrect cached HTML from an older runtime.
-        result = compile_preview(canonical(spec.model_dump()), motion_identity()["renderer_sha256"])
+        result = compile_preview(canonical(spec.model_dump()), motion_identity()["renderer_sha256"], hdr_preview)
         # Cached compilation gets a fresh bridge identity on every mount, so retry
         # cannot collide with the still-mounted previous successful picture.
         channel = identifier()
@@ -635,6 +742,13 @@ class MotionOperations:
             "source_sha256": hashlib.sha256(canonical(spec.model_dump()).encode()).hexdigest(),
             "transient": True,
         }
+
+    @operation(
+        "Encode a bounded 720p chunk at the exact project rational frame rate as verified PQ/HEVC fMP4. Accept GPU-rendered P010 PQ or legacy scene-linear RGBA32F; use binary HTTP to avoid Base64 overhead. No jobs or files are retained; equivalent on HTTP, MCP and CLI.",
+        serialized=False,
+    )
+    def encode_motion_hdr_preview(self, chunk: HDRPreviewChunk) -> dict[str, Any]:
+        return encode_hdr_preview(chunk)
 
     @operation(
         "Render one unsaved HDR/SDR frame to a transient sRGB PNG for model inspection. HDR sources include original ACEScg statistics; SDR sources declare 8-bit screenshot precision."
@@ -664,11 +778,12 @@ class MotionOperations:
             result: dict[str, Any] = {}
 
             def accept(index: int, path: Path) -> None:
-                pixels = decode_float_frame(path.read_bytes(), width, height)
+                pixels = decode_float_frame(path.read_bytes(), width, height, source=spec.source_color_space)
                 png = root / "preview.png"
                 write_image(png, transform(pixels, "sRGB"), space="sRGB", depth=8)
                 result.update(
                     frame=index,
+                    source_color_space=spec.source_color_space,
                     transient=True,
                     color_space="ACEScg",
                     minimum=pixels.min(axis=(0, 1)).tolist(),
@@ -830,6 +945,9 @@ class MotionOperations:
         # Budget all simultaneous CPU copies plus GPU targets before allocating. The
         # browser additionally checks its actual texture/renderbuffer/viewport limits.
         working_bytes = pixels * (output.render_scale ** 2 * 96 + 96) + spec.frames * 1024
+        if spec.preserved_layers:
+            # Layers reuse one scratch RGBA32F target, not one full raster per layer.
+            working_bytes += pixels * output.render_scale**2 * 16
         if working_bytes > psutil.virtual_memory().available * 0.7:
             raise ChromaError("motion_memory", "当前可用内存不足；请降低超采样倍率、尺寸或释放内存。", required_bytes=working_bytes)
         estimate = self.estimate_motion_render(

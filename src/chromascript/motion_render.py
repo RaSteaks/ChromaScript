@@ -13,7 +13,6 @@ from typing import Any, Callable
 
 from .errors import ChromaError
 from .motion import FRONTEND, RUNTIME, MotionSpec, browser_executable
-from .motion_color import display_shader
 from .store import canonical
 
 
@@ -45,7 +44,7 @@ def iter_float_frames(
                 canonical(
                     {
                         "spec": spec.model_dump(),
-                        "display": display_shader(),
+                        "display": spec.display(),
                         "frames": str(directory),
                         "max_dimension": max_dimension,
                         "browser": browser_executable(),

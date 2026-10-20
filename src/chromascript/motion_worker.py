@@ -31,7 +31,7 @@ from .motion import (
 )
 from .motion_color import decode_float_frame
 from .motion_render import iter_float_frames, render_float_frames
-from .motion_sources import source_hash, write_sources
+from .motion_sources import write_sources
 from .presets import builtins
 from .store import Store, canonical, now
 
@@ -155,6 +155,10 @@ def run_motion(root: Path, job_id: str) -> None:
             directory.mkdir(parents=True, exist_ok=True)
         # Freeze every chapter alongside the entry so exported sources remain reproducible.
         sources = write_sources(directory, spec.engine, spec.code, spec.files)
+        # Every retained graph is exported with its original linear-space declaration
+        # in animation.json; relative module paths remain portable within each layer.
+        for index, layer in enumerate(spec.preserved_layers):
+            sources += write_sources(directory / "preserved-layers" / str(index), spec.engine, layer.code, layer.files)
         description = directory / "animation.json"
         description.write_text(json.dumps(spec.model_dump(), ensure_ascii=False, indent=2))
         audio_path = directory / "audio.wav"
@@ -198,7 +202,7 @@ def run_motion(root: Path, job_id: str) -> None:
                 # covers interruption after the last frame but before browser shutdown.
                 if not (work / "gpu-verified.json").exists():
                     atomic_json(work / "gpu-verified.json", json.loads((work / "gpu.json").read_text()))
-                pixels = decode_float_frame(raw.read_bytes(), spec.width, spec.height, output.render_scale)
+                pixels = decode_float_frame(raw.read_bytes(), spec.width, spec.height, output.render_scale, spec.source_color_space)
                 target = masters / f"{index:08d}.exr"
                 result = write_image(
                     target,
@@ -288,6 +292,9 @@ def run_motion(root: Path, job_id: str) -> None:
             "scene_linear_master": master_depth is not None,
             "delivery_mode": "video-only" if master_depth is None else "exr-master",
             "source_precision": "RGBA32F GPU readback",
+            "source_color_space": spec.source_color_space,
+            "preserved_layer_spaces": [layer.source_color_space for layer in spec.preserved_layers],
+            "linear_processing": "source, spatial sampling, layer compositing and master conversion; display rendering only at preview/video exits",
             "master_bit_depth": output.master_bit_depth,
             "verified_frame_rate": f"{spec.fps.numerator}/{spec.fps.denominator}",
             # Float transport/storage evidence is independent of an explicit
@@ -324,7 +331,7 @@ def run_motion(root: Path, job_id: str) -> None:
                         progress("encoding", 0.95 * index / spec.frames, index)
                         if shutil.disk_usage(work).free < 64 * 1024**2 + spec.width * spec.height * 16 * output.render_scale**2:
                             raise ChromaError("disk_space", "导出盘剩余空间不足，已停止仅视频渲染。请释放空间后重新执行。")
-                        pixels = decode_float_frame(raw.read_bytes(), spec.width, spec.height, output.render_scale)
+                        pixels = decode_float_frame(raw.read_bytes(), spec.width, spec.height, output.render_scale, spec.source_color_space)
                         if index == 0:
                             write_image(thumbnail, resize_srgb(transform(pixels, "sRGB"), 1280), space="sRGB", depth=8)
                         # Flatten alpha in linear ACEScg, then apply exactly one ACES
@@ -374,12 +381,12 @@ def run_motion(root: Path, job_id: str) -> None:
                     "gpu": gpu,
                     "probe": info,
                     "audio": audio_info,
-                    "source_sha256": source_hash(spec.code, spec.files),
+                    "source_sha256": spec.source_digest(),
                     "video_sha256": file_hash(video) if video else None,
                     "fps": spec.fps.model_dump(),
                     "color_configuration": snapshot["color_configuration"],
                     "notes": [
-                        "RGBA32F linear Rec.709 readback converted to ACEScg using pinned OCIO",
+                        f"RGBA32F {spec.source_color_space} readback converted to ACEScg using pinned OCIO; Alpha bypasses the transform",
                         "No EXR masters written; float frames stream directly to the video encoder" if master_depth is None else "EXR masters contain no display transform; sRGB previews use the ACES SDR view",
                         "PQ/HLG use one ACES 1000-nit output rendering; no invented mastering metadata",
                         "Alpha bypasses OCIO; video flattens on black in scene-linear ACEScg",

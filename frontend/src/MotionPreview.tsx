@@ -8,14 +8,21 @@ import {
   StepForward,
 } from "lucide-react";
 import { PreviewAudio, type PreviewAudioHandle } from "./PreviewAudio";
-import { call } from "./api";
+import { call, encodeHDRPreview } from "./api";
 import {
   Button,
+  Field,
   Notice,
   PreviewPanel,
   type PreviewPanelHandle,
 } from "./components";
 import type { MotionSpec } from "./types";
+import {
+  createHDRPreview,
+  hdrVideoSupport,
+  hdrVideoCapabilities,
+  type HDRController,
+} from "../motion/hdr-preview.mjs";
 
 type Picture = {
   html: string;
@@ -23,6 +30,8 @@ type Picture = {
   recipe: string;
   frames: number;
   ready: boolean;
+  hdrPreview: boolean;
+  hdr?: { mode: "hdr" | "sdr" | "buffering"; message: string };
 };
 
 /** A candidate proves it can mount before replacing the last working picture. */
@@ -49,11 +58,17 @@ export function MotionPreview({
   const [retry, setRetry] = useState(0);
   const [frame, setFrame] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [hdrPreview, setHdrPreview] = useState(true);
   const windows = useRef(new Map<string, HTMLIFrameElement>());
   const panel = useRef<PreviewPanelHandle>(null);
   const current = useRef(pictures);
   current.current = pictures;
   const failed = useRef(new Set<string>());
+  const videoHost = useRef<HTMLDivElement>(null);
+  const hdr = useRef<HDRController | null>(null);
+  const captureSequence = useRef(0);
+  const latestFrame = useRef(frame);
+  latestFrame.current = frame;
   const recipe = spec ? JSON.stringify(spec) : "";
   const accepted = pictures.find((picture) => picture.ready);
   const command = useCallback((type: string, value?: number) => {
@@ -61,6 +76,14 @@ export function MotionPreview({
     if (picture && type === "seek" && value !== undefined) {
       const spec: MotionSpec = JSON.parse(picture.recipe);
       audio.current?.seek((value * spec.fps.denominator) / spec.fps.numerator);
+    }
+    if (hdr.current?.enabled) {
+      if (type === "play") {
+        hdr.current.play();
+        return;
+      }
+      if (type === "pause") hdr.current.pause();
+      if (type === "seek" && value !== undefined) hdr.current.seek(value);
     }
     if (picture)
       windows.current
@@ -79,6 +102,183 @@ export function MotionPreview({
     failed.current.clear();
   }, [sceneId]);
 
+  const acceptedChannel = accepted?.channel;
+  const acceptedRecipe = accepted?.recipe;
+  const acceptedHDR = accepted?.hdrPreview;
+  useEffect(() => {
+    if (!acceptedChannel || !acceptedRecipe || !videoHost.current) return;
+    const source: MotionSpec = JSON.parse(acceptedRecipe);
+    if (
+      !acceptedHDR ||
+      source.engine !== "three-float-v1" ||
+      !source.source_color_space ||
+      source.source_color_space === "Linear Rec.709 (sRGB)"
+    )
+      return;
+    const status = (value: NonNullable<Picture["hdr"]>) =>
+      setPictures((old) =>
+        old.map((item) =>
+          item.channel === acceptedChannel ? { ...item, hdr: value } : item,
+        ),
+      );
+    const scale = Math.min(
+      1,
+      1280 / Math.max(source.width, source.height),
+      720 / Math.min(source.width, source.height),
+    );
+    const width = Math.floor((source.width * scale) / 2) * 2;
+    const height = Math.floor((source.height * scale) / 2) * 2;
+    const capabilities = hdrVideoCapabilities();
+    if (!capabilities.supported || width < 16 || height < 16) {
+      status({
+        mode: "sdr",
+        message: `${!capabilities.supported ? capabilities.reason : "当前画面比例无法生成至少 16 像素的 HDR 视频"} · sRGB 预览`,
+      });
+      return;
+    }
+    const target = windows.current.get(acceptedChannel)?.contentWindow;
+    if (!target) return;
+    const abort = new AbortController();
+    const captures = new Map<
+      number,
+      {
+        resolve: (data: ArrayBuffer[]) => void;
+        buffers: ArrayBuffer[];
+        count: number;
+        seen: Set<number>;
+        cleanup: () => void;
+        reject: (cause: Error) => void;
+        timer: number;
+      }
+    >();
+    const receive = (event: MessageEvent) => {
+      const { channel, type, value } = event.data || {};
+      if (
+        event.source !== target ||
+        channel !== acceptedChannel ||
+        type !== "hdr-captured"
+      )
+        return;
+      const request = captures.get(value?.id);
+      if (!request) return;
+      if (value.error) {
+        request.cleanup();
+        request.reject(new Error(String(value.error)));
+      } else if (
+        value.width !== width ||
+        value.height !== height ||
+        !(value.data instanceof ArrayBuffer) ||
+        value.data.byteLength !== width * height * 3 ||
+        !Number.isInteger(value.index) ||
+        value.index < 0 ||
+        value.index >= request.count ||
+        request.seen.has(value.index)
+      ) {
+        request.cleanup();
+        request.reject(new Error("HDR 预览批次或像素尺寸不符"));
+      } else {
+        request.buffers[value.index] = value.data;
+        request.seen.add(value.index);
+        if (request.seen.size === request.count) {
+          request.cleanup();
+          request.resolve(request.buffers);
+        }
+      }
+    };
+    window.addEventListener("message", receive);
+    // The parent owns the native video because WebKit cannot attach MSE in an
+    // opaque sandbox. Only requested, bounded float replies cross this boundary.
+    const controller = createHDRPreview({
+      mount: videoHost.current,
+      width,
+      height,
+      config: {
+        frames: source.frames,
+        fps: source.fps.numerator / source.fps.denominator,
+        frameRate: source.fps,
+        display: { working_space: { source: source.source_color_space } },
+      },
+      capture(indices, signal) {
+        return new Promise<ArrayBuffer[]>((resolve, reject) => {
+          // Never reuse an ID when an effect remounts on the same iframe.
+          const id = ++captureSequence.current;
+          const cleanup = () => {
+            const entry = captures.get(id);
+            if (entry) window.clearTimeout(entry.timer);
+            captures.delete(id);
+            signal.removeEventListener("abort", cancel);
+          };
+          const cancel = () => {
+            cleanup();
+            target.postMessage(
+              { channel: acceptedChannel, type: "hdr-cancel", value: id },
+              "*",
+            );
+            reject(new DOMException("HDR capture cancelled", "AbortError"));
+          };
+          const timer = window.setTimeout(() => {
+            cleanup();
+            reject(new Error("HDR 批次采集超时"));
+          }, 15000);
+          captures.set(id, {
+            resolve,
+            reject,
+            timer,
+            buffers: [],
+            count: indices.length,
+            seen: new Set(),
+            cleanup,
+          });
+          signal.addEventListener("abort", cancel, { once: true });
+          if (signal.aborted) {
+            cancel();
+            return;
+          }
+          target.postMessage(
+            {
+              channel: acceptedChannel,
+              type: "hdr-capture",
+              value: { id, frames: indices },
+            },
+            "*",
+          );
+        });
+      },
+      encodeChunk: (header, frames) =>
+        encodeHDRPreview(
+          header,
+          frames,
+          AbortSignal.any([abort.signal, AbortSignal.timeout(45000)]),
+        ),
+      onStatus: status,
+      onFrame: setFrame,
+      onPlaying: setPlaying,
+      onFallback() {
+        target.postMessage(
+          {
+            channel: acceptedChannel,
+            type: "seek",
+            value: latestFrame.current,
+          },
+          "*",
+        );
+      },
+    });
+    hdr.current = controller;
+    controller.seek(Math.min(latestFrame.current, source.frames - 1));
+    return () => {
+      abort.abort();
+      controller.dispose();
+      if (hdr.current === controller) hdr.current = null;
+      window.removeEventListener("message", receive);
+      for (const request of captures.values()) {
+        request.cleanup();
+        request.reject(new Error("预览已替换"));
+      }
+      captures.clear();
+    };
+  }, [acceptedChannel, acceptedRecipe, acceptedHDR]);
+
   useEffect(() => {
     // A replaced candidate must not let its old readiness timeout overwrite a
     // newer draft's status. Only committed pictures survive a recipe change.
@@ -96,7 +296,10 @@ export function MotionPreview({
       try {
         const reply = await call<{ html: string; channel: string }>(
           "compile_motion_preview",
-          { spec: JSON.parse(recipe) },
+          {
+            spec: JSON.parse(recipe),
+            hdr_preview: hdrPreview && hdrVideoSupport(),
+          },
           AbortSignal.any([abort.signal, AbortSignal.timeout(50000)]),
         );
         if (!cancelled)
@@ -107,6 +310,7 @@ export function MotionPreview({
               recipe,
               frames: JSON.parse(recipe).frames,
               ready: false,
+              hdrPreview,
             },
           ]);
       } catch (cause) {
@@ -123,7 +327,7 @@ export function MotionPreview({
       abort.abort();
       window.clearTimeout(timer);
     };
-  }, [recipe, active, composing, sceneId, retry, command]);
+  }, [recipe, active, composing, sceneId, retry, command, hdrPreview]);
 
   useEffect(() => {
     const candidate = pictures.find((picture) => !picture.ready);
@@ -156,6 +360,26 @@ export function MotionPreview({
         return;
       // Escape from the opaque iframe must reach its enclosing large viewer.
       if (data.type === "exit-expanded-preview") panel.current?.close();
+      if (
+        data.type === "hdr-status" &&
+        picture.ready &&
+        ["hdr", "sdr", "buffering"].includes(data.value?.mode) &&
+        typeof data.value?.message === "string"
+      ) {
+        setPictures((old) =>
+          old.map((item) =>
+            item.channel === data.channel
+              ? {
+                  ...item,
+                  hdr: {
+                    mode: data.value.mode,
+                    message: data.value.message.slice(0, 300),
+                  },
+                }
+              : item,
+          ),
+        );
+      }
       if (data.type === "error") {
         // Reject broken candidates, but keep a mounted renderer's channel alive:
         // a later seek can recover from a frame-specific GPU/runtime failure.
@@ -173,7 +397,8 @@ export function MotionPreview({
       }
       if (data.type === "ready" && !picture.ready) {
         // Ignore results for a draft replaced while the iframe was mounting.
-        if (picture.recipe !== recipe) return;
+        if (picture.recipe !== recipe || picture.hdrPreview !== hdrPreview)
+          return;
         setPictures((old) =>
           old
             .filter((item) => item.channel === data.channel)
@@ -212,7 +437,7 @@ export function MotionPreview({
     };
     window.addEventListener("message", message);
     return () => window.removeEventListener("message", message);
-  }, [recipe, frame]);
+  }, [recipe, frame, hdrPreview]);
 
   useEffect(() => {
     const pauseHidden = () => {
@@ -223,7 +448,9 @@ export function MotionPreview({
     return () => document.removeEventListener("visibilitychange", pauseHidden);
   }, [active, command]);
 
-  const stale = !!accepted && accepted.recipe !== recipe;
+  const stale =
+    !!accepted &&
+    (accepted.recipe !== recipe || accepted.hdrPreview !== hdrPreview);
   // Retained pictures keep their own rational rate when a replacement draft fails.
   const acceptedSpec: MotionSpec | null = accepted
     ? JSON.parse(accepted.recipe)
@@ -244,7 +471,11 @@ export function MotionPreview({
           <span className="tiny-label">
             {spec?.engine === "remotion-sdr-v1"
               ? "Remotion · SDR"
-              : "ACES · sRGB"}
+              : accepted?.hdr?.mode === "hdr"
+                ? "ACES · HDR PQ"
+                : accepted?.hdr?.mode === "buffering"
+                  ? "ACES · HDR 缓冲"
+                  : "ACES · sRGB"}
           </span>
         </div>
       }
@@ -267,6 +498,7 @@ export function MotionPreview({
             aria-hidden={!picture.ready}
           />
         ))}
+        <div ref={videoHost} className="motion-hdr-video" />
         {!accepted && (
           <div className="empty-state">
             <Play size={30} aria-hidden="true" />
@@ -288,10 +520,22 @@ export function MotionPreview({
             : stale
               ? "显示上一版画面，等待当前草稿编译。"
               : accepted
-                ? "当前草稿 · 网页 sRGB 预览"
+                ? accepted.hdr?.message || "当前草稿 · 网页 sRGB 预览"
                 : "等待代码预览"}
       </div>
       <div className="motion-playback">
+        {spec?.engine === "three-float-v1" && (
+          <Field label="预览显示" id="motion-preview-display">
+            <select
+              id="motion-preview-display"
+              value={hdrPreview ? "auto" : "srgb"}
+              onChange={(event) => setHdrPreview(event.target.value === "auto")}
+            >
+              <option value="auto">自动 HDR</option>
+              <option value="srgb">sRGB SDR</option>
+            </select>
+          </Field>
+        )}
         <Button
           onClick={() => {
             if (!playing) audio.current?.unlock();
@@ -355,7 +599,12 @@ export function MotionPreview({
         ref={audio}
         projectId={projectId}
         active={active}
-        playing={playing && !!accepted && !error?.channel}
+        playing={
+          playing &&
+          !!accepted &&
+          !error?.channel &&
+          accepted.hdr?.mode !== "buffering"
+        }
         frameDuration={1 / rate}
         seconds={frame / rate}
         duration={(maxFrame + 1) / rate}
@@ -365,7 +614,7 @@ export function MotionPreview({
       <p className="technical-note">
         {spec?.engine === "remotion-sdr-v1"
           ? "SDR 网页画面 · sRGB 8-bit。保留网页图层与原始动画代码。"
-          : "GPU 浮点场景 · ACES sRGB 预览。独立保存 ACEScg 母版，支持 HDR 和 SDR 交付。"}
+          : "宽色域浮点场景在支持的设备上使用 720p HDR 视频按项目帧率预览，否则回退 sRGB。视频预览合成黑底；ACEScg 母版独立保存。"}
       </p>
     </PreviewPanel>
   );

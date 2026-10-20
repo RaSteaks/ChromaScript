@@ -2396,7 +2396,8 @@ export default function App() {
         </span>
         <span>
           {tab === "motion" ? (
-            "HDR / SDR 动画 · sRGB 预览"
+            // Preview transfer is selected independently from delivery.
+            "HDR / SDR 动画 · 自动 HDR / sRGB 预览"
           ) : (
             <>ACES 2.0 · {caps?.color.sha256.slice(0, 12) || "配置加载中"}</>
           )}{" "}

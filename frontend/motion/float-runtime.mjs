@@ -1,6 +1,13 @@
 import * as THREE from "three";
+import {
+  sourceSpace,
+  workingColorSpace,
+  registerSpace,
+  assertWorkingSpace,
+} from "./source-color.mjs";
 import createScene from "chromascript:scene";
 import config from "chromascript:config";
+import { createHDRCapture } from "./hdr-capture.mjs";
 
 // Only this bridge owns the renderer. Source supplies a scene, camera and pure
 // frame update, never a display canvas, screenshot, previous-frame accumulator.
@@ -17,7 +24,7 @@ const floatTarget = (w, h) =>
     internalFormat: "RGBA32F",
     minFilter: THREE.NearestFilter,
     magFilter: THREE.NearestFilter,
-    colorSpace: THREE.LinearSRGBColorSpace,
+    colorSpace: workingColorSpace,
     depthBuffer: true,
     samples: 0,
   });
@@ -151,7 +158,7 @@ function main() {
     );
   };
   renderer.toneMapping = THREE.NoToneMapping;
-  renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+  renderer.outputColorSpace = workingColorSpace;
   renderer.setClearColor(0, 0);
   const gl = renderer.getContext();
   if (!gl.getExtension("EXT_color_buffer_float"))
@@ -181,18 +188,40 @@ function main() {
   probeMaterial.dispose();
   const limit = config.maxDimension || Math.max(config.width, config.height);
   // Match live WGSL's orientation-aware 720p budget; final rendering is unchanged.
-  const scale = config.preview
+  const useHDR =
+    config.preview &&
+    config.hdrPreview &&
+    sourceSpace !== "Linear Rec.709 (sRGB)" &&
+    Math.min(config.width, config.height) *
+      Math.min(
+        1,
+        1280 / Math.max(config.width, config.height),
+        720 / Math.min(config.width, config.height),
+      ) >=
+      16;
+  const scale = useHDR
     ? Math.min(
         1,
         1280 / Math.max(config.width, config.height),
         720 / Math.min(config.width, config.height),
       )
-    : Math.min(1, limit / Math.max(config.width, config.height));
+    : config.preview
+      ? Math.min(
+          1,
+          1280 / Math.max(config.width, config.height),
+          720 / Math.min(config.width, config.height),
+        )
+      : Math.min(1, limit / Math.max(config.width, config.height));
   // Logical scene dimensions/time never change with preview or final sampling.
   // Export uses an integer pixel grid; CPU integration filters associated light.
   const renderScale = config.preview ? 1 : config.renderScale || 1;
-  const width = Math.max(1, Math.round(config.width * scale)) * renderScale;
-  const height = Math.max(1, Math.round(config.height * scale)) * renderScale;
+  // Video chroma requires even rasters; logical layout and source time are unchanged.
+  const raster = (value) =>
+    useHDR
+      ? Math.max(2, Math.floor(value / 2) * 2)
+      : Math.max(1, Math.round(value));
+  const width = raster(config.width * scale) * renderScale;
+  const height = raster(config.height * scale) * renderScale;
   const viewport = gl.getParameter(gl.MAX_VIEWPORT_DIMS);
   const maxTarget = Math.min(
     gl.getParameter(gl.MAX_TEXTURE_SIZE),
@@ -210,7 +239,10 @@ function main() {
     "width:100%;height:100%;object-fit:contain;display:block";
   document.getElementById("root").appendChild(renderer.domElement);
   const target = floatTarget(width, height);
-  const scene = createScene({
+  const context = {
+    // Source literals are already in this linear space; no author-side conversion.
+    sourceColorSpace: sourceSpace,
+    workingColorSpace,
     width: config.width,
     height: config.height,
     frames: config.frames,
@@ -220,15 +252,57 @@ function main() {
     // raster, while geometry/layout continue to use logical width/height.
     rasterWidth: width,
     rasterHeight: height,
+  };
+  const checkedScene = (value) => {
+    if (
+      !value?.scene?.isScene ||
+      !value?.camera?.isCamera ||
+      typeof value.update !== "function"
+    )
+      throw new Error(
+        "HDR 代码须默认导出工厂函数，返回 {scene, camera, update({frame, time})}。",
+      );
+    return value;
+  };
+  const scene = checkedScene(createScene(context));
+  const layers = (window.__chromaLayers || []).map((layer, index) => {
+    const contract = config.display.layers[index];
+    const space = registerSpace(contract);
+    const toTarget = new THREE.Matrix3()
+      .set(...config.display.working_space.to_linear_rec709.flat())
+      .invert()
+      .multiply(new THREE.Matrix3().set(...contract.to_linear_rec709.flat()));
+    return {
+      ...layer,
+      space,
+      sourceSpace: contract.source,
+      toTarget,
+      scene: checkedScene(
+        layer.factory({
+          ...context,
+          sourceColorSpace: contract.source,
+          workingColorSpace: space,
+        }),
+      ),
+    };
   });
-  if (
-    !scene?.scene?.isScene ||
-    !scene?.camera?.isCamera ||
-    typeof scene.update !== "function"
-  )
-    throw new Error(
-      "HDR 代码须默认导出工厂函数，返回 {scene, camera, update({frame, time})}；不支持 React DOM/SVG 截图。",
-    );
+  const scratch = layers.length ? floatTarget(width, height) : null;
+  const composite = layers.length
+    ? material(
+        `uniform sampler2D source; uniform mat3 conversion;
+    void main(){vec4 p=texture(source,texcoord);fragColor=vec4(conversion*p.rgb,p.a);}`,
+        {
+          source: { value: scratch.texture },
+          conversion: { value: new THREE.Matrix3() },
+        },
+      )
+    : null;
+  if (composite) {
+    // Associated light is converted/composited linearly; coverage is untouched.
+    composite.transparent = true;
+    composite.premultipliedAlpha = true;
+    composite.blending = THREE.NormalBlending;
+  }
   const uniforms = { source: { value: target.texture } };
   const lookupTextures = [];
   for (const t of config.display.textures) {
@@ -264,34 +338,38 @@ function main() {
     }`,
     uniforms,
   );
+  const hdrCapture = useHDR
+    ? createHDRCapture(renderer, target, config.display.hdr, width, height)
+    : null;
+  window.addEventListener("pagehide", () => hdrCapture?.dispose(), {
+    once: true,
+  });
   let data = null;
-  function render(frame, display = true) {
-    if (!Number.isInteger(frame) || frame < 0 || frame >= config.frames)
-      throw new Error("无效动画帧。");
-    // Exact rational source time, independent of preview wall-clock/skipped frames.
-    scene.update({
-      frame,
-      time: (frame * config.frameRate.denominator) / config.frameRate.numerator,
-      fps: config.fps,
-      width: config.width,
-      height: config.height,
-      rasterWidth: width,
-      rasterHeight: height,
-    });
-    // Source may customize shaders, but changing the global working primaries
-    // would silently invalidate the host's Rec.709-to-AP1 conversion boundary.
-    if (
-      !THREE.ColorManagement.enabled ||
-      THREE.ColorManagement.workingColorSpace !== THREE.LinearSRGBColorSpace
-    )
-      throw new Error(
-        "请保留 Three.js 线性 Rec.709 工作空间；其他输入颜色须先转换。",
-      );
-    scene.scene.traverse((node) => {
+  function validateMaterials(value, space) {
+    // Browser texture unpack cannot convert arbitrary primaries/AP1 white points.
+    // Fail explicitly for tagged foreign textures in new spaces. Linear numeric
+    // DataTextures may use NoColorSpace with samples already in the selected basis.
+    const texture = (t) => {
+      if (
+        space !== THREE.LinearSRGBColorSpace &&
+        t?.isTexture &&
+        t.colorSpace !== THREE.NoColorSpace &&
+        !(t.isRenderTargetTexture && t.colorSpace === space)
+      )
+        throw new Error(
+          "宽色域颜色纹理须先转换到所选线性空间并使用 NoColorSpace；不能仅重标记 sRGB 纹理。",
+        );
+    };
+    texture(value.scene.background);
+    texture(value.scene.environment);
+    value.scene.traverse((node) => {
       for (const m of Array.isArray(node.material)
         ? node.material
         : [node.material]) {
         if (!m) continue;
+        for (const value of Object.values(m)) texture(value);
+        for (const uniform of Object.values(m.uniforms || {}))
+          texture(uniform.value);
         if (
           m.blending !== THREE.NormalBlending &&
           (m.transparent || m.blending !== THREE.NoBlending)
@@ -306,8 +384,51 @@ function main() {
         guardShaderAlpha(m);
       }
     });
+  }
+  function render(frame, display = true) {
+    if (!Number.isInteger(frame) || frame < 0 || frame >= config.frames)
+      throw new Error("无效动画帧。");
+    const state = {
+      ...context,
+      frame,
+      time: (frame * config.frameRate.denominator) / config.frameRate.numerator,
+    };
+    assertWorkingSpace();
+    renderer.autoClear = false;
     renderer.setRenderTarget(target);
+    // Scene backgrounds can change GL clear state. Reset transparent coverage
+    // before every image, including a background toggled off on a later frame.
+    renderer.setClearColor(0, 0);
     renderer.clear();
+    try {
+      for (const layer of layers) {
+        layer.scene.update({
+          ...state,
+          sourceColorSpace: layer.sourceSpace,
+          workingColorSpace: layer.space,
+        });
+        layer.assertWorkingSpace();
+        THREE.ColorManagement.workingColorSpace = layer.space;
+        validateMaterials(layer.scene, layer.space);
+        renderer.setRenderTarget(scratch);
+        renderer.setClearColor(0, 0);
+        renderer.clear();
+        renderer.render(layer.scene.scene, layer.scene.camera);
+        THREE.ColorManagement.workingColorSpace = workingColorSpace;
+        renderer.setRenderTarget(target);
+        composite.uniforms.conversion.value = layer.toTarget;
+        quad.material = composite;
+        renderer.render(quad, quadCamera);
+      }
+    } finally {
+      THREE.ColorManagement.workingColorSpace = workingColorSpace;
+    }
+    scene.update(state);
+    assertWorkingSpace();
+    validateMaterials(scene, workingColorSpace);
+    renderer.setRenderTarget(target);
+    // Retained layers are a background composite, not a shared 3D depth buffer.
+    renderer.clearDepth();
     renderer.render(scene.scene, scene.camera);
     if (gl.getError() !== gl.NO_ERROR) throw new Error("HDR GPU 渲染失败。");
     if (display) {
@@ -317,7 +438,7 @@ function main() {
       if (gl.getError() !== gl.NO_ERROR)
         throw new Error("OCIO sRGB 预览渲染失败。");
     }
-    document.body.dataset.frame = String(frame);
+    if (display) document.body.dataset.frame = String(frame);
     return { width, height };
   }
   function capture(frame) {
@@ -331,6 +452,12 @@ function main() {
   }
   const bridge = {
     capture,
+    // Numeric QA can compare the packed GPU output to the CPU ACES reference.
+    captureHDR(frame) {
+      if (!hdrCapture) throw new Error("HDR 采集未启用");
+      render(frame, false);
+      return hdrCapture.capture();
+    },
     // Numerical QA reads the actual displayed GPU pixel, not a second CPU recipe.
     sampleDisplay(frame, x, y) {
       render(frame, true);
@@ -359,7 +486,9 @@ function main() {
         debugInfo ? debugInfo.UNMASKED_VENDOR_WEBGL : gl.VENDOR,
       ),
       float_blending: floatBlending,
-      source_space: "Linear Rec.709 (sRGB)",
+      source_space: sourceSpace,
+      preserved_layer_spaces:
+        config.display.layers?.map((layer) => layer.source) || [],
       alpha: "premultiplied",
       row_order: "bottom-up",
       sampling: {
@@ -404,10 +533,54 @@ function main() {
     }
     timer = requestAnimationFrame(tick);
   };
-  window.addEventListener("message", (event) => {
+  let captureJob = 0;
+  window.addEventListener("message", async (event) => {
     if (event.source !== parent || event.data?.channel !== config.channel)
       return;
     try {
+      if (event.data.type === "hdr-cancel") {
+        if (captureJob === event.data.value) captureJob = 0;
+        return;
+      }
+      if (event.data.type === "hdr-capture" && useHDR) {
+        const { id, frames } = event.data.value || {};
+        if (
+          !Number.isSafeInteger(id) ||
+          !Array.isArray(frames) ||
+          !frames.length ||
+          frames.length > 64 ||
+          frames.some(
+            (index) =>
+              !Number.isInteger(index) || index < 0 || index >= config.frames,
+          )
+        )
+          return;
+        captureJob = id;
+        try {
+          for (let index = 0; index < frames.length; index++) {
+            if (captureJob !== id) return;
+            const pixels = bridge.captureHDR(frames[index]);
+            // One command per bounded batch avoids a round trip for every frame.
+            // Each transferred buffer releases the sandbox copy immediately.
+            parent.postMessage(
+              {
+                channel: config.channel,
+                type: "hdr-captured",
+                value: { id, index, data: pixels, width, height },
+              },
+              "*",
+              [pixels],
+            );
+            // Let input/cancellation run between short groups without pacing
+            // rendering to the display refresh rate or skipping source frames.
+            if (index % 2 === 1)
+              await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+        } catch (error) {
+          send("hdr-captured", { id, error: error.message });
+        }
+        return;
+      }
       if (event.data.type === "play" && !playing) {
         playing = true;
         startFrame = frame;
@@ -428,7 +601,9 @@ function main() {
     }
   });
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) pause();
+    if (document.hidden) {
+      pause();
+    }
   });
   // Keyboard events inside the sandbox do not bubble to the parent viewer.
   window.addEventListener("keydown", (event) => {

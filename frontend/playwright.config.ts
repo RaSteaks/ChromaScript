@@ -8,6 +8,7 @@ export default defineConfig({
     baseURL: process.env.CHROMASCRIPT_URL || "http://127.0.0.1:8765",
     // Use WebKit for browser checks; do not launch Google Chrome.
     browserName: "webkit",
+    headless: true,
     viewport: { width: 1440, height: 1000 },
     trace: "retain-on-failure",
   },
