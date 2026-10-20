@@ -104,6 +104,12 @@ DOCUMENTS = {
         # Keep the author-facing contract identical across browser, CLI and MCP.
         "Transparent custom shaders output straight RGB with premultipliedAlpha=false (default); "
         "premultipliedAlpha=true explicitly requires already-associated RGB from the author. "
+        # Backgrounds share the float target's association contract; checking the
+        # actual override and nested samplers prevents hidden alpha/gamut bypasses.
+        "Background textures supply straight linear RGBA and composite source-over before foreground objects; "
+        "the host associates their RGB exactly once and preserves coverage. "
+        "scene.overrideMaterial follows the same material checks, respecting allowOverride=false. "
+        "Texture-space checks also apply inside uniform arrays and nested structs. "
         "Built-in Three materials retain their own premultiplication. The host unassociates linear RGB and converts through pinned OCIO "
         "to ACEScg/AP1; alpha never enters OCIO. No DOM, CSS, SVG screenshot, remote asset or "
         "Node/file import. GPU capability is actually tested with negative, high and non-half "

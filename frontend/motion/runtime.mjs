@@ -19,6 +19,62 @@ const allowed = new Set(["three"]);
 const policy =
   "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; media-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'";
 
+function associatedBackgrounds() {
+  let loaded = false;
+  return {
+    name: "associated-three-backgrounds",
+    setup(plugin) {
+      plugin.onLoad(
+        { filter: /[/\\]three[/\\]build[/\\]three\.module\.js$/ },
+        ({ path }) => {
+          const original = readFileSync(path, "utf8");
+          const version = JSON.parse(
+            readFileSync(join(dirname(path), "../package.json"), "utf8"),
+          ).version;
+          const names = [];
+          // Three's private background meshes bypass scene traversal and write
+          // straight RGBA by default. Apply fixed source-over factors to BOTH
+          // background variants, in memory only; never alter installed packages.
+          const contents = original.replace(
+            /name: '(Background(?:Cube)?Material)',/g,
+            (declaration, name) => {
+              names.push(name);
+              // Keep transparent=false so Three draws backgrounds first in its
+              // opaque queue. CustomBlending enables the normal source-over math
+              // without moving them behind opaque foregrounds. RGB associates in
+              // linear light; alpha uses ONE, never SRC_ALPHA (which squares it).
+              return `${declaration}
+                blending: CustomBlending,
+                blendEquation: AddEquation,
+                blendSrc: SrcAlphaFactor,
+                blendDst: OneMinusSrcAlphaFactor,
+                blendEquationAlpha: AddEquation,
+                blendSrcAlpha: OneFactor,
+                blendDstAlpha: OneMinusSrcAlphaFactor,`;
+            },
+          );
+          if (
+            version !== "0.186.1" ||
+            names.length !== 2 ||
+            new Set(names).size !== 2
+          )
+            throw new Error(
+              "Three.js 背景材质结构已改变；请更新并验证浮点 Alpha 适配后再渲染。",
+            );
+          loaded = true;
+          return { loader: "js", resolveDir: dirname(path), contents };
+        },
+      );
+      plugin.onEnd((result) => {
+        if (!loaded && !result.errors.length)
+          return {
+            errors: [{ text: "未找到已验证的 Three.js 背景材质入口。" }],
+          };
+      });
+    },
+  };
+}
+
 function sharedResourceIds() {
   let loaded = false;
   return {
@@ -135,6 +191,8 @@ async function compile(
     define: { "process.env.NODE_ENV": '"production"' },
     logLevel: "silent",
     plugins: [
+      // Only the float runtime uses associated storage; SDR retains native Three.
+      associatedBackgrounds(),
       // Leave single-source historical allocation behavior unchanged. Retained
       // bundles and their host must ALL participate in the same allocation domain.
       ...(layerIndex !== null || spec.preserved_layers?.length

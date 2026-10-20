@@ -362,14 +362,42 @@ function main() {
     };
     texture(value.scene.background);
     texture(value.scene.environment);
+    const seenUniforms = new WeakSet();
+    const uniformTextures = (value) => {
+      if (!value || typeof value !== "object") return;
+      if (value.isTexture) {
+        texture(value);
+        return; // Texture internals are resources, not nested shader uniforms.
+      }
+      // Three accepts sampler arrays and nested struct uniforms. Visit aliases
+      // once per frame so cycles terminate and later texture edits are rechecked.
+      // Numeric buffers contain no textures; do not enumerate large typed arrays.
+      if (
+        ArrayBuffer.isView(value) ||
+        value instanceof ArrayBuffer ||
+        seenUniforms.has(value)
+      )
+        return;
+      seenUniforms.add(value);
+      for (const child of Object.values(value)) uniformTextures(child);
+    };
+    const checkedMaterials = new Set();
     value.scene.traverse((node) => {
-      for (const m of Array.isArray(node.material)
+      for (const original of Array.isArray(node.material)
         ? node.material
         : [node.material]) {
-        if (!m) continue;
+        if (!original) continue;
+        // Match Three's actual material selection. An excluded mesh retains its
+        // own material, while an unused override must not reject a valid scene.
+        const m =
+          original.allowOverride === true && value.scene.overrideMaterial
+            ? value.scene.overrideMaterial
+            : original;
+        if (checkedMaterials.has(m)) continue;
+        checkedMaterials.add(m);
         for (const value of Object.values(m)) texture(value);
         for (const uniform of Object.values(m.uniforms || {}))
-          texture(uniform.value);
+          uniformTextures(uniform.value);
         if (
           m.blending !== THREE.NormalBlending &&
           (m.transparent || m.blending !== THREE.NoBlending)
