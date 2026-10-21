@@ -130,7 +130,7 @@ def test_mode_validation_and_4k_budget_without_master_sequence(tmp_path):
     settings = MotionRenderSettings(width=3840, height=2160, frames=36000, fps=MotionRate(numerator=60))
     output = MotionOutput(master_bit_depth=None, video="pq", render_scale=1)
     result = service.estimate_motion_render(settings, output=output)
-    assert result["basis"] == "streaming-video-budget-v1"
+    assert result["basis"] == "nominal-no-margin-v2"
     assert result["master_uncompressed_bytes"] == result["master_overhead_budget_bytes"] == 0
     assert result["intermediate_budget_bytes"] == 3840 * 2160 * 16
     assert result["video_planning_bps"] == 99_532_800
@@ -217,3 +217,11 @@ def test_real_gpu_direct_video_and_generator_early_close(tmp_path, monkeypatch):
     assert consumed == [0, 1]
     assert not list(tmp_path.rglob("*.exr"))
     assert (bundle.target / "animation-pq.mp4").is_file()
+
+
+def test_video_thumbnail_no_hidden_reserve(tmp_path, monkeypatch, transport):
+    service, job, _ = make_job(tmp_path, "srgb", frames=1)
+    monkeypatch.setattr("shutil.disk_usage", lambda _: SimpleNamespace(free=100 * 1024**2))
+    run(service.store.root, job["id"])
+    result = service.get_job(job["id"])
+    assert result["job"]["status"] == "completed", result["job"]["error"]

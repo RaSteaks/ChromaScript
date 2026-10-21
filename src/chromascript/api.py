@@ -79,6 +79,8 @@ def create_app(root: Path, port: int = 8765, export_roots: list[Path] | None = N
                 yield
         finally:
             dispatcher.close()
+            from .motion_sampling import close_samples
+            close_samples(service.store)
             # Preview encoders are transient and must not outlive this daemon.
             from .hdr_encoder import close_encoder
             close_encoder()

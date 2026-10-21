@@ -395,3 +395,12 @@ def test_zip_stream_is_bounded_and_closes_on_disconnect(tmp_path, monkeypatch):
     assert b"PK\x06\x06" in data
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         assert hashlib.sha256(archive.read("frame.exr")).hexdigest() == file_hash(path)
+
+
+def test_thumbnail_no_hidden_reserve(float_job, monkeypatch):
+    service, job, _, _, _ = float_job
+    # Enough for this tiny sequence, below the unrelated image API's 128 MiB reserve.
+    monkeypatch.setattr("shutil.disk_usage", lambda _: SimpleNamespace(free=100 * 1024**2))
+    run(service.store.root, job["id"])
+    result = service.get_job(job["id"])
+    assert result["job"]["status"] == "completed", result["job"]["error"]

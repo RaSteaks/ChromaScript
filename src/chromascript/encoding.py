@@ -1,4 +1,4 @@
-"""Encode already display-rendered RGB; zscale only changes matrix/range and sampling."""
+"""Encode display-rendered or explicitly declared scene-log RGB without another view."""
 
 from __future__ import annotations
 
@@ -47,18 +47,28 @@ def _video_tags(preset: DeliveryPreset) -> dict[str, str]:
     return result
 
 
-def _encoding_declaration(preset: DeliveryPreset) -> dict[str, str] | None:
+def _encoding_declaration(preset: DeliveryPreset) -> dict[str, Any] | None:
     """Native comments record intent, not a standardized automatic color transform."""
     space, gamma = OUTPUT_ENCODINGS[preset.color.output]
     if preset.color.output == "ACEScct" or (
         preset.container == "mov" and gamma in {"gamma2.4", "gamma2.6"}
     ):
-        return {
+        declaration: dict[str, Any] = {
             "chromascript_color_encoding": preset.color.output,
             "primaries": "AP1" if gamma == "acescct" else space,
             "transfer": "ACEScct" if gamma == "acescct" else gamma,
             "data_range": preset.data_range,
         }
+        if preset.color_metadata_policy == "declared-scene":
+            # Native comments carry a complete explicit interpretation, but do
+            # not pretend that a receiving application automatically applies it.
+            declaration.update(
+                white_point="D60", reference="scene", display_transform_applied=False,
+                working_space="ACEScg", matrix="BT.709", transport="p416le",
+                image_precision_bits=12, requires_manual_interpretation=True,
+                resolve_input="ACEScct", resolve_data_levels="Video",
+            )
+        return declaration
     return None
 
 
@@ -170,10 +180,17 @@ def quicktime_color_metadata(path: Path) -> list[dict[str, Any]]:
     return entries
 
 
+def preset_tag_issue(preset: DeliveryPreset) -> str | None:
+    """A narrow, model-validated scene declaration never relaxes other recipes."""
+    if preset.color_metadata_policy == "declared-scene":
+        return None
+    return video_tag_issue(preset.color.output, preset.container)
+
+
 def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path) -> list[str]:
     # Comments/sidecars cannot replace native gamut and transfer tags. This gate
     # also covers legacy preset calls that bypass the configured-delivery UI.
-    if issue := video_tag_issue(preset.color.output, preset.container):
+    if issue := preset_tag_issue(preset):
         raise ChromaError("video_color_tags", issue)
     executable = shutil.which("ffmpeg")
     if not executable:
@@ -249,6 +266,9 @@ def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path)
     ]
     if preset.profile is not None:
         args += ["-profile:v", preset.profile]
+    if preset.codec == "prores_videotoolbox":
+        # Apple software encoding is allowed; never substitute the 10-bit KS path.
+        args += ["-allow_sw", "1"]
     if preset.codec in {"libx264", "libx265"}:
         args += [
             "-preset",
@@ -306,6 +326,7 @@ def encode(
     frames: Iterable[NDArray[np.float32]],
     progress: Callable[[int], None],
     audio_path: Path | None = None,
+    on_process: Callable[[subprocess.Popen[Any]], None] | None = None,
 ) -> dict[str, Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(path.stem + ".partial" + path.suffix)
@@ -326,6 +347,8 @@ def encode(
         process = subprocess.Popen(
             args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log
         )
+        if on_process is not None:
+            on_process(process)
         try:
             assert process.stdin is not None
             for frame in frames:
@@ -341,6 +364,10 @@ def encode(
                     raise ChromaError(
                         "log_storage_range",
                         "ACEScct code values exceed integer storage; choose float EXR to preserve them.",
+                        frame=count,
+                        minimum=float(frame[..., :3].min()),
+                        maximum=float(frame[..., :3].max()),
+                        out_of_range_components=int(((frame[..., :3] < 0) | (frame[..., :3] > 1)).sum()),
                     )
                 if preset.color.output == "HLG":
                     _validate_hlg_storage(frame, preset)
@@ -387,7 +414,7 @@ def encode(
                     return_code=process.returncode,
                 ) from exc
             raise
-    info = probe(path)
+    info = probe(path, on_process=on_process) if on_process is not None else probe(path)
     if audio_path is not None:
         audio = next((s for s in info["streams"] if s["codec_type"] == "audio"), None)
         duration = float(audio.get("duration", info["format"].get("duration", 0))) if audio else 0
@@ -437,7 +464,26 @@ def decode_audio_evidence(path: Path) -> dict[str, Any]:
     return {"decoded_samples": count // 8, "decoded_peak": peak / 2**31}
 
 
-def strict_video_decode_evidence(path: Path) -> dict[str, Any]:
+def _run_probe(args: list[str], on_process: Callable[[subprocess.Popen[Any]], None] | None = None,
+               **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+    """Sampling cancellation also owns probe/verification children, not only encoding."""
+    if on_process is None:
+        return subprocess.run(args, **kwargs)
+    timeout = kwargs.pop("timeout", None)
+    process = subprocess.Popen(args, **kwargs)
+    on_process(process)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+def strict_video_decode_evidence(
+    path: Path, on_process: Callable[[subprocess.Popen[Any]], None] | None = None,
+) -> dict[str, Any]:
     """Fully decode the first video stream without accepting concealed bitstream errors."""
     executable = shutil.which("ffmpeg")
     if not executable:
@@ -448,13 +494,14 @@ def strict_video_decode_evidence(path: Path) -> dict[str, Any]:
     # Full decoding has no duration-independent timeout: valid long deliveries may
     # take longer than a metadata probe, especially for high-resolution intra codecs.
     with tempfile.TemporaryFile() as errors:
-        result = subprocess.run(
+        result = _run_probe(
             [
                 executable, "-v", "error", "-nostdin", "-xerror",
                 "-abort_on", "empty_output", "-err_detect", "explode",
                 "-i", str(path), "-map", "0:v:0", "-an", "-sn", "-dn",
                 "-fps_mode", "passthrough", "-f", "null", "-",
             ],
+            on_process=on_process,
             stdout=subprocess.DEVNULL,
             stderr=errors,
         )
@@ -471,7 +518,8 @@ def strict_video_decode_evidence(path: Path) -> dict[str, Any]:
     return {"passed": True, "complete": True, "method": "ffmpeg-strict-full-decode", "stream": "0:v:0"}
 
 
-def probe(path: Path, count_frames: bool = True) -> dict[str, Any]:
+def probe(path: Path, count_frames: bool = True,
+          on_process: Callable[[subprocess.Popen[Any]], None] | None = None) -> dict[str, Any]:
     executable = shutil.which("ffprobe")
     if not executable:
         raise ChromaError("ffprobe_unavailable", "ffprobe is required for delivery verification")
@@ -483,9 +531,10 @@ def probe(path: Path, count_frames: bool = True) -> dict[str, Any]:
     # Counting decodes the whole file, so only the metadata-only path has a fixed
     # timeout. Diagnostics use a temporary file and a bounded excerpt in errors.
     with tempfile.TemporaryFile() as errors:
-        result = subprocess.run(
+        result = _run_probe(
             [*args, str(path)], stdout=subprocess.PIPE, stderr=errors,
             text=True, timeout=None if count_frames else 180,
+            on_process=on_process,
         )
         error_bytes = errors.tell()
         errors.seek(max(0, error_bytes - 4000))
@@ -496,7 +545,10 @@ def probe(path: Path, count_frames: bool = True) -> dict[str, Any]:
     # Audio callers share this metadata helper. Strict video evidence is only
     # added for an actual video stream and never for count_frames=False inspection.
     if count_frames and any(stream.get("codec_type") == "video" for stream in info["streams"]):
-        info["video_decode_verification"] = strict_video_decode_evidence(path)
+        info["video_decode_verification"] = (
+            strict_video_decode_evidence(path, on_process=on_process)
+            if on_process is not None else strict_video_decode_evidence(path)
+        )
     if path.suffix.lower() in {".mov", ".mp4"}:
         info["container_color"] = quicktime_color_metadata(path)
     return info
@@ -524,9 +576,9 @@ def check_probe(
     if location := _hdr_chroma_location(preset):
         if video.get("chroma_location") != location:
             issues.append(f"chroma location mismatch: expected {location}, got {video.get('chroma_location')}")
-    if issue := video_tag_issue(preset.color.output, preset.container):
+    if issue := preset_tag_issue(preset):
         issues.append(issue)
-    expected_codec = {"libx264": "h264", "libx265": "hevc", "prores_ks": "prores"}.get(
+    expected_codec = {"libx264": "h264", "libx265": "hevc", "prores_ks": "prores", "prores_videotoolbox": "prores"}.get(
         preset.codec, preset.codec
     )
     if video.get("codec_name") != expected_codec:
@@ -679,7 +731,7 @@ def check_probe(
         "render_precision": "float32",
         "encoder_input_precision": "32-bit float RGB" if _hlg_float_input(preset) else "16-bit RGB",
         "hlg_extended_range": _hlg_float_input(preset),
-        "codec_input_precision": f"{preset.bit_depth}-bit",
+        "codec_input_precision": "16-bit YCbCr / P416" if preset.codec == "prores_videotoolbox" else f"{preset.bit_depth}-bit",
         "decoded_storage_precision": f"{actual_depth}-bit",
         "range_signaling": "codec convention" if implicit_range else "explicit",
         "effective_range": expected_range,
@@ -687,7 +739,8 @@ def check_probe(
         "container": preset.container,
         "color_encoding": output_metadata(preset.color.output),
         "container_color": info.get("container_color"),
-        "native_color_tags_verified": not issues,
+        "native_color_tags_verified": not issues and preset.color_metadata_policy == "standard",
+        "color_declaration_verified": not issues and preset.color_metadata_policy == "declared-scene",
         "color_signaling": "native ACEScct declaration; AP1/transfer flags unspecified, manual interpretation required"
         if preset.color.output == "ACEScct"
         else "colr/codec tags and native declaration; manual gamma interpretation required"
@@ -701,6 +754,7 @@ def check_probe(
 # Encoder option names and ffprobe profile names are different vocabularies.
 # Unknown requested profiles fail closed rather than certifying from the codec alone.
 PROFILE_NAMES = {
+    "prores_videotoolbox": {"4": "4444"},
     "prores_ks": {
         alias: decoded
         for i, (name, decoded) in enumerate(

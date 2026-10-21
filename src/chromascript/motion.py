@@ -15,7 +15,7 @@ from typing import Any, Literal
 import psutil
 from pydantic import Field, StrictBool, field_validator, model_validator
 
-from .audio import audio_sample_window, freeze_audio, read_timeline
+from .audio import freeze_audio
 from .color import color_info, output_metadata, video_tag_issue
 from .encoding import available_encoders
 from .errors import ChromaError
@@ -33,6 +33,7 @@ from .motion_hdr_preview import HDRPreviewChunk, encode_hdr_preview
 from .motion_sources import source_hash, validate_sources
 from .operations import operation
 from .presets import builtins
+from .prores import intermediate_preset, prores_capability
 from .store import Store, canonical, identifier, now
 
 FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
@@ -49,6 +50,7 @@ class MotionOutput(Model):
     video: Literal[
         "none", "pq", "hlg", "srgb", "rec709",
         "prores-hq-srgb", "prores-hq-pq", "prores-hq-hlg",
+        "prores-4444-acescct",
     ] = "none"
     # Spatial supersampling is independent of preview resolution and source precision.
     render_scale: Literal[1, 2, 4] = 2
@@ -64,6 +66,8 @@ class MotionOutput(Model):
 
 def motion_video_preset(video: str) -> DeliveryPreset:
     """One encoding contract for discovery, submission and both motion workers."""
+    if video == "prores-4444-acescct":
+        return intermediate_preset()
     presets = builtins()
     prores_spaces: dict[str, Literal["sRGB", "PQ", "HLG"]] = {
         "prores-hq-srgb": "sRGB", "prores-hq-pq": "PQ", "prores-hq-hlg": "HLG",
@@ -388,6 +392,9 @@ def motion_identity() -> dict[str, Any]:
         Path(__file__).with_name("exports.py"),
         Path(__file__).with_name("encoding.py"),
         Path(__file__).with_name("images.py"),
+        Path(__file__).with_name("prores.py"),
+        Path(__file__).with_name("motion_storage.py"),
+        Path(__file__).with_name("motion_sampling.py"),
     ]:
         digest.update(path.read_bytes())
     env = motion_environment()
@@ -483,7 +490,7 @@ class MotionOperations:
         return motion_environment()
 
     @operation(
-        "Discover valid HDR/SDR outputs for the selected source engine; SDR screenshots never claim float/HDR source precision."
+        "Discover valid display outputs and float-only ACEScct ProRes 4444 with measured 12-bit capability evidence. Diagnostic failure disables only 4444; SDR screenshots retain their source precision."
     )
     def get_motion_delivery_options(
         self, engine: MotionEngine = "three-float-v1"
@@ -529,6 +536,17 @@ class MotionOperations:
                 "available": preset.codec in encoders,
                 "reason": "" if preset.codec in encoders else "本机缺少 prores_ks 编码器",
                 "color_encoding": encoding,
+            })
+        if floating:
+            capability = (prores_capability(self.store.root) if "prores_videotoolbox" in encoders else
+                          {"available": False, "reason": "本机 FFmpeg 缺少 Apple VideoToolbox ProRes 编码器。"})
+            choices.append({
+                "value": "prores-4444-acescct",
+                "label": "ProRes 4444 · ACEScct · 12-bit · MOV",
+                "available": capability["available"], "reason": capability["reason"],
+                "color_encoding": {**output_metadata("ACEScct"),
+                    "requires_manual_video_interpretation": True},
+                "precision_verification": capability,
             })
         return {
             "contract": "motion-dual-v1",
@@ -818,88 +836,11 @@ class MotionOperations:
         destination = resolve_export_directory(
             export_directory if export_directory is not None else str(self.store.root / "exports")
         )
-        volume = destination
-        while not volume.exists():
-            volume = volume.parent
-        floating = engine == "three-float-v1"
-        pixels = settings.width * settings.height
-        # One final RGBA sequence lives on the export volume. Spatial sampling
-        # enlarges only the transient raster, never the delivered master geometry.
-        master_frame = pixels * 4 * (output.master_bit_depth or 0) // 8 if floating else 0
-        master = master_frame * settings.frames
-        overhead = (master + 9) // 10
-        intermediate = (pixels * 16 * output.render_scale**2 if floating else
-                        pixels * 4 * output.render_scale**2 * settings.frames)
-        video = pixels * 4 * settings.frames if output.video != "none" else 0
-        video_only = floating and output.master_bit_depth is None
-        video_planning_bps = None
-        prores = output.video.startswith("prores-hq-")
-        if video_only or prores:
-            # Encoded size is unknown in advance. H.264/HEVC plan at 0.2 bits/pixel/frame
-            # (at least 8 Mb/s), with 20% margin; this is NOT an encoder rate cap.
-            # Exact rational duration avoids rounding fractional frame rates.
-            rate = settings.fps
-            if prores:
-                # Stored float/16-bit buffers are not compressed ProRes frames.
-                # Count encoded macroblocks instead; margin covers slice headers
-                # and rate variation. Keep total bytes independent of rounded fps.
-                frame_bits = prores_hq_frame_bits(settings.width, settings.height)
-                video_planning_bps = (frame_bits * rate.numerator + rate.denominator - 1) // rate.denominator
-                video = (frame_bits * settings.frames * 6 + 39) // 40
-            else:
-                video_planning_bps = max(8_000_000, (pixels * rate.numerator + 5 * rate.denominator - 1) // (5 * rate.denominator))
-                numerator = video_planning_bps * settings.frames * rate.denominator * 6
-                video = (numerator + 40 * rate.numerator - 1) // (40 * rate.numerator)
-            video += 16 * 1024**2  # Muxing/index allowance; runtime monitors free space.
-        auxiliary = (64 if floating else 128) * 1024**2
-        audio_bytes = 0
+        from .motion_storage import estimate_storage
+
         if project_id is not None:
             self._motion_project(project_id)
-            if read_timeline(self.store, project_id)["timeline"]["clips"]:
-                # Use the same rational-frame-to-sample boundary as the actual WAV mix.
-                audio_bytes = audio_sample_window(settings)[0] * 8 + 44
-        # A delivery retains the WAV and also muxes its audio into the movie.
-        # Budget another PCM-sized allowance for that stream, especially for
-        # long, low-frame-rate clips whose pixel-only video budget is tiny.
-        if output.video != "none":
-            video += audio_bytes
-        workspace_required = 16 * 1024**2
-        same_volume = volume.stat().st_dev == self.store.root.stat().st_dev
-        destination_required = master + overhead + intermediate + video + audio_bytes + auxiliary
-        destination_required += workspace_required if same_volume else 0
-        destination_free = shutil.disk_usage(volume).free
-        workspace_free = destination_free if same_volume else shutil.disk_usage(self.store.root).free
-        destination_sufficient = destination_free >= destination_required
-        workspace_sufficient = workspace_free >= workspace_required
-        return {
-            "basis": "prores-hq-compressed-budget-v1" if prores else "streaming-video-budget-v1" if video_only else "uncompressed-budget-v1", "engine": engine,
-            "video_planning_bps": video_planning_bps,
-            "settings": settings.model_dump(), "output": output.model_dump(),
-            "export_directory": str(destination), "checked_at": now(),
-            "master_frame_bytes": master_frame, "master_uncompressed_bytes": master,
-            "master_overhead_budget_bytes": overhead, "intermediate_budget_bytes": intermediate,
-            "video_budget_bytes": video, "audio_bytes": audio_bytes,
-            "auxiliary_budget_bytes": auxiliary, "workspace_required_bytes": workspace_required,
-            "destination_required_bytes": destination_required,
-            "destination_free_bytes": destination_free, "workspace_free_bytes": workspace_free,
-            "same_volume": same_volume, "destination_sufficient": destination_sufficient,
-            "workspace_sufficient": workspace_sufficient,
-            "sufficient": destination_sufficient and workspace_sufficient,
-            "compressed_master_bytes": None,
-            "notes": ([
-                "仅视频逐帧渲染并编码，不写入 EXR，也不缓存整段浮点序列。",
-                "视频预算按规划码率和时长估算并加 20% 余量；不是体积上限或编码码率，实际大小取决于画面。",
-                "中间数据仅按一帧计算；渲染期间检查剩余空间。中断后重新执行会从头渲染。",
-            ] if video_only else [
-                "母版体积按宽 × 高 × RGBA 四通道 × 每通道字节数 × 总帧数计算；ZIP 实际体积取决于画面。",
-                "空间预算含 10% 母版余量、中间帧、可选视频及音频和辅助文件，不是压缩后体积承诺。",
-                "超采样只增加中间数据，不放大最终母版。母版 ZIP 按需下载，不预留第二份序列。",
-            ]) + ([
-                "ProRes 按 prores_ks HQ 的压缩宏块目标码率规划视频预算，另加 20% 余量和封装开销；实际大小取决于画面，不按未压缩帧体积估算。",
-            ] if prores else []) + [
-                "这是全新任务的空间预算，不扣除已有缓存；不会预留磁盘空间，提交时重新检查。",
-            ],
-        }
+        return estimate_storage(self.store, settings, engine, output, destination, project_id)
 
     @operation(
         "Queue engine-specific animation rendering: float EXR with optional HDR/SDR video, direct float video (master_bit_depth=null), or SDR screenshot video. Freeze source, rational rate, runtime, color and output settings."
@@ -911,6 +852,7 @@ class MotionOperations:
         idempotency_key: str,
         export_directory: str | None = None,
         output: MotionOutput | None = None,
+        storage_estimate_id: str | None = None,
     ) -> dict[str, Any]:
         record, spec, rid = self._motion_scene(scene_id)
         self._motion_project(record["project_id"], True)
@@ -928,6 +870,11 @@ class MotionOperations:
                 "本地浮点渲染需要动画依赖和 Chrome；请运行 ./install.sh 并安装 Chrome。",
             )
         output = resolve_motion_output(spec.engine, output)
+        precision = None
+        if output.video == "prores-4444-acescct":
+            precision = prores_capability(self.store.root)
+            if not precision["available"]:
+                raise ChromaError("motion_encoder", precision["reason"])
         if output.video != "none":
             if output.video == "rec709":
                 raise ChromaError("video_color_tags", video_tag_issue("Rec.709") or "缺少精确 Gamma 标签")
@@ -953,6 +900,17 @@ class MotionOperations:
         estimate = self.estimate_motion_render(
             spec.settings(), spec.engine, output, str(destination), record["project_id"]
         )
+        sample = None
+        if storage_estimate_id:
+            from .motion_sampling import checked_storage_sample
+            from .motion_storage import estimate_storage
+            sample = checked_storage_sample(
+                self.store, storage_estimate_id, spec, output, destination, record["project_id"]
+            )
+            estimate = estimate_storage(
+                self.store, spec.settings(), spec.engine, output, destination,
+                record["project_id"], sample["measurements"],
+            )
         if not estimate["sufficient"]:
             raise ChromaError(
                 "disk_space", "导出盘或工作区没有足够空间存储动画中间帧和交付文件。",
@@ -975,6 +933,13 @@ class MotionOperations:
             "destination_volume": volume_identity(destination),
             "source_color_review": self._motion_color_review(spec, rid),
         }
+        # Dynamic free space is never part of an idempotent render's identity.
+        if sample:
+            snapshot["storage_estimate"] = {
+                "id": sample["id"], "identity": sample["identity"], "measurements": sample["measurements"],
+            }
+        if precision:
+            snapshot["precision_verification"] = precision
         # Both animation engines share the same immutable project audio contract.
         if audio := freeze_audio(self.store, record["project_id"], spec.settings()):
             snapshot["audio"] = audio

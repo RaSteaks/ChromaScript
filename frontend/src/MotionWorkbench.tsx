@@ -1,4 +1,8 @@
-import { MotionStorageEstimate } from "./MotionStorageEstimate";
+import {
+  MotionStorageEstimate,
+  motionSampleKey,
+  type StorageSample,
+} from "./MotionStorageEstimate";
 import { ProjectAudio } from "./ProjectAudio";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -186,6 +190,9 @@ export function MotionWorkbench({
     video: "none",
     render_scale: 2,
   });
+  const [storageSample, setStorageSample] = useState<StorageSample | null>(
+    null,
+  );
   const [masterDepth, setMasterDepth] = useState<16 | 32>(32);
   const outputEngine = useRef<MotionSpec["engine"]>("three-float-v1");
   const [outputError, setOutputError] = useState("");
@@ -726,6 +733,11 @@ export function MotionWorkbench({
       expected_revision_id: saved.revision_id,
       export_directory: directory,
       output,
+      storage_estimate_id:
+        storageSample?.key ===
+        motionSampleKey(valid.spec, output, directory, projectId)
+          ? storageSample.id
+          : undefined,
     };
     // A new attestation changes the frozen report, even if source/output stay
     // identical. A retry of the same evidence still reuses its original request key.
@@ -768,6 +780,9 @@ export function MotionWorkbench({
   const archive = artifacts.find((item) => item.kind === "master-archive");
   const thumbnail = artifacts.find((item) => item.kind === "preview-image");
   const report = artifacts.find((item) => item.kind === "report");
+  const colorEncoding = artifacts.find(
+    (item) => item.kind === "color-encoding",
+  );
   const verification = report?.metadata.verification as
     MotionVerification | undefined;
   async function recordReview() {
@@ -1295,7 +1310,7 @@ export function MotionWorkbench({
               <p className="panel-description">
                 {draft.engine === "remotion-sdr-v1"
                   ? "SDR 网页源为 8-bit sRGB，可输出带完整色域与传递函数标签的 sRGB 视频。"
-                  : "可选择保留 ACEScg EXR 母版，或仅输出 SDR sRGB / HDR PQ、HLG 视频。仅视频不生成 EXR 母版；预览显示独立选择。"}
+                  : "可保留 ACEScg EXR 母版，或仅输出 ACEScct 调色中间片、SDR sRGB / HDR PQ、HLG 视频。仅视频不生成 EXR；预览显示独立选择。"}
               </p>
             </div>
             <Notice text={outputError} error />
@@ -1408,7 +1423,11 @@ export function MotionWorkbench({
               <Field
                 label="视频输出"
                 id="motion-hdr-video"
-                hint="视频要求偶数尺寸；可选格式由当前源类型决定。"
+                hint={
+                  output.video === "prores-4444-acescct"
+                    ? "场景基准调色中间片，无显示变换、不带 Alpha；Resolve 输入指定 ACEScct，Data Levels 选 Video。需要较小体积时使用仅视频模式。"
+                    : "视频要求偶数尺寸；可选格式由当前源类型决定。"
+                }
               >
                 <select
                   id="motion-hdr-video"
@@ -1458,6 +1477,7 @@ export function MotionWorkbench({
               }}
             />
             <MotionStorageEstimate
+              samplingActive={active}
               spec={valid.spec}
               output={output}
               directory={directory}
@@ -1468,6 +1488,7 @@ export function MotionWorkbench({
                 !directoryPicking &&
                 outputOptions?.engine === draft.engine
               }
+              onSample={setStorageSample}
             />
             <div className="motion-export-actions">
               <Button
@@ -1614,6 +1635,8 @@ export function MotionWorkbench({
                 {(verification.native_color_tags_verified ||
                   verification.video?.native_color_tags_verified) &&
                   " · 视频色彩标签已验证"}
+                {verification.video?.color_declaration_verified &&
+                  " · ACEScct 声明已验证；Resolve 输入需手动指定，实际导入未验证"}
               </p>
             )}
             {thumbnail && (
@@ -1627,7 +1650,8 @@ export function MotionWorkbench({
               {video && (
                 <a href={artifactUrl(video.id, true)} className="button">
                   <Download size={15} />
-                  下载视频 MP4
+                  下载视频{" "}
+                  {video.mime_type === "video/quicktime" ? "MOV" : "MP4"}
                 </a>
               )}
               {archive && (
@@ -1640,6 +1664,14 @@ export function MotionWorkbench({
               {report && (
                 <a href={artifactUrl(report.id, true)} className="button">
                   下载验证报告
+                </a>
+              )}
+              {colorEncoding && (
+                <a
+                  href={artifactUrl(colorEncoding.id, true)}
+                  className="button"
+                >
+                  下载色彩编码说明
                 </a>
               )}
               {job.export_completed && job.export_path && (

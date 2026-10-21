@@ -1,9 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { call } from "./api";
 import { Button, Notice } from "./components";
 import type { MotionOutput, MotionSpec } from "./types";
 
 type Estimate = {
+  estimated_output_bytes: number;
+  compressed_master_bytes: number | null;
+  unmeasured_components: string[];
   master_frame_bytes: number;
   master_uncompressed_bytes: number;
   master_overhead_budget_bytes: number;
@@ -20,6 +23,28 @@ type Estimate = {
   workspace_sufficient: boolean;
   sufficient: boolean;
 };
+export type StorageSample = { key: string; id: string };
+type Sample = {
+  id: string;
+  status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
+  completed_frames: number;
+  sample_count: number;
+  budget?: Estimate;
+  error?: string;
+};
+
+/** Source content affects compression; names do not. This same identity guards
+ * submission so an effect cannot briefly submit a previously sampled draft. */
+export function motionSampleKey(
+  spec: MotionSpec | null,
+  output: MotionOutput,
+  directory: string,
+  projectId: string,
+) {
+  if (!spec) return "";
+  const content = { ...spec, name: "" };
+  return JSON.stringify({ content, output, directory, projectId });
+}
 const bytes = (value: number) => {
   const unit = value >= 1024 ** 4 ? "TiB" : value >= 1024 ** 3 ? "GiB" : "MiB";
   const divisor = 1024 ** (unit === "TiB" ? 4 : unit === "GiB" ? 3 : 2);
@@ -40,12 +65,16 @@ export function MotionStorageEstimate({
   directory,
   projectId,
   active,
+  samplingActive,
+  onSample,
 }: {
   spec: MotionSpec | null;
   output: MotionOutput;
   directory: string;
   projectId: string;
   active: boolean;
+  samplingActive: boolean;
+  onSample: (sample: StorageSample | null) => void;
 }) {
   const [refresh, setRefresh] = useState(0);
   const [state, setState] = useState<{
@@ -70,6 +99,111 @@ export function MotionStorageEstimate({
         })
       : "";
   const key = recipe + ":" + refresh;
+  const sampleKey = motionSampleKey(spec, output, directory, projectId);
+  const current = useRef({ sampleKey, active: samplingActive });
+  current.current = { sampleKey, active: samplingActive };
+  const request = useRef<{ key: string; id: string } | null>(null);
+  const [sampling, setSampling] = useState(false);
+  const [sampleError, setSampleError] = useState("");
+  const [sample, setSample] = useState<{ key: string; value: Sample } | null>(
+    null,
+  );
+  const selectedSample = sample?.key === sampleKey ? sample.value : undefined;
+  const canSample =
+    spec?.engine === "three-float-v1" &&
+    (output.master_bit_depth !== null || output.video.startsWith("prores-"));
+
+  useEffect(() => {
+    onSample(null);
+  }, [sampleKey, onSample]);
+
+  async function startSample() {
+    if (!spec || !active || !canSample) return;
+    const captured = sampleKey;
+    if (request.current?.key !== captured)
+      request.current = { key: captured, id: crypto.randomUUID() };
+    setSampling(true);
+    setSampleError("");
+    try {
+      const reply = await call<{ estimate: Sample }>(
+        "start_motion_render_estimate",
+        {
+          project_id: projectId,
+          spec,
+          output,
+          export_directory: directory,
+          idempotency_key: request.current.id,
+        },
+      );
+      request.current = null;
+      // A late start response still owns a server task; explicitly cancel it.
+      if (current.current.sampleKey !== captured || !current.current.active) {
+        await call("cancel_motion_render_estimate", {
+          estimate_id: reply.estimate.id,
+        });
+        return;
+      }
+      setSample({ key: captured, value: reply.estimate });
+    } catch (cause) {
+      if (current.current.sampleKey === captured)
+        setSampleError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSampling(false);
+    }
+  }
+
+  useEffect(() => {
+    const id = selectedSample?.id;
+    if (!id || !samplingActive) return;
+    let stale = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const controller = new AbortController();
+    async function poll() {
+      try {
+        const reply = await call<{ estimate: Sample }>(
+          "get_motion_render_estimate",
+          { estimate_id: id },
+          controller.signal,
+        );
+        if (stale) return;
+        setSample({ key: sampleKey, value: reply.estimate });
+        setSampleError("");
+        if (reply.estimate.status === "completed")
+          onSample({ key: sampleKey, id: reply.estimate.id });
+        else if (reply.estimate.status === "running")
+          timer = setTimeout(() => void poll(), 500);
+      } catch (cause) {
+        if (!stale)
+          setSampleError(
+            cause instanceof Error ? cause.message : String(cause),
+          );
+      }
+    }
+    void poll();
+    return () => {
+      stale = true;
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [selectedSample?.id, samplingActive, sampleKey, refresh, onSample]);
+
+  useEffect(() => {
+    const id = selectedSample?.id;
+    return () => {
+      // Ownership survives temporary capability refreshes and name-only saves.
+      // Only recipe/view changes release this sampling task.
+      if (id)
+        void call("cancel_motion_render_estimate", { estimate_id: id }).catch(
+          () => {},
+        );
+    };
+  }, [selectedSample?.id, sampleKey, samplingActive]);
+  useEffect(
+    () => () => {
+      current.current.active = false;
+    },
+    [],
+  );
   useEffect(() => {
     if (!active || !recipe) return;
     const controller = new AbortController();
@@ -103,7 +237,12 @@ export function MotionStorageEstimate({
       controller.abort();
     };
   }, [active, recipe, key]);
-  const data = state.key === key ? state.data : undefined;
+  const data =
+    selectedSample?.status === "completed"
+      ? selectedSample.budget
+      : state.key === key
+        ? state.data
+        : undefined;
   const error = state.key === key ? state.error : undefined;
   const floating = spec?.engine !== "remotion-sdr-v1";
   // Source precision does not imply that an EXR sequence is being delivered.
@@ -113,12 +252,42 @@ export function MotionStorageEstimate({
     <section className="motion-storage-estimate" aria-label="渲染磁盘空间预估">
       <div className="section-heading">
         <h3>{hasMaster ? "母版渲染预估磁盘空间" : "渲染预估磁盘空间"}</h3>
-        <Button
-          disabled={!active || !recipe}
-          onClick={() => setRefresh((old) => old + 1)}
-        >
-          刷新预估
-        </Button>
+        <div>
+          <Button
+            disabled={!active || !recipe}
+            onClick={() => setRefresh((old) => old + 1)}
+          >
+            刷新预估
+          </Button>
+          {canSample && (
+            <Button
+              disabled={
+                !active ||
+                !recipe ||
+                sampling ||
+                selectedSample?.status === "running"
+              }
+              onClick={() => void startSample()}
+            >
+              {sampling ? "正在启动采样…" : "采样估算"}
+            </Button>
+          )}
+          {selectedSample?.status === "running" && (
+            <Button
+              onClick={() => {
+                void call("cancel_motion_render_estimate", {
+                  estimate_id: selectedSample.id,
+                }).catch((cause: unknown) =>
+                  setSampleError(
+                    cause instanceof Error ? cause.message : String(cause),
+                  ),
+                );
+              }}
+            >
+              取消采样
+            </Button>
+          )}
+        </div>
       </div>
       <div className="status-line" aria-live="polite">
         {!recipe
@@ -132,6 +301,18 @@ export function MotionStorageEstimate({
                 : "当前磁盘空间不足，请更换目录或降低渲染规格。"}
       </div>
       <Notice text={error || ""} error />
+      <div className="status-line" aria-live="polite">
+        {selectedSample?.status === "running"
+          ? `正在采样 ${selectedSample.completed_frames} / ${selectedSample.sample_count} 帧…`
+          : selectedSample?.status === "completed"
+            ? `基于 ${selectedSample.sample_count} 帧的采样平均值，提交时采用此估算。`
+            : selectedSample?.status === "cancelled"
+              ? "采样已取消，继续显示规格估算。"
+              : sample && sample.key !== sampleKey
+                ? "画面或输出已改变，旧采样已失效。"
+                : "规格估算；采样可测量画面压缩率，不增加额外余量。"}
+      </div>
+      <Notice text={sampleError || selectedSample?.error || ""} error />
       {data && (
         <>
           <dl className="specification-summary">
@@ -146,7 +327,17 @@ export function MotionStorageEstimate({
               </dd>
             </div>
             <div>
-              <dt>导出盘所需空间预算</dt>
+              <dt>预计成品体积</dt>
+              <dd>{bytes(data.estimated_output_bytes)}</dd>
+            </div>
+            {data.compressed_master_bytes !== null && (
+              <div>
+                <dt>EXR 压缩后估算</dt>
+                <dd>{bytes(data.compressed_master_bytes)}</dd>
+              </div>
+            )}
+            <div>
+              <dt>预计磁盘峰值占用</dt>
               <dd>{bytes(data.destination_required_bytes)}</dd>
             </div>
             <div>
@@ -182,10 +373,6 @@ export function MotionStorageEstimate({
                     <dt>单帧 RGBA 母版</dt>
                     <dd>{bytes(data.master_frame_bytes)}</dd>
                   </div>
-                  <div>
-                    <dt>母版额外余量（10%）</dt>
-                    <dd>{bytes(data.master_overhead_budget_bytes)}</dd>
-                  </div>
                 </>
               )}
               <div>
@@ -213,12 +400,17 @@ export function MotionStorageEstimate({
               </div>
             </dl>
           </details>
+          {data.unmeasured_components?.map((note) => (
+            <p className="panel-description" key={note}>
+              {note}
+            </p>
+          ))}
         </>
       )}
       <p className="panel-description">
         {videoOnly
-          ? "仅视频预算不含 EXR 母版；中间数据仅计一帧。视频按规划码率与时长估算并加余量，实际体积取决于画面，不是文件大小上限；运行时会检查剩余空间。"
-          : "按当前草稿估算全新任务，不扣除已有缓存。ZIP 压缩与视频实际体积取决于画面；超采样增加中间数据，不改变最终尺寸。"}
+          ? "仅视频不生成 EXR，临时浮点数据只保留一帧。不加百分比余量；估算不是文件大小上限，运行时检查实际剩余空间。"
+          : "按当前草稿估算全新任务，不加百分比余量；采样使用实际文件平均大小。超采样增加临时数据，不改变最终尺寸。"}
         更新音轨或释放空间后可刷新预估。
       </p>
     </section>

@@ -305,6 +305,9 @@ class DeliveryPreset(Model):
     gop_seconds: float = Field(default=2.0, gt=0, le=30)
     settings: RenderSettings | None = None
     builtin: bool = True
+    # Only the explicitly validated ACEScct motion recipe may use declarations
+    # instead of standardized primaries/TRC identifiers.
+    color_metadata_policy: Literal["standard", "declared-scene"] = "standard"
 
     @model_validator(mode="after")
     def valid_combinations(self) -> DeliveryPreset:
@@ -313,6 +316,13 @@ class DeliveryPreset(Model):
         natural_range: Literal["full", "limited"] = "full" if sequence or rgb else "limited"
         if self.data_range == "auto":
             self.data_range = natural_range
+        if self.color_metadata_policy == "declared-scene" and not (
+            self.container == "mov" and self.codec == "prores_videotoolbox"
+            and self.profile == "4" and self.pixel_format == "p416le"
+            and self.bit_depth == 12 and self.data_range == "limited"
+            and not self.alpha and self.color.output == "ACEScct"
+        ):
+            raise ValueError("Declared scene video requires opaque ACEScct ProRes 4444/P416/12-bit MOV")
         if (sequence or rgb) and self.data_range != "full":
             raise ValueError("RGB/image outputs require full data range")
         if (

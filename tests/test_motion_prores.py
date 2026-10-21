@@ -23,8 +23,10 @@ def test_discovery_encoder_gate_and_cli_contract(tmp_path, monkeypatch):
     monkeypatch.setattr("chromascript.motion.motion_environment", lambda: {"render_available": True})
     options = service.get_motion_delivery_options()
     choices = [v for v in options["videos"] if v["value"].startswith("prores-")]
-    assert len(choices) == 3
-    assert all(not v["available"] and "prores_ks" in v["reason"] for v in choices)
+    assert len(choices) == 4
+    assert all(not v["available"] for v in choices)
+    assert all("prores_ks" in v["reason"] for v in choices if v["value"].startswith("prores-hq-"))
+    assert "VideoToolbox" in choices[-1]["reason"]
     project = service.create_project("missing encoder")["project"]["id"]
     scene = service.create_motion_scene(project)
     with pytest.raises(ChromaError, match="prores_ks"):
@@ -88,12 +90,13 @@ def test_4k_prores_budget_uses_frame_count_and_allows_screenshot_disk_space(tmp_
     })
     output = MotionOutput(master_bit_depth=None, video="prores-hq-pq", render_scale=1)
     estimate = service.estimate_motion_render(spec.settings(), output=output)
-    assert estimate["basis"] == "prores-hq-compressed-budget-v1"
-    assert 144 * 1024**3 < estimate["destination_required_bytes"] < 146 * 1024**3
+    assert estimate["basis"] == "nominal-no-margin-v2"
+    assert 120 * 1024**3 < estimate["destination_required_bytes"] < 122 * 1024**3
     assert estimate["master_uncompressed_bytes"] == 0 and estimate["sufficient"]
     expected_rate = Fraction(30_780_000 * rate[0], rate[1])
     assert estimate["video_planning_bps"] == -(-expected_rate.numerator // expected_rate.denominator)
-    assert estimate["video_budget_bytes"] == 155_131_200_000 + 16 * 1024**2
+    # Exact nominal frame payload; neither 20% nor a fixed 16 MiB mux reserve.
+    assert estimate["video_budget_bytes"] == 129_276_000_000
     pid = service.create_project("compressed budget")["project"]["id"]
     saved = service.create_motion_scene(pid, spec=spec)
     job = service.submit_motion_render(saved["record"]["id"], saved["revision_id"], "budget", output=output)["job"]

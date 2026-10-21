@@ -80,6 +80,7 @@ def write_image(
     fps: tuple[int, int] | None = None,
     frame_index: int | None = None,
     timecode_start: str | None = None,
+    disk_reserve_bytes: int = 128 * 1024**2,
 ) -> dict[str, Any]:
     if not np.isfinite(image).all():
         raise ChromaError("non_finite_pixels", "Cannot store NaN or infinity")
@@ -143,7 +144,9 @@ def write_image(
         scale = 65535 if depth > 8 else 255
         pixels = np.rint(np.clip(pixels, 0, 1) * scale).astype(np.uint16 if depth > 8 else np.uint8)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if shutil.disk_usage(path.parent).free < pixels.nbytes + 128 * 1024**2:
+    # Sampling-aware motion writes use atomic write errors instead of rejecting
+    # compressed frames against an unrelated uncompressed safety reservation.
+    if disk_reserve_bytes and shutil.disk_usage(path.parent).free < pixels.nbytes + disk_reserve_bytes:
         raise ChromaError("disk_space", "Not enough free space to safely write this frame")
     partial = path.with_name(path.stem + ".partial" + path.suffix)
     output = oiio.ImageOutput.create(str(partial))

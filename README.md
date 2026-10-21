@@ -111,9 +111,19 @@ Agent 先调用 `chromascript.get_audio_guidelines(project_id)` 获取项目对�
 
 在交付面板分别选择输出色彩空间与 Gamma。显示交付应用一次 ACES 输出变换；ACEScg、ACES2065-1 或 ACEScct 场景编码仅做色彩空间转换，不烘焙显示效果。可用组合仍受封装、编码器与位深限制。
 
+## ACEScct 12-bit 调色中间片
+
+浮点动画新增 `output.video=prores-4444-acescct`。选择“仅视频”可直接逐帧输出 MOV，不保留 EXR；也可与 EXR 同时交付。原生 `prores_videotoolbox` profile 4 使用 P416 高精度输入并验证相邻 12-bit Y/Cb/Cr 码值；不提供 XQ，不回退为 10-bit。能力不足时显示原因。
+
+线性黑底合成后只进行 ACEScg → ACEScct 编码，不烘焙显示变换，不带 Alpha。整数存储前拒绝超出 0–1 的 Log 码值。AP1/D60 与 ACEScct 通过 MOV 声明和 `color-encoding.json` 记录；标准 colr 为 2/2/1，BT.709 仅表示 YCbCr 打包矩阵。Resolve 请手动指定 ACEScct 输入和 Video 数据范围。这是制作中间片，不是标准 ACES2065-1 归档容器；报告不会把声明验证说成自动颜色识别或 Resolve 导入认证。
+
+磁盘面板区分“预计成品体积”和“预计磁盘峰值占用”，不增加 20%、30% 或 EXR 10% 余量。快速规格估算不创建文件；“采样估算”按当前完整草稿、正式尺寸和采样倍率处理最多 12 帧，使用真实 ZIP 文件和 ProRes 包的平均大小外推，不使用最大帧放大。未采样的编码部分及未知开销明确注明；估算不是体积上限。临时原始帧只保留一帧，发布重命名不计第二份视频。
+
+CLI/MCP 与网页共享 `start_motion_render_estimate`、`get_motion_render_estimate`、`cancel_motion_render_estimate`。提交可传 `storage_estimate_id`，采用匹配源码、颜色、时间、输出和运行环境的采样结果验盘。内容改变即失效，名称改变不失效；刷新只重读磁盘和音轨。采样可取消、不保存草稿、不创建正式渲染任务，超时或中断后清理临时样片；正式任务仍保留自己的恢复规则。
+
 ## 调色母版与完整色彩标签
 
-动画的“视频输出”支持 **Apple ProRes 422 HQ · MOV**：浮点源可选 sRGB、PQ 或 HLG，SDR 网页源可选 sRGB。支持仅视频及 EXR 母版附带视频；视频合成到黑底，不携带 Alpha。需要本机 `prores_ks` 编码器，导出后检查实际 codec、HQ profile、位深、采样、帧率与原生色彩标签。SDR 网页截图仍为 8-bit 源，不因 ProRes 编码而增加源精度。CLI/MCP 的 `submit_motion_render` 使用 `output.video=prores-hq-srgb|prores-hq-pq|prores-hq-hlg`，通过 `get_motion_delivery_options` 查询当前源的可用选项。ProRes 视频空间按 `prores_ks` HQ 的压缩宏块目标码率计算，按帧数累积并加 20% 余量及封装开销；不再用未压缩帧体积预算压缩视频。3840×2160、60 fps、9 分 20 秒的仅视频预算约 145 GiB，实际文件随画面复杂度变化；不会为调整预算而降低编码质量。
+动画的“视频输出”支持 **Apple ProRes 422 HQ · MOV**：浮点源可选 sRGB、PQ 或 HLG，SDR 网页源可选 sRGB。支持仅视频及 EXR 母版附带视频；视频合成到黑底，不携带 Alpha。需要本机 `prores_ks` 编码器，导出后检查实际 codec、HQ profile、位深、采样、帧率与原生色彩标签。SDR 网页截图仍为 8-bit 源，不因 ProRes 编码而增加源精度。CLI/MCP 的 `submit_motion_render` 使用 `output.video=prores-hq-srgb|prores-hq-pq|prores-hq-hlg`，通过 `get_motion_delivery_options` 查询当前源的可用选项。ProRes 视频空间按 `prores_ks` HQ 的压缩宏块目标码率计算，按帧数累积，不增加百分比余量；不再用未压缩帧体积预算压缩视频。3840×2160、60 fps、9 分 20 秒的仅视频规格估算约 121 GiB，实际文件随画面复杂度变化；不会为调整预算而降低编码质量。
 
 “动画导出”面板按所选导出模式提供 **渲染预估磁盘空间**，随当前草稿尺寸、帧数、Half/Float 精度、超采样、视频输出和导出目录更新。分别显示 EXR 未压缩体积、导出盘所需空间预算、磁盘可用空间，以及中间数据、视频、音轨和工作区元数据明细。ZIP 实际体积取决于画面；预估不预留空间、不扣除已有缓存，提交时使用同一套预算重新检查。修改音轨或释放磁盘后可点击“刷新预估”。
 
@@ -134,7 +144,7 @@ MCP 使用 `chromascript.estimate_motion_render`，CLI 使用同名操作：
 
 自定义 shader 保持可用。报告分别记录 `float_pipeline_verified` 与 `source_color_contract`。浮点验证不自动证明任意源码的颜色语义；`scene_linear_master` 表示是否交付场景线性母版；仅视频模式为 false，浮点源仍独立验证。人工审核后通过界面“记录源码审核”或共享 `record_motion_color_review(scene_id, expected_revision_id, reviewer, notes)` 记录依据。审核绑定修订及源码哈希；修订改变后为未审核，旧任务保留提交时的审核记录。未审核不阻止创作和渲染。
 
-所有新视频必须使用能准确标记色域和传递函数的组合。默认 SDR 为 Rec.709 色域 / sRGB，HDR 为 Rec.2020 / PQ 或 HLG；通用交付也保留受支持的 P3-D65 和 Gamma 2.2。纯 Gamma 2.4/2.6 及 AP1/ACEScct 没有精确的标准视频标签，不能通过备注或错误套用 BT.709 标签发布；这些旧视频组合禁用，EXR 与有原生数字 Gamma 字段的 DPX 不受影响。回读验证码流的 primaries、transfer、matrix、range，MOV/MP4 还核对实际 colr 字段；报告、CLI 和 MCP 使用同一规则。
+显示交付必须使用能准确标记色域和传递函数的组合。默认 SDR 为 Rec.709 色域 / sRGB，HDR 为 Rec.2020 / PQ 或 HLG；通用交付也保留受支持的 P3-D65 和 Gamma 2.2。纯 Gamma 2.4/2.6 及 AP1/ACEScct 没有精确的标准视频标签，不能通过备注或错误套用 BT.709 标签发布；这些旧视频组合禁用；下述动画 ACEScct 4444 使用独立、明确声明的中间片规则，EXR 与有原生数字 Gamma 字段的 DPX 不受影响。回读验证码流的 primaries、transfer、matrix、range，MOV/MP4 还核对实际 colr 字段；报告、CLI 和 MCP 使用同一规则。
 
 HLG 高饱和高光可能产生大于 1 的编码值。Limited YCbCr 交付以 32-bit float RGB 送入矩阵／范围转换，保留窄范围允许的超白，不在 RGB 阶段裁切；Alpha 独立处理。Full／RGB 整数输出遇到无法表示的 HLG 超白会明确拒绝，请改用 Limited YCbCr；超出窄范围实际码位的信号同样拒绝。HDR 4:2:0 按 BT.2100 使用 top-left 色度共址，并核对原生位置标记。视频交付还须完整严格解码，解码错误即使不改变帧数也不能通过验证；报告以 `decode_verified` 单独记录结果。
 
@@ -186,7 +196,7 @@ MCP/CLI 使用 `get_motion_delivery_options` 发现输出，`render_motion_frame
 
 新增“仅视频”模式使用 `output={"master_bit_depth":null,"video":"pq","render_scale":1}`（视频也可选 `hlg` / `srgb`），通过同一 `submit_motion_render` / `estimate_motion_render` 操作在界面、CLI 和 MCP 使用。每帧浮点读取、线性采样/Alpha 处理与 ACES 输出变换后直接送入 FFmpeg，不写 EXR，也不二次渲染。导出盘仅保留一帧临时 `.f32` 传输文件，消费后删除；成果仍附源码、规格、缩略图和验证报告。默认母版模式保持不变。仅视频不能同时设置 `video="none"`，中断后的显式重试从头开始；已原子发布的成果可直接恢复完成状态。
 
-仅视频空间预算包含单帧中间数据、音轨、辅助文件以及压缩视频估算；规划码率为 `max(8 Mbps, 宽×高×fps×0.2)`，按精确有理帧率算时长，再加 20% 与封装余量。规划码率**不是编码器限制**，原有 CRF/质量不变，不能保证实际文件大小；运行时持续检查磁盘余量。4K UHD 60fps、10 分钟、1×1 无音轨的估算约 8.56 GiB，而不是按整段未压缩 EXR 计算。
+仅视频空间预算包含单帧中间数据、音轨、辅助文件以及压缩视频估算；规划码率为 `max(8 Mbps, 宽×高×fps×0.2)`，按精确有理帧率算时长，不追加百分比余量；未测量的封装开销会单独注明。规划码率**不是编码器限制**，原有 CRF/质量不变，不能保证实际文件大小；运行时持续检查磁盘余量。4K UHD 60fps、10 分钟、1×1 无音轨的估算约 7.08 GiB，而不是按整段未压缩 EXR 计算。
 
 “下载 ACEScg 母版 ZIP”在下载时流式打包，不在服务端保存 ZIP；浏览器下载位置会保存用户请求的归档。MCP/CLI 可通过 `export_artifact` 将同一虚拟 `master-archive` 写入指定文件。流式 ZIP 不支持断点下载，中断后需重新开始。旧任务文件和快照保留不迁移；升级改变运行时指纹后，旧任务若要继续渲染需重新提交。
 
@@ -246,3 +256,6 @@ HDR 预览通过共享 `encode_motion_hdr_preview(chunk)` 操作在本机编码�
 Safari 26.2 的 `video-dynamic-range` 查询可能尚未实现。自动 HDR 在 high/standard 均不匹配时改用 `dynamic-range: high`，再核对 HEVC/MSE 以及实际 PQ 编码；已明确报告 SDR 视频平面的设备仍回退 sRGB。
 
 720p HDR 预览通过 transferable buffer 和鉴权二进制接口减少像素复制，优先使用通过实际回读验证的 VideoToolbox Main10；软件回退仍保留原帧率。采集下一片段与编码重叠，播放前缓冲约 2 秒，暂停或跳转只生成一帧清晰 HDR 图像。二进制地址为 `/api/operations/encode_motion_hdr_preview/binary`，`X-Chroma-HDR` 为规格 JSON（含 `frame_count`、`input_format` 和原帧率）；与 MCP/CLI 的 Base64 操作共用处理规则。
+
+
+采样生命周期：名称修改及保存触发的能力刷新保留正在运行的采样；源码、输出、目录或工作上下文改变后取消。取消和超时会对任务拥有的子进程先终止、再强制结束，初始化失败或线程中断会释放采样槽位。12-bit 能力探测或诊断文件写入失败仅禁用 4444，不影响已有输出格式。动画 EXR 与缩略图均不添加隐藏磁盘余量。

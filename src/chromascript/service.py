@@ -45,6 +45,7 @@ from .models import (
     SceneSpec,
 )
 from .motion import MotionOperations, motion_identity
+from .motion_sampling import MotionSamplingOperations, recover_samples
 from .music import music_environment
 from .operations import catalogue, operation
 from .presets import FRAME_RATES, RESOLUTIONS, builtins
@@ -53,12 +54,13 @@ from .store import Store, canonical, identifier, now
 from .templates import TEMPLATES, blank_scene, template_list
 
 
-class Service(MotionOperations, AudioOperations, AudioReviewOperations):
+class Service(MotionOperations, MotionSamplingOperations, AudioOperations, AudioReviewOperations):
     def __init__(self, root: Path, export_roots: list[Path] | None = None):
         self.operation_lock = threading.RLock()
         # Slow local listening reviews run independently of project editing/preview requests.
         self.audio_review_lock = threading.Lock()
         self.store = Store(root)
+        recover_samples(self.store)
         self.export_roots = [self.store.root, *[p.resolve() for p in export_roots or []]]
         self._renderer: Renderer | None = None
 

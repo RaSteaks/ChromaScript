@@ -269,7 +269,10 @@ export type MotionVerification = {
   float_pipeline_verified?: boolean;
   source_color_contract?: MotionColorReview;
   native_color_tags_verified?: boolean;
-  video?: { native_color_tags_verified?: boolean };
+  video?: {
+    native_color_tags_verified?: boolean;
+    color_declaration_verified?: boolean;
+  };
 };
 export type MotionCapabilities = {
   engines: Record<
@@ -299,7 +302,8 @@ export type MotionOutput = {
     | "rec709"
     | "prores-hq-srgb"
     | "prores-hq-pq"
-    | "prores-hq-hlg";
+    | "prores-hq-hlg"
+    | "prores-4444-acescct";
   render_scale?: 1 | 2 | 4;
 };
 export type MotionDeliveryOptions = {

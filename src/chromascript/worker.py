@@ -337,7 +337,8 @@ def run(root: Path, job_id: str) -> None:
                     target,
                     converted_frames(),
                     partial(encoded_progress, preset.id, output_index),
-                    **({"audio_path": audio_path} if audio_info is not None else {}),
+                    # Audio is an independent optional input, never part of the pixel stream.
+                    audio_path=audio_path if audio_info is not None else None,
                 )
                 result = {
                     "preset_id": preset.id,

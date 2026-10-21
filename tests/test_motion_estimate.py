@@ -70,7 +70,8 @@ def test_rational_audio_and_video_budget(tmp_path):
         settings, output=MotionOutput(video="pq"), project_id=pid
     )
     assert result["audio_bytes"] == 48048 * 8 + 44
-    assert result["video_budget_bytes"] == 32 * 16 * 4 * 30 + result["audio_bytes"]
+    # Nominal 8 Mb/s video plus 128 kb/s AAC, without an artificial multiplier.
+    assert result["video_budget_bytes"] == 1_001_000 + 16_016
     silent = service.estimate_motion_render(settings)
     assert silent["audio_bytes"] == 0
     sdr = service.estimate_motion_render(settings, engine="remotion-sdr-v1")

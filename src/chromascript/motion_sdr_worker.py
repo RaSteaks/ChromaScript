@@ -219,7 +219,8 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
             raise ChromaError("motion_frames", "浏览器输出帧不完整，请重试任务。")
         thumbnail = directory / "thumbnail.png"
         write_image(
-            thumbnail, resize_srgb(browser_pixels(paths[0], spec, output.render_scale), 1280), space="sRGB", depth=8
+            thumbnail, resize_srgb(browser_pixels(paths[0], spec, output.render_scale), 1280), space="sRGB", depth=8,
+            disk_reserve_bytes=0,  # Use the same no-reserve animation disk policy.
         )
         artifact(
             thumbnail,
@@ -250,7 +251,8 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
             encoded_video,
             (video_pixels(paths[i]) for i in range(spec.frames)),
             lambda count: progress("encoding", 0.75 + 0.2 * count / spec.frames),
-            **({"audio_path": audio_path} if audio_info is not None else {}),
+            # Audio is an independent optional input, never part of the pixel stream.
+            audio_path=audio_path if audio_info is not None else None,
         )
         verification = check_probe(info, preset, settings)
         # Padding an 8-bit screenshot into the encoder's 16-bit input pipe adds

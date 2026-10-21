@@ -33,6 +33,7 @@ from .motion_color import decode_float_frame
 from .motion_render import iter_float_frames, render_float_frames
 from .motion_sources import write_sources
 from .presets import builtins
+from .prores import prores_capability
 from .store import Store, canonical, now
 
 
@@ -137,6 +138,10 @@ def run_motion(root: Path, job_id: str) -> None:
             raise ChromaError("snapshot_corrupt", "动画导出位置与冻结快照不一致。")
         settings = spec.settings()
         output = resolve_motion_output(spec.engine, MotionOutput.model_validate(snapshot["output"]))
+        if output.video == "prores-4444-acescct":
+            precision = prores_capability(root)
+            if not precision["available"] or precision["identity"] != snapshot.get("precision_verification", {}).get("identity"):
+                raise ChromaError("motion_encoder", "原生 12-bit 编码能力已改变，请重新提交。")
         if direct:
             bundle = motion_bundle(job, snapshot)
             directory, published = bundle.prepare()
@@ -211,6 +216,7 @@ def run_motion(root: Path, job_id: str) -> None:
                     config_hash=snapshot["color_configuration"]["sha256"],
                     fps=(spec.fps.numerator, spec.fps.denominator),
                     frame_index=index,
+                    disk_reserve_bytes=0,
                 )
                 decoded, metadata = read_image(target)
                 expected = (
@@ -276,6 +282,7 @@ def run_motion(root: Path, job_id: str) -> None:
                 resize_srgb(transform(read_image(paths[0])[0], "sRGB"), 1280),
                 space="sRGB",
                 depth=8,
+                disk_reserve_bytes=0,  # Animation admission already accounts for disk usage.
             )
         archive = None
         if bundle is None and master_depth is not None:
@@ -306,6 +313,7 @@ def run_motion(root: Path, job_id: str) -> None:
         }
         video = None
         info = None
+        declaration_path = None
         if output.video != "none":
             preset = motion_video_preset(output.video)
             # File extension and MIME follow the frozen encoding, including MOV.
@@ -329,11 +337,14 @@ def run_motion(root: Path, job_id: str) -> None:
                         if bundle is not None:
                             bundle.check_volume()
                         progress("encoding", 0.95 * index / spec.frames, index)
-                        if shutil.disk_usage(work).free < 64 * 1024**2 + spec.width * spec.height * 16 * output.render_scale**2:
+                        # The current transport already occupies disk and is
+                        # removed before the next one; do not reserve it twice.
+                        if shutil.disk_usage(work).free <= 0:
                             raise ChromaError("disk_space", "导出盘剩余空间不足，已停止仅视频渲染。请释放空间后重新执行。")
                         pixels = decode_float_frame(raw.read_bytes(), spec.width, spec.height, output.render_scale, spec.source_color_space)
                         if index == 0:
-                            write_image(thumbnail, resize_srgb(transform(pixels, "sRGB"), 1280), space="sRGB", depth=8)
+                            write_image(thumbnail, resize_srgb(transform(pixels, "sRGB"), 1280), space="sRGB", depth=8,
+                                        disk_reserve_bytes=0)  # No hidden animation reserve.
                         # Flatten alpha in linear ACEScg, then apply exactly one ACES
                         # output transform. Half storage never quantizes this path.
                         yield render_output(pixels, preset.color.output, False)
@@ -349,7 +360,7 @@ def run_motion(root: Path, job_id: str) -> None:
                     encoded_video,
                     frames,
                     lambda count: progress("encoding", 0.95 * count / spec.frames if master_depth is None else 0.75 + 0.2 * count / spec.frames, count),
-                    **({"audio_path": audio_path} if audio_info is not None else {}),
+                    audio_path=audio_path if audio_info is not None else None,
                 )
             video_verification = check_probe(info, preset, settings)
             if not video_verification["passed"]:
@@ -359,6 +370,20 @@ def run_motion(root: Path, job_id: str) -> None:
                     verification=video_verification,
                 )
             verification["video"] = video_verification
+            if preset.color_metadata_policy == "declared-scene":
+                verification["precision_verification"] = snapshot["precision_verification"]
+                declaration_path = directory / "color-encoding.json"
+                declaration_path.write_text(json.dumps({
+                    "reference": "scene", "encoded_color_space": "ACEScct",
+                    "primaries": "AP1", "white_point": "D60", "transfer": "ACEScct",
+                    "matrix": "BT.709", "data_range": "limited", "alpha": False,
+                    "display_transform_applied": False, "transport": "p416le",
+                    "verified_precision_bits": 12, "source_sha256": spec.source_digest(),
+                    "config": snapshot["color_configuration"],
+                    "resolve": {"input": "ACEScct", "data_levels": "Video", "import_verified": False},
+                    "standard_aces_archive": False,
+                }, ensure_ascii=False, indent=2))
+                artifact(declaration_path, "color-encoding", "application/json")
             if encoded_video != video:
                 encoded_video.replace(video)
             artifact(video, "video", "video/quicktime" if preset.container == "mov" else "video/mp4", {"verification": video_verification})
@@ -402,6 +427,7 @@ def run_motion(root: Path, job_id: str) -> None:
         files = {
             **{str(p.relative_to(directory)): p for p in (*sources, description, frozen, thumbnail, report)},
             **({video.name: video} if video else {}),
+            **({declaration_path.name: declaration_path} if declaration_path else {}),
             **({archive.name: archive} if archive else {}),
             **({f"masters/{p.name}": p for p in [*paths, manifest_file]} if master_depth is not None else {}),
         }

@@ -23,6 +23,8 @@ def iter_float_frames(
     max_dimension: int | None = None,
     expected_gpu: dict[str, Any] | None = None,
     render_scale: int = 1,
+    cancelled: Callable[[], bool] | None = None,
+    on_process: Callable[[subprocess.Popen[Any]], None] | None = None,
 ) -> Generator[tuple[int, Path], None, None]:
     directory.mkdir(parents=True, exist_ok=True)
     # Interrupted transport is disposable, unlike the independently verified EXRs.
@@ -38,6 +40,8 @@ def iter_float_frames(
             stderr=log,
             text=True,
         )
+        if on_process is not None:
+            on_process(process)
         try:
             assert process.stdin is not None and process.stdout is not None
             process.stdin.write(
@@ -62,6 +66,8 @@ def iter_float_frames(
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
                 while True:
+                    if cancelled is not None and cancelled():
+                        raise ChromaError("cancelled", "采样估算已取消。")
                     if time.monotonic() > deadline:
                         raise ChromaError(
                                 "motion_timeout", f"单帧浮点渲染超过 {frame_timeout} 秒，请降低采样或简化场景后重试。"
