@@ -1,3 +1,4 @@
+import { openExamples } from "./workspace-navigation";
 import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { mkdirSync } from "node:fs";
@@ -9,7 +10,7 @@ async function stage(
   name: "scene" | "preview" | "delivery" | "jobs",
 ) {
   const labels = {
-    scene: "1. 选择场景",
+    scene: "1. 选择作品",
     preview: "2. 编辑与预览",
     delivery: "3. 设置交付",
     jobs: "4. 任务与成果",
@@ -104,8 +105,8 @@ test("selected job previews survive queue pagination and retain scene ownership"
   await page.goto("/");
   await page.getByLabel("当前项目", { exact: true }).selectOption(project.id);
   await page
-    .getByRole("button", { name: first.scene.name, exact: true })
-    .click();
+    .getByLabel("当前作品", { exact: true })
+    .selectOption(`wgsl:${first.record.id}`);
   await stage(page, "jobs");
   const results = page.getByRole("region", { name: "任务成果" });
   const previewLink = results.getByRole("button", { name: "查看画面预览" });
@@ -172,13 +173,14 @@ test("project, scene, saved revision, real preview and keyboard pixel sampling",
     .fill("浏览器验证 " + Date.now());
   await dialog.getByRole("button", { name: "创建项目", exact: true }).click();
   await expect(dialog).not.toBeVisible();
+  await openExamples(page);
   await page.getByRole("button", { name: /螺旋粒子/ }).click();
   await expect(
     page.getByRole("heading", { name: "螺旋粒子", exact: true }),
   ).toBeVisible();
   await page.getByLabel("曝光（档）", { exact: true }).fill("0.5");
   await expect(page.getByText("未保存", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "保存场景", exact: true }).click();
+  await page.getByRole("button", { name: "保存作品", exact: true }).click();
   await expect(page.getByText("保存场景已完成", { exact: true })).toBeVisible();
   // Shared canvas settings are edited beside the live preview.
   await stage(page, "preview");
@@ -205,9 +207,10 @@ test("project, scene, saved revision, real preview and keyboard pixel sampling",
   });
   await page.getByLabel("曝光（档）", { exact: true }).fill("0.7");
   await stage(page, "scene");
+  await openExamples(page);
   await page.getByRole("button", { name: /广色域渐变/ }).click();
   await expect(
-    page.getByRole("dialog", { name: "保留场景修改" }),
+    page.getByRole("dialog", { name: "保留未保存修改" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "继续编辑", exact: true }).click();
   await stage(page, "preview");
@@ -353,11 +356,10 @@ test("offline feedback preserves local draft and reconnects", async ({
   await page.goto("/");
   await expect(page.locator(".engine-state")).toContainText("Metal");
   await stage(page, "preview");
-  await page.locator(".code-disclosure > summary").click();
   const editor = page.getByLabel("WGSL 场景代码");
   await expect(editor).toBeEnabled();
   {
-    const old = await editor.inputValue();
+    const old = await editor.innerText();
     await editor.fill(old + "\n// local draft");
     await page.route("**/api/operations/list_jobs", (route) =>
       route.abort("failed"),
@@ -365,7 +367,9 @@ test("offline feedback preserves local draft and reconnects", async ({
     await expect(
       page.getByText("本地服务暂不可用，编辑内容已保留。"),
     ).toBeVisible({ timeout: 10000 });
-    await expect(editor).toHaveValue(old + "\n// local draft");
+    await expect(editor).toHaveText(old + "\n// local draft", {
+      useInnerText: true,
+    });
     await page.unroute("**/api/operations/list_jobs");
     await page.getByRole("button", { name: "重新连接", exact: true }).click();
     await expect(
@@ -525,9 +529,8 @@ test("workflow stages retain drafts and provide clear prerequisites", async ({
   await expect(page.locator(".engine-state")).toContainText("Metal");
   await stage(page, "preview");
   await expect(page.locator("#workflow-title")).toBeFocused();
-  await page.locator(".code-disclosure > summary").click();
   const editor = page.getByLabel("WGSL 场景代码");
-  const original = await editor.inputValue();
+  const original = await editor.innerText();
   await editor.fill(original + "\n// workflow draft");
   await page.getByLabel("总帧数", { exact: true }).fill("17");
   await stage(page, "delivery");
@@ -544,7 +547,7 @@ test("workflow stages retain drafts and provide clear prerequisites", async ({
     .selectOption("exr");
   await stage(page, "jobs");
   await expect(
-    page.getByRole("dialog", { name: "保留场景修改" }),
+    page.getByRole("dialog", { name: "保留未保存修改" }),
   ).not.toBeVisible();
   await stage(page, "delivery");
   await expect(
@@ -555,14 +558,16 @@ test("workflow stages retain drafts and provide clear prerequisites", async ({
   ).toHaveValue("exr");
   await page.getByRole("button", { name: "返回保存场景", exact: true }).click();
   await expect(page.getByLabel("总帧数", { exact: true })).toHaveValue("17");
-  await page.locator(".code-disclosure > summary").click();
-  await expect(editor).toHaveValue(original + "\n// workflow draft");
+  await expect(editor).toHaveText(original + "\n// workflow draft", {
+    useInnerText: true,
+  });
   await page.getByRole("button", { name: "MCP 接口", exact: true }).click();
   await expect(page).toHaveTitle("MCP 接口 · ChromaScript");
   await page.getByRole("button", { name: "工作区", exact: true }).click();
   await expect(page).toHaveTitle("编辑与预览 · ChromaScript");
-  await page.locator(".code-disclosure > summary").click();
-  await expect(editor).toHaveValue(original + "\n// workflow draft");
+  await expect(editor).toHaveText(original + "\n// workflow draft", {
+    useInnerText: true,
+  });
 });
 
 test("empty workflow directs users to create a scene", async ({ page }) => {
@@ -572,7 +577,7 @@ test("empty workflow directs users to create a scene", async ({ page }) => {
   );
   await page.goto("/");
   await expect(page.locator(".engine-state")).toContainText("Metal");
-  await expect(page.locator("#workflow-title")).toHaveText("选择场景");
+  await expect(page.locator("#workflow-title")).toHaveText("选择作品");
   await stage(page, "delivery");
   await expect(
     page.getByRole("heading", { name: "先选择一个场景", exact: true }),
@@ -667,6 +672,8 @@ test("short desktop layouts keep preview and keyboard form controls reachable", 
   await page.setViewportSize({ width: 1024, height: 700 });
   await page.goto("/");
   await stage(page, "preview");
+  // The persistent library adds document content; the media remains fully reachable.
+  await page.locator(".preview-stage").scrollIntoViewIfNeeded();
   const media = await page.locator(".preview-stage").boundingBox();
   expect(media).not.toBeNull();
   expect(media!.y + media!.height).toBeLessThanOrEqual(700);
@@ -702,23 +709,22 @@ test("short desktop layouts keep preview and keyboard form controls reachable", 
 test("new project creation guards a retained scene draft", async ({ page }) => {
   await page.goto("/");
   await stage(page, "preview");
-  await page.locator(".code-disclosure > summary").click();
   const editor = page.getByLabel("WGSL 场景代码");
-  const original = await editor.inputValue();
+  const original = await editor.innerText();
   await editor.fill(original + "\n// retain during project creation");
   await stage(page, "scene");
   await page.getByRole("button", { name: "新建项目", exact: true }).click();
   await expect(
-    page.getByRole("dialog", { name: "保留场景修改" }),
+    page.getByRole("dialog", { name: "保留未保存修改" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "继续编辑", exact: true }).click();
   await expect(
     page.getByRole("dialog", { name: "新建项目" }),
   ).not.toBeVisible();
   await stage(page, "preview");
-  await page.locator(".code-disclosure > summary").click();
-  await expect(editor).toHaveValue(
+  await expect(editor).toHaveText(
     original + "\n// retain during project creation",
+    { useInnerText: true },
   );
   await stage(page, "scene");
   const project = page.getByLabel("当前项目", { exact: true });
@@ -735,7 +741,7 @@ test("new project creation guards a retained scene draft", async ({ page }) => {
   expect(others.length).toBeGreaterThan(0);
   await project.selectOption(others[0]);
   await expect(
-    page.getByRole("dialog", { name: "保留场景修改" }),
+    page.getByRole("dialog", { name: "保留未保存修改" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "切换并舍弃", exact: true }).click();
   await expect(project).toHaveValue(others[0]);
@@ -805,7 +811,7 @@ test("blank WGSL scene starts without an example and opens the editor", async ({
   const created = page.waitForResponse(
     (r) => r.url().endsWith("/create_scene") && r.request().method() === "POST",
   );
-  await page.getByRole("button", { name: "新建空白场景", exact: true }).click();
+  await page.getByRole("button", { name: "新建作品", exact: true }).click();
   const response = await created;
   expect(response.request().postDataJSON().template_id).toBeNull();
   const value = await response.json();
@@ -816,8 +822,8 @@ test("blank WGSL scene starts without an example and opens the editor", async ({
   await expect(page.getByText("实时预览已更新", { exact: true })).toBeVisible({
     timeout: 20000,
   });
-  await page.locator(".code-disclosure > summary").click();
-  await expect(page.getByLabel("WGSL 场景代码")).toHaveValue(
+  await expect(page.getByLabel("WGSL 场景代码")).toHaveText(
     new RegExp("return vec4<f32>\\(0\\.0, 0\\.0, 0\\.0, 0\\.0\\)"),
+    { useInnerText: true },
   );
 });

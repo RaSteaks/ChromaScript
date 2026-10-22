@@ -1,3 +1,4 @@
+import { openDelivery } from "./workspace-navigation";
 import { expect, test } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 
@@ -23,11 +24,12 @@ test("video-only mode preserves master settings and exports without EXR; accessi
     spec: { ...blank.scene, width: 32, height: 18, frames: 3 },
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "动画代码", exact: true }).click();
-  await page.getByLabel("动画项目", { exact: true }).selectOption(project.id);
+  await page.getByRole("button", { name: "工作区", exact: true }).click();
+  await page.getByLabel("当前项目", { exact: true }).selectOption(project.id);
   await page
-    .getByLabel("已保存的动画", { exact: true })
-    .selectOption(saved.record.id);
+    .getByLabel("当前作品", { exact: true })
+    .selectOption(`motion:${saved.record.id}`);
+  await openDelivery(page);
   const mode = page.getByLabel("导出模式", { exact: true });
   const depth = page.getByLabel("EXR 母版精度", { exact: true });
   const video = page.getByLabel("视频输出", { exact: true });
@@ -62,9 +64,7 @@ test("video-only mode preserves master settings and exports without EXR; accessi
   const rediscovery = page.waitForResponse((r) =>
     r.url().endsWith("/get_motion_delivery_options"),
   );
-  await page
-    .getByRole("button", { name: "刷新动画列表与连接", exact: true })
-    .click();
+  await page.getByRole("button", { name: "刷新作品列表", exact: true }).click();
   await rediscovery;
   await expect(mode).toHaveValue("video-only");
   await expect(video).toHaveValue("srgb");

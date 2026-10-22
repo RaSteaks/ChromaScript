@@ -17,7 +17,7 @@ export default function Animation() {
 const editor = (page: Page) =>
   page.getByRole("textbox", { name: "动画 TypeScript 代码", exact: true });
 const connection = (page: Page) =>
-  page.getByRole("button", { name: "刷新动画列表与连接", exact: true });
+  page.getByRole("button", { name: "刷新作品列表", exact: true });
 const conflict = (page: Page) =>
   page.getByRole("status").filter({ hasText: "检测到外部更新" });
 
@@ -116,11 +116,11 @@ with sqlite3.connect((Path(os.environ["CHROMASCRIPT_SYNC_WORKSPACE"]) / "state.s
   }
 
   await page.goto("/");
-  await page.getByRole("button", { name: "动画代码", exact: true }).click();
-  await page.getByLabel("动画项目", { exact: true }).selectOption(project.id);
+  await page.getByRole("button", { name: "工作区", exact: true }).click();
+  await page.getByLabel("当前项目", { exact: true }).selectOption(project.id);
   await page
-    .getByLabel("已保存的动画", { exact: true })
-    .selectOption(saved.record.id);
+    .getByLabel("当前作品", { exact: true })
+    .selectOption(`motion:${saved.record.id}`);
   await expect(
     page.frameLocator("iframe[title='动画画面']").getByText("同步初稿"),
   ).toBeVisible({ timeout: 20000 });
@@ -158,14 +158,14 @@ test("MCP updates the existing editor, specification and preview without reloadi
     ["常用帧率", "24000/1001"],
   ])
     await expect(page.getByLabel(label, { exact: true })).toHaveValue(value);
-  await expect(page.getByLabel("已保存的动画", { exact: true })).toContainText(
+  await expect(page.getByLabel("当前作品", { exact: true })).toContainText(
     latest.scene.name,
   );
-  await expect(page.locator(".motion-workbench .save-state")).toContainText(
+  await expect(page.locator(".workbench-context .save-state")).toContainText(
     latest.revision_id.slice(0, 8),
   );
   await expect(
-    page.getByRole("button", { name: "保存动画", exact: true }),
+    page.getByRole("button", { name: "保存作品", exact: true }),
   ).toBeDisabled();
   await expect(
     page.frameLocator("iframe[title='动画画面']").getByText("MCP 自动同步画面"),
@@ -199,7 +199,7 @@ test("external updates retain all draft fields, the save baseline and explicit s
       json: { error: { code: "unavailable", message: "保存检查失败" } },
     }),
   );
-  await page.getByRole("button", { name: "保存动画", exact: true }).click();
+  await page.getByRole("button", { name: "保存作品", exact: true }).click();
   const saveError = page.getByRole("alert").filter({ hasText: "保存检查失败" });
   await expect(saveError).toBeVisible();
   const remote = await mcpUpdate(saved, {
@@ -223,7 +223,7 @@ test("external updates retain all draft fields, the save baseline and explicit s
     expectedRevision = route.request().postDataJSON().expected_revision_id;
     return route.continue();
   });
-  await page.getByRole("button", { name: "保存动画", exact: true }).click();
+  await page.getByRole("button", { name: "保存作品", exact: true }).click();
   await expect.poll(() => expectedRevision).toBe(saved.revision_id);
   const latest = page.getByRole("button", {
     name: "载入最新版本",
@@ -312,7 +312,7 @@ test("saving suspends reads and a late acknowledgement preserves edits and subse
     if (request.url().endsWith("/get_motion_scene")) reads += 1;
   });
   await editor(page).fill(source("本次保存代码"));
-  await page.getByRole("button", { name: "保存动画", exact: true }).click();
+  await page.getByRole("button", { name: "保存作品", exact: true }).click();
   try {
     const acknowledged = await commit;
     const pausedAt = reads;
@@ -326,7 +326,7 @@ test("saving suspends reads and a late acknowledgement preserves edits and subse
   await expect(conflict(page)).toBeVisible();
   await expect(editor(page)).toContainText("保存等待期间的新草稿");
   await expect(
-    page.getByRole("button", { name: "保存动画", exact: true }),
+    page.getByRole("button", { name: "保存作品", exact: true }),
   ).toBeEnabled();
 });
 
@@ -339,7 +339,7 @@ test("a late read cannot reopen an animation after selection changes", async ({
     spec: { ...saved.scene, name: "另一动画", code: source("另一动画画面") },
   });
   await connection(page).click();
-  await expect(page.getByLabel("已保存的动画", { exact: true })).toContainText(
+  await expect(page.getByLabel("当前作品", { exact: true })).toContainText(
     other.scene.name,
   );
   let release: () => void = () => {};
@@ -366,15 +366,15 @@ test("a late read cannot reopen an animation after selection changes", async ({
   try {
     await started;
     await page
-      .getByLabel("已保存的动画", { exact: true })
-      .selectOption(other.record.id);
+      .getByLabel("当前作品", { exact: true })
+      .selectOption(`motion:${other.record.id}`);
     await expect(editor(page)).toContainText("另一动画画面");
   } finally {
     release();
   }
   await page.waitForTimeout(1200);
-  await expect(page.getByLabel("已保存的动画", { exact: true })).toHaveValue(
-    other.record.id,
+  await expect(page.getByLabel("当前作品", { exact: true })).toHaveValue(
+    `motion:${other.record.id}`,
   );
   await expect(editor(page)).toContainText("另一动画画面");
   await expect(editor(page)).not.toContainText("过期画面");
@@ -398,12 +398,12 @@ test("IME, inactive views and hidden tabs pause reads and immediately recheck on
   await name.dispatchEvent("compositionend");
   await expect(editor(page)).toContainText("组合输入后的外部代码");
 
-  await page.getByRole("button", { name: "工作区", exact: true }).click();
+  await page.getByRole("button", { name: "MCP 接口", exact: true }).click();
   latest = await mcpUpdate(latest, { code: source("返回动画页的外部代码") });
   const inactiveAt = reads;
   await page.waitForTimeout(1200);
   expect(reads).toBe(inactiveAt);
-  await page.getByRole("button", { name: "动画代码", exact: true }).click();
+  await page.getByRole("button", { name: "工作区", exact: true }).click();
   await expect(editor(page)).toContainText("返回动画页的外部代码");
 
   // Model document lifecycle explicitly; headless multi-page focus does not

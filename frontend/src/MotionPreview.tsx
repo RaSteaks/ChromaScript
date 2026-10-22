@@ -1,12 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  Pause,
-  Play,
-  RefreshCw,
-  SkipBack,
-  StepBack,
-  StepForward,
-} from "lucide-react";
+import { Play, RefreshCw } from "lucide-react";
+import { PreviewTimeline } from "./PreviewTimeline";
 import { PreviewAudio, type PreviewAudioHandle } from "./PreviewAudio";
 import { call, encodeHDRPreview } from "./api";
 import {
@@ -523,76 +517,46 @@ export function MotionPreview({
                 ? accepted.hdr?.message || "当前草稿 · 网页 sRGB 预览"
                 : "等待代码预览"}
       </div>
-      <div className="motion-playback">
-        {spec?.engine === "three-float-v1" && (
-          <Field label="预览显示" id="motion-preview-display">
-            <select
-              id="motion-preview-display"
-              value={hdrPreview ? "auto" : "srgb"}
-              onChange={(event) => setHdrPreview(event.target.value === "auto")}
-            >
-              <option value="auto">自动 HDR</option>
-              <option value="srgb">sRGB SDR</option>
-            </select>
-          </Field>
-        )}
-        <Button
-          onClick={() => {
-            if (!playing) audio.current?.unlock();
-            command(playing ? "pause" : "play");
-          }}
-          disabled={!accepted}
-          aria-label={playing ? "暂停动画" : "播放动画"}
-        >
-          {playing ? <Pause size={15} /> : <Play size={15} />}
-          {playing ? "暂停" : "播放"}
-        </Button>
-        <Button
-          onClick={() => command("seek", 0)}
-          disabled={!accepted}
-          aria-label="回到动画首帧"
-        >
-          <SkipBack size={15} />
-        </Button>
-        <Button
-          onClick={() => command("seek", Math.max(0, frame - 1))}
-          disabled={!accepted}
-          aria-label="上一帧动画"
-        >
-          <StepBack size={15} />
-        </Button>
-        <Button
-          onClick={() => command("seek", Math.min(maxFrame, frame + 1))}
-          disabled={!accepted}
-          aria-label="下一帧动画"
-        >
-          <StepForward size={15} />
-        </Button>
-        <span className="mono">
-          {frame} / {maxFrame}
-        </span>
-        <Button
-          onClick={() => setRetry((old) => old + 1)}
-          disabled={pending || !spec}
-          aria-label="重新编译动画"
-        >
-          <RefreshCw size={15} />
-        </Button>
-      </div>
-      <label className="sr-only" htmlFor="motion-timeline">
-        动画时间线
-      </label>
-      <input
-        id="motion-timeline"
-        type="range"
-        min={0}
-        max={maxFrame}
-        value={Math.min(frame, maxFrame)}
+      <PreviewTimeline
+        animation
+        frame={frame}
+        maxFrame={maxFrame}
+        playing={playing}
         disabled={!accepted}
-        onChange={(event) => {
-          command("pause");
-          command("seek", Number(event.target.value));
+        onPlay={() => {
+          if (!playing) audio.current?.unlock();
+          command(playing ? "pause" : "play");
         }}
+        onSeek={(value) => {
+          command("pause");
+          command("seek", value);
+        }}
+        tools={
+          <>
+            {spec?.engine === "three-float-v1" && (
+              <Field label="预览显示" id="motion-preview-display">
+                <select
+                  id="motion-preview-display"
+                  value={hdrPreview ? "auto" : "srgb"}
+                  onChange={(event) =>
+                    setHdrPreview(event.target.value === "auto")
+                  }
+                >
+                  <option value="auto">自动 HDR</option>
+                  <option value="srgb">sRGB SDR</option>
+                </select>
+              </Field>
+            )}
+            <Button
+              onClick={() => setRetry((old) => old + 1)}
+              disabled={pending || !spec}
+              aria-label="重新编译动画"
+              title="重新编译动画"
+            >
+              <RefreshCw size={15} />
+            </Button>
+          </>
+        }
       />
       <PreviewAudio
         key={`${projectId}:${sceneId}`}
@@ -611,11 +575,15 @@ export function MotionPreview({
         clockKey={`${sceneId}:${accepted?.channel}`}
       />
       <Notice text={error?.message || ""} error />
-      <p className="technical-note">
-        {spec?.engine === "remotion-sdr-v1"
-          ? "SDR 网页画面 · sRGB 8-bit。保留网页图层与原始动画代码。"
-          : "宽色域浮点场景在支持的设备上使用 720p HDR 视频按项目帧率预览，否则回退 sRGB。视频预览合成黑底；ACEScg 母版独立保存。"}
-      </p>
+      {/* Keep color/precision guidance available without reserving a paragraph of viewing space. */}
+      <details className="technical-note preview-notes">
+        <summary>预览说明</summary>
+        <p>
+          {spec?.engine === "remotion-sdr-v1"
+            ? "SDR 网页画面 · sRGB 8-bit。保留网页图层与原始动画代码。"
+            : "宽色域浮点场景在支持的设备上使用 720p HDR 视频按项目帧率预览，否则回退 sRGB。视频预览合成黑底；ACEScg 母版独立保存。"}
+        </p>
+      </details>
     </PreviewPanel>
   );
 }

@@ -359,11 +359,11 @@ test("linear pipeline UI preserves drafts and supports keyboard and accessibilit
     },
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "动画代码", exact: true }).click();
-  await page.getByLabel("动画项目", { exact: true }).selectOption(project.id);
+  await page.getByRole("button", { name: "工作区", exact: true }).click();
+  await page.getByLabel("当前项目", { exact: true }).selectOption(project.id);
   await page
-    .getByLabel("已保存的动画", { exact: true })
-    .selectOption(saved.record.id);
+    .getByLabel("当前作品", { exact: true })
+    .selectOption(`motion:${saved.record.id}`);
   const target = page.getByLabel("管线目标空间", { exact: true });
   await target.selectOption("ACES2065-1");
   await page.getByRole("button", { name: "升级色彩管线", exact: true }).click();
@@ -380,7 +380,7 @@ test("linear pipeline UI preserves drafts and supports keyboard and accessibilit
   await expect(
     page.getByRole("button", { name: "升级色彩管线", exact: true }),
   ).toBeDisabled();
-  await page.getByRole("button", { name: "保存动画", exact: true }).click();
+  await page.getByRole("button", { name: "保存作品", exact: true }).click();
   await expect(
     page.getByRole("button", { name: "升级色彩管线", exact: true }),
   ).toBeEnabled();

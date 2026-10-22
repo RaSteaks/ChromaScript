@@ -127,8 +127,8 @@ test("project audio import, synthesis, drafts, conflicts and accessibility", asy
   ).toBeFocused();
   // The second workspace reuses the same project timeline and component.
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.getByRole("button", { name: "动画代码", exact: true }).click();
-  await page.getByLabel("动画项目", { exact: true }).selectOption(project.id);
+  await page.getByRole("button", { name: "工作区", exact: true }).click();
+  await page.getByLabel("当前项目", { exact: true }).selectOption(project.id);
   await page.getByRole("button", { name: "项目音频", exact: true }).click();
   await expect(
     dialog.getByRole("button", { name: "添加 测试节奏 到音轨" }),

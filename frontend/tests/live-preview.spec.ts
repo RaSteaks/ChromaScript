@@ -308,7 +308,6 @@ test("compile and network failures retain the last frame and recover without los
 }) => {
   const { created, image } = await scene(page);
   const original = await image.getAttribute("src");
-  await page.locator(".code-disclosure > summary").click();
   const editor = page.getByLabel("WGSL 场景代码");
   const broken = created.scene.code.replace(
     "ctx.params.exposure",
@@ -321,7 +320,7 @@ test("compile and network failures retain the last frame and recover without los
     "false",
   );
   await expect(image).toHaveAttribute("src", original!);
-  await expect(editor).toHaveValue(broken);
+  await expect(editor).toHaveText(broken, { useInnerText: true });
   await expect(
     page.getByRole("button", { name: "播放实时预览" }),
   ).toBeDisabled();
@@ -401,9 +400,8 @@ test("live preview respects IME, keyboard timeline and narrow accessibility", as
   await page.keyboard.press("ArrowRight");
   await expect(page.getByLabel("当前帧", { exact: true })).toHaveValue("1");
   await expect(page.locator(".live-preview-status")).toContainText("帧 1");
-  await page.locator(".code-disclosure > summary").click();
   const editor = page.getByLabel("WGSL 场景代码");
-  const code = await editor.inputValue();
+  const code = await editor.innerText();
   const count = requests.length;
   await editor.dispatchEvent("compositionstart");
   await editor.fill(code + "\n// 中文输入草稿");
@@ -412,9 +410,9 @@ test("live preview respects IME, keyboard timeline and narrow accessibility", as
   await editor.dispatchEvent("compositionend");
   await expect.poll(() => requests.length).toBe(count + 1);
   await expect(page.getByText("实时预览已更新", { exact: true })).toBeVisible();
-  await editor.evaluate(
-    (node) => ((node.closest("details") as HTMLDetailsElement).open = false),
-  );
+  // The shared editor stays visible; Tab must still leave its content surface.
+  await editor.press("Tab");
+  await expect(editor).not.toBeFocused();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.emulateMedia({ reducedMotion: "reduce" });
   expect(

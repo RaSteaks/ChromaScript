@@ -197,7 +197,8 @@ export function PreviewPanel({
       if (event.key !== "Tab") return;
       const controls = Array.from(
         node.querySelectorAll<HTMLElement>(
-          'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), video[controls], [tabindex="0"]',
+          // Native preview disclosures must participate in the modal's Tab cycle too.
+          'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, video[controls], [tabindex="0"]',
         ),
       ).filter(
         (element) =>

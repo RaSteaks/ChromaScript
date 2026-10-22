@@ -1,3 +1,4 @@
+import { openDelivery, openPreview } from "./workspace-navigation";
 import { test, expect } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 
@@ -28,11 +29,12 @@ test("master storage follows drafts, rejects stale replies, recovers and stays a
     spec: { ...blank.scene, width: 320, height: 180, frames: 30 },
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "动画代码", exact: true }).click();
-  await page.getByLabel("动画项目", { exact: true }).selectOption(project.id);
+  await page.getByRole("button", { name: "工作区", exact: true }).click();
+  await page.getByLabel("当前项目", { exact: true }).selectOption(project.id);
   await page
-    .getByLabel("已保存的动画", { exact: true })
-    .selectOption(saved.record.id);
+    .getByLabel("当前作品", { exact: true })
+    .selectOption(`motion:${saved.record.id}`);
+  await openDelivery(page);
   const panel = page.getByRole("region", { name: "渲染磁盘空间预估" });
   const master = panel
     .locator("dl > div")
@@ -71,19 +73,27 @@ test("master storage follows drafts, rejects stale replies, recovers and stays a
       } else await route.continue();
     },
   );
+  await openPreview(page);
   await page.getByLabel("总帧数", { exact: true }).fill("60");
+  await openDelivery(page);
   await expect.poll(() => delayed).toBe(true);
+  await openPreview(page);
   await page.getByLabel("总帧数", { exact: true }).fill("90");
+  await openDelivery(page);
   await expect(master).toHaveText(format(320 * 180 * 8 * 90));
   release();
   await expect(master).toHaveText(format(320 * 180 * 8 * 90));
   await page.unroute("**/api/operations/estimate_motion_render");
+  await openPreview(page);
   await page.getByLabel("总帧数", { exact: true }).fill("");
+  await openDelivery(page);
   await expect(
     panel.getByText("填写有效的画面规格与导出位置后显示预估。"),
   ).toBeVisible();
   await expect(master).toHaveCount(0);
+  await openPreview(page);
   await page.getByLabel("总帧数", { exact: true }).fill("90");
+  await openDelivery(page);
   await expect(master).toHaveText(format(320 * 180 * 8 * 90));
 
   await page.route("**/api/operations/estimate_motion_render", (route) =>

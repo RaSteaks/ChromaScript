@@ -1,14 +1,14 @@
 import { Button } from "./components";
 
 export const WORKFLOW = [
-  { id: "scene", label: "选择场景" },
+  { id: "scene", label: "选择作品" },
   { id: "preview", label: "编辑与预览" },
   { id: "delivery", label: "设置交付" },
   { id: "jobs", label: "任务与成果" },
 ] as const;
 export type WorkflowStep = (typeof WORKFLOW)[number]["id"];
 
-/** Named stages communicate order while allowing return visits without losing drafts. */
+/** One stage strip serves WGSL, Three.js and React without replacing their editing sessions. */
 export function WorkflowNav({
   step,
   onChange,

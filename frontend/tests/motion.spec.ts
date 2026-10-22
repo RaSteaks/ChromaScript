@@ -1,3 +1,4 @@
+import { openDelivery, openPreview } from "./workspace-navigation";
 import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
@@ -44,11 +45,14 @@ async function setup(page: Page, template = "radiance") {
     },
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "动画代码", exact: true }).click();
-  await page.getByLabel("动画项目", { exact: true }).selectOption(project.id);
+  await page.getByRole("button", { name: "工作区", exact: true }).click();
+  await page.getByLabel("当前项目", { exact: true }).selectOption(project.id);
   await page
-    .getByLabel("已保存的动画", { exact: true })
-    .selectOption(saved.record.id);
+    .getByLabel("当前作品", { exact: true })
+    .selectOption(`motion:${saved.record.id}`);
+  await page
+    .getByLabel("新建类型", { exact: true })
+    .selectOption(saved.scene.engine);
   await expect(page.locator("iframe[title='动画画面']")).toBeVisible({
     timeout: 20000,
   });
@@ -96,8 +100,8 @@ for (const suspendedAudio of [false, true]) {
     await expect(probe).toHaveAttribute("data-frame", "11");
     await page.getByRole("button", { name: "播放动画", exact: true }).click();
     await expect(probe).not.toHaveAttribute("data-frame", "11");
+    await page.getByRole("button", { name: "MCP 接口", exact: true }).click();
     await page.getByRole("button", { name: "工作区", exact: true }).click();
-    await page.getByRole("button", { name: "动画代码", exact: true }).click();
     await expect(
       page.getByRole("button", { name: "播放动画", exact: true }),
     ).toBeEnabled();
@@ -242,10 +246,14 @@ test("HDR editing, seeking, recovery and actual local video export", async ({
     originalPicture!,
   );
   await expect(
-    page.getByRole("button", { name: "导出动画", exact: true }),
+    page.getByRole("button", {
+      name: "导出动画",
+      exact: true,
+      includeHidden: true,
+    }),
   ).toBeDisabled();
+  await page.getByRole("button", { name: "MCP 接口", exact: true }).click();
   await page.getByRole("button", { name: "工作区", exact: true }).click();
-  await page.getByRole("button", { name: "动画代码", exact: true }).click();
   await expect(
     page.getByRole("textbox", { name: "动画 TypeScript 代码" }),
   ).toContainText("6.0,1.0,0.2");
@@ -256,7 +264,7 @@ test("HDR editing, seeking, recovery and actual local video export", async ({
       json: { error: { code: "unavailable", message: "保存服务暂不可用" } },
     }),
   );
-  await page.getByRole("button", { name: "保存动画", exact: true }).click();
+  await page.getByRole("button", { name: "保存作品", exact: true }).click();
   await expect(
     page.getByRole("alert").filter({ hasText: "保存服务暂不可用" }),
   ).toBeVisible();
@@ -264,9 +272,13 @@ test("HDR editing, seeking, recovery and actual local video export", async ({
     page.getByRole("textbox", { name: "动画 TypeScript 代码" }),
   ).toContainText("6.0,1.0,0.2");
   await page.unroute("**/api/operations/update_motion_scene");
-  await page.getByRole("button", { name: "保存动画", exact: true }).click();
+  await page.getByRole("button", { name: "保存作品", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: "导出动画", exact: true }),
+    page.getByRole("button", {
+      name: "导出动画",
+      exact: true,
+      includeHidden: true,
+    }),
   ).toBeEnabled();
   const destination = "/private/tmp/chromascript-motion-selected-" + Date.now();
   mkdirSync(destination, { recursive: true });
@@ -281,8 +293,12 @@ test("HDR editing, seeking, recovery and actual local video export", async ({
     page.getByRole("button", { name: "打开导出文件夹", exact: true }),
   ).not.toBeVisible();
   // Master-only is now the default; explicitly request this test's HDR viewing copy.
+  await openDelivery(page);
   await page.getByLabel("视频输出", { exact: true }).selectOption("pq");
-  await page.getByRole("button", { name: "导出动画", exact: true }).click();
+  await openDelivery(page);
+  await page
+    .getByRole("button", { name: "导出动画", exact: true, includeHidden: true })
+    .click();
   const results = page.getByRole("region", {
     name: "动画渲染成果",
     exact: true,
@@ -336,13 +352,14 @@ test("Three.js preview, revision conflict, keyboard and narrow accessibility", a
   await expect(
     page.getByRole("region", { name: "动画实时预览" }),
   ).toContainText("8 / 11");
+  await openPreview(page);
   await page.getByLabel("动画名称", { exact: true }).fill("本地未保存名称");
   await call("update_motion_scene", {
     scene_id: saved.record.id,
     expected_revision_id: saved.revision_id,
     spec: { ...saved.scene, name: "另一客户端名称" },
   });
-  await page.getByRole("button", { name: "保存动画", exact: true }).click();
+  await page.getByRole("button", { name: "保存作品", exact: true }).click();
   await expect(
     page.getByRole("button", { name: "载入最新版本", exact: true }),
   ).toBeVisible();
@@ -464,8 +481,8 @@ for (const legacyStatus of [404, 405]) {
       );
     }
     await page.goto("/");
-    await page.getByRole("button", { name: "动画代码", exact: true }).click();
-    await expect(page.getByLabel("动画项目", { exact: true })).toHaveValue(
+    await page.getByRole("button", { name: "工作区", exact: true }).click();
+    await expect(page.getByLabel("当前项目", { exact: true })).toHaveValue(
       project.id,
     );
     await expect(
@@ -481,7 +498,7 @@ for (const legacyStatus of [404, 405]) {
       await page.unroute("**/api/operations/" + operation);
     }
     await page
-      .getByRole("button", { name: "刷新动画列表与连接", exact: true })
+      .getByRole("button", { name: "刷新作品列表", exact: true })
       .click();
     await expect(
       page.getByRole("alert").filter({ hasText: "请重启 ChromaScript 服务" }),
@@ -490,6 +507,9 @@ for (const legacyStatus of [404, 405]) {
     await page.screenshot({
       path: `../reports/motion-recovery-${legacyStatus}.png`,
     });
+    await page
+      .getByLabel("新建类型", { exact: true })
+      .selectOption("three-float-v1");
     await showExamples(page);
     await page
       .getByRole("button", { name: "新建HDR 光能渐变", exact: true })
@@ -526,11 +546,9 @@ test("project discovery loading and failure never masquerade as an empty workspa
     project.id,
   );
   fail = true;
-  await page.getByRole("button", { name: "动画代码", exact: true }).click();
+  await page.getByRole("button", { name: "刷新作品列表", exact: true }).click();
   try {
-    await expect(
-      page.getByText("正在读取动画项目…", { exact: true }),
-    ).toBeVisible();
+    await expect(page.getByText("刷新作品…", { exact: true })).toBeVisible();
     await expect(
       page.getByText("先创建一个项目，再开始制作动画。", { exact: true }),
     ).not.toBeVisible();
@@ -540,22 +558,23 @@ test("project discovery loading and failure never masquerade as an empty workspa
   await expect(
     page.getByRole("alert").filter({ hasText: "项目读取测试失败" }),
   ).toBeVisible();
-  await expect(page.getByLabel("动画项目", { exact: true })).toContainText(
-    "项目列表暂不可用，请重试",
+  await expect(page.getByLabel("当前项目", { exact: true })).toContainText(
+    project.name,
   );
   await expect(
     page.getByText("先创建一个项目，再开始制作动画。", { exact: true }),
   ).not.toBeVisible();
   await page.unroute("**/api/operations/list_projects");
-  await page
-    .getByRole("button", { name: "刷新动画列表与连接", exact: true })
-    .click();
-  await expect(page.getByLabel("动画项目", { exact: true })).toHaveValue(
+  await page.getByRole("button", { name: "刷新作品列表", exact: true }).click();
+  await expect(page.getByLabel("当前项目", { exact: true })).toHaveValue(
     project.id,
   );
   await expect(
     page.getByRole("alert").filter({ hasText: "项目读取测试失败" }),
   ).not.toBeVisible();
+  await page
+    .getByLabel("新建类型", { exact: true })
+    .selectOption("three-float-v1");
   await showExamples(page);
   await expect(
     page.getByRole("button", { name: "新建HDR 发光几何", exact: true }),
@@ -568,14 +587,19 @@ test("HDR delivery choices preserve the sRGB preview and export half-float maste
   const { call } = await setup(page);
   const picture = page.locator("iframe[title='动画画面']");
   const source = await picture.getAttribute("srcdoc");
+  await openDelivery(page);
   await page.getByLabel("EXR 母版精度", { exact: true }).selectOption("16");
+  await openDelivery(page);
   await page.getByLabel("视频输出", { exact: true }).selectOption("none");
   await page.getByLabel("动画时间线", { exact: true }).fill("7");
   await expect(picture).toHaveAttribute("srcdoc", source!);
   await expect(
     page.frameLocator("iframe[title='动画画面']").locator("body"),
   ).toHaveAttribute("data-frame", "7");
-  await page.getByRole("button", { name: "导出动画", exact: true }).click();
+  await openDelivery(page);
+  await page
+    .getByRole("button", { name: "导出动画", exact: true, includeHidden: true })
+    .click();
   const results = page.getByRole("region", {
     name: "动画渲染成果",
     exact: true,
@@ -730,9 +754,9 @@ WebGL2RenderingContext.prototype.getExtension = function(name) {
     data: { project_id: project.project.id, spec },
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "动画代码", exact: true }).click();
+  await page.getByRole("button", { name: "工作区", exact: true }).click();
   await page
-    .getByLabel("动画项目", { exact: true })
+    .getByLabel("当前项目", { exact: true })
     .selectOption(project.project.id);
   const scene = await (
     await page.request.post("/api/operations/list_motion_scenes", {
@@ -741,8 +765,8 @@ WebGL2RenderingContext.prototype.getExtension = function(name) {
     })
   ).json();
   await page
-    .getByLabel("已保存的动画", { exact: true })
-    .selectOption(scene.items[0].id);
+    .getByLabel("当前作品", { exact: true })
+    .selectOption(`motion:${scene.items[0].id}`);
   await expect(
     page.getByRole("region", { name: "动画实时预览" }).getByRole("alert"),
   ).toContainText("GPU 不支持浮点渲染目标");
@@ -791,10 +815,11 @@ for (const template of ["title", "sdr-three"]) {
     await expect(
       page.getByRole("region", { name: "动画实时预览" }),
     ).toContainText("7 / 11");
+    await openPreview(page);
     await page.getByLabel("动画名称", { exact: true }).fill("SDR preserved");
-    await page.getByRole("button", { name: "保存动画", exact: true }).click();
+    await page.getByRole("button", { name: "保存作品", exact: true }).click();
     await expect(
-      page.getByRole("button", { name: "保存动画", exact: true }),
+      page.getByRole("button", { name: "保存作品", exact: true }),
     ).toBeDisabled();
     const updated = await call<MotionReply>("get_motion_scene", {
       scene_id: saved.record.id,
@@ -805,7 +830,14 @@ for (const template of ["title", "sdr-three"]) {
     await expect(video.locator('option[value="rec709"]')).toBeDisabled();
     await video.selectOption("srgb");
     await expect(video).toHaveValue("srgb");
-    await page.getByRole("button", { name: "导出动画", exact: true }).click();
+    await openDelivery(page);
+    await page
+      .getByRole("button", {
+        name: "导出动画",
+        exact: true,
+        includeHidden: true,
+      })
+      .click();
     const results = page.getByRole("region", {
       name: "动画渲染成果",
       exact: true,
@@ -823,17 +855,21 @@ for (const template of ["title", "sdr-three"]) {
     expect(report.verification.scene_linear_master).toBe(false);
     expect(report.probe.streams[0].color_transfer).toBe("iec61966-2-1");
     // A source-family switch refreshes output constraints, not just its labels.
+    await page
+      .getByLabel("新建类型", { exact: true })
+      .selectOption("three-float-v1");
     await showExamples(page);
     await page
       .getByRole("button", { name: "新建HDR 光能渐变", exact: true })
       .click();
+    await openDelivery(page);
     await expect(
       page.getByLabel("EXR 母版精度", { exact: true }),
     ).toBeVisible();
     await expect(video).toHaveValue("none");
     await page
-      .getByLabel("已保存的动画", { exact: true })
-      .selectOption(saved.record.id);
+      .getByLabel("当前作品", { exact: true })
+      .selectOption(`motion:${saved.record.id}`);
     await expect(video).toHaveValue("srgb");
     await expect(page.getByLabel("EXR 母版精度", { exact: true })).toHaveCount(
       0,
@@ -847,20 +883,18 @@ for (const engine of ["remotion-sdr-v1", "three-float-v1"]) {
   }) => {
     const project = await recoveryProject(page);
     await page.goto("/");
-    await page.getByRole("button", { name: "动画代码", exact: true }).click();
-    await page.getByLabel("动画项目", { exact: true }).selectOption(project.id);
+    await page.getByRole("button", { name: "工作区", exact: true }).click();
+    await page.getByLabel("当前项目", { exact: true }).selectOption(project.id);
     await expect(
       page.getByRole("button", { name: "新建HDR 光能渐变", exact: true }),
     ).not.toBeVisible();
-    await page.getByLabel("空白动画类型", { exact: true }).selectOption(engine);
+    await page.getByLabel("新建类型", { exact: true }).selectOption(engine);
     const created = page.waitForResponse(
       (r) =>
         r.url().endsWith("/create_motion_scene") &&
         r.request().method() === "POST",
     );
-    await page
-      .getByRole("button", { name: "新建空白动画", exact: true })
-      .click();
+    await page.getByRole("button", { name: "新建作品", exact: true }).click();
     const response = await created;
     expect(response.request().postDataJSON().template_id).toBeNull();
     const value = await response.json();
@@ -868,14 +902,16 @@ for (const engine of ["remotion-sdr-v1", "three-float-v1"]) {
     await expect(page.getByLabel("动画名称", { exact: true })).toHaveValue(
       engine === "remotion-sdr-v1" ? "空白 SDR 动画" : "空白浮点动画",
     );
+    // Pin the display mode: headless WebKit may report an HDR-capable host.
+    if (engine === "three-float-v1")
+      await page.getByLabel("预览显示", { exact: true }).selectOption("srgb");
     await expect(page.locator(".motion-preview-status")).toHaveText(
       "当前草稿 · 网页 sRGB 预览",
       { timeout: 20000 },
     );
+    await openPreview(page);
     await page.getByLabel("动画名称", { exact: true }).fill("未保存的空白动画");
-    await page
-      .getByRole("button", { name: "新建空白动画", exact: true })
-      .click();
+    await page.getByRole("button", { name: "新建作品", exact: true }).click();
     await expect(
       page.getByRole("dialog", { name: "保留当前动画草稿" }),
     ).toBeVisible();
@@ -897,21 +933,26 @@ test("master workflow accessibility, custom specs, direct destination and separa
   await expect(page.getByLabel("正式导出采样", { exact: true })).toHaveValue(
     "2",
   );
+  await openPreview(page);
   await page.getByLabel("宽度", { exact: true }).fill("7680");
+  await openPreview(page);
   await page.getByLabel("高度", { exact: true }).fill("4320");
   await page
     .getByLabel("自定义帧率（分子/分母）", { exact: true })
     .fill("480/1");
   await expect(
-    page.getByRole("button", { name: "保存动画", exact: true }),
+    page.getByRole("button", { name: "保存作品", exact: true }),
   ).toBeEnabled();
   // Exercise an actual small high-fps video; the 8K source validation does not allocate an 8K master.
+  await openPreview(page);
   await page.getByLabel("宽度", { exact: true }).fill("32");
+  await openPreview(page);
   await page.getByLabel("高度", { exact: true }).fill("32");
+  await openPreview(page);
   await page.getByLabel("总帧数", { exact: true }).fill("2");
-  await page.getByRole("button", { name: "保存动画", exact: true }).click();
+  await page.getByRole("button", { name: "保存作品", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: "保存动画", exact: true }),
+    page.getByRole("button", { name: "保存作品", exact: true }),
   ).toBeDisabled();
   await page.getByRole("button", { name: "记录源码审核", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "记录源码颜色契约审核" });
@@ -930,9 +971,14 @@ test("master workflow accessibility, custom specs, direct destination and separa
   await expect(dialog).not.toBeVisible();
   await expect(page.getByText(/源码颜色契约已审核 · 浏览器验收/)).toBeVisible();
   const destination = mkdtempSync(join(tmpdir(), "chromascript-master-ui-"));
+  await openDelivery(page);
   await page.getByLabel("导出位置", { exact: true }).fill(destination);
+  await openDelivery(page);
   await page.getByLabel("视频输出", { exact: true }).selectOption("srgb");
-  await page.getByRole("button", { name: "导出动画", exact: true }).click();
+  await openDelivery(page);
+  await page
+    .getByRole("button", { name: "导出动画", exact: true, includeHidden: true })
+    .click();
   const results = page.getByRole("region", {
     name: "动画渲染成果",
     exact: true,
@@ -959,8 +1005,12 @@ test("master workflow accessibility, custom specs, direct destination and separa
     reviewer: "补充审核",
     notes: "再次核对本修订的线性光量与透明度。",
   });
+  await openPreview(page);
   await expect(page.getByText(/源码颜色契约已审核 · 补充审核/)).toBeVisible();
-  await page.getByRole("button", { name: "导出动画", exact: true }).click();
+  await openDelivery(page);
+  await page
+    .getByRole("button", { name: "导出动画", exact: true, includeHidden: true })
+    .click();
   await expect(
     page.getByLabel("动画渲染任务", { exact: true }),
   ).not.toHaveValue(firstJob);
@@ -1004,7 +1054,9 @@ test("master workflow accessibility, custom specs, direct destination and separa
   });
 });
 
-test("animation submission retries uncertain outcomes and renews keys after audio changes", async ({ page }) => {
+test("animation submission retries uncertain outcomes and renews keys after audio changes", async ({
+  page,
+}) => {
   const { call, project } = await setup(page, "title");
   const keys: string[] = [];
   const jobs: string[] = [];
@@ -1017,95 +1069,185 @@ test("animation submission retries uncertain outcomes and renews keys after audi
     if (keys.length === 1) await route.abort("failed");
     else await route.fulfill({ response });
   });
-  const submit = page.getByRole("button", { name: "导出动画", exact: true });
+  const submit = page.getByRole("button", {
+    name: "导出动画",
+    exact: true,
+    includeHidden: true,
+  });
+  await openDelivery(page);
   await submit.click();
-  await expect(page.getByText("请核对导出目录和上方错误后重试。")).toBeVisible();
+  await expect(
+    page.getByText("请核对导出目录和上方错误后重试。"),
+  ).toBeVisible();
+  await openDelivery(page);
   await submit.click();
-  await expect(page.getByText("任务已提交，可继续编辑；渲染使用已保存版本。")).toBeVisible();
+  await expect(
+    page.getByText("任务已提交，可继续编辑；渲染使用已保存版本。"),
+  ).toBeVisible();
   expect(keys[1]).toBe(keys[0]);
   expect(jobs[1]).toBe(jobs[0]);
 
   const { asset } = await call<{ asset: { id: string } }>("create_audio", {
-    project_id: project.id, name: "新音轨",
-    spec: { duration_seconds: 0.2, events: [{ waveform: "sine", duration_seconds: 0.2 }] },
+    project_id: project.id,
+    name: "新音轨",
+    spec: {
+      duration_seconds: 0.2,
+      events: [{ waveform: "sine", duration_seconds: 0.2 }],
+    },
   });
   await call("set_project_audio", {
-    project_id: project.id, expected_revision_id: "0",
+    project_id: project.id,
+    expected_revision_id: "0",
     timeline: { clips: [{ asset_id: asset.id }] },
   });
   // A subsequent explicit export freezes current project audio with a new request identity.
+  await openDelivery(page);
   await submit.click();
   await expect.poll(() => jobs.length).toBe(3);
   expect(keys[2]).not.toBe(keys[1]);
   expect(jobs[2]).not.toBe(jobs[1]);
 });
 
-test("chapter files share preview, save, validation and deletion recovery", async ({ page }) => {
+test("chapter files share preview, save, validation and deletion recovery", async ({
+  page,
+}) => {
   const { call, saved } = await setup(page, "title");
   await page.getByRole("button", { name: "添加分章文件", exact: true }).click();
   await page.getByLabel("分章文件路径", { exact: true }).fill("../bad.tsx");
   await page.getByRole("button", { name: "添加文件", exact: true }).click();
-  await expect(page.getByLabel("分章文件路径", { exact: true })).toHaveAttribute("aria-invalid", "true");
-  await page.getByLabel("分章文件路径", { exact: true }).fill("chapters/intro.tsx");
+  await expect(
+    page.getByLabel("分章文件路径", { exact: true }),
+  ).toHaveAttribute("aria-invalid", "true");
+  await page
+    .getByLabel("分章文件路径", { exact: true })
+    .fill("chapters/intro.tsx");
   await page.getByRole("button", { name: "添加文件", exact: true }).click();
-  await expect(page.getByLabel("源码文件", { exact: true })).toHaveValue("chapters/intro.tsx");
+  await expect(page.getByLabel("源码文件", { exact: true })).toHaveValue(
+    "chapters/intro.tsx",
+  );
   // Different filenames cannot disguise a case-insensitive directory collision.
   await page.getByRole("button", { name: "添加分章文件", exact: true }).click();
-  await page.getByLabel("分章文件路径", { exact: true }).fill("Chapters/outro.tsx");
+  await page
+    .getByLabel("分章文件路径", { exact: true })
+    .fill("Chapters/outro.tsx");
   await page.getByRole("button", { name: "添加文件", exact: true }).click();
-  await expect(page.getByLabel("分章文件路径", { exact: true })).toHaveAttribute("aria-invalid", "true");
+  await expect(
+    page.getByLabel("分章文件路径", { exact: true }),
+  ).toHaveAttribute("aria-invalid", "true");
   await expect(page.getByText(/分章目录大小写不一致/)).toBeVisible();
   await page.getByRole("button", { name: "取消", exact: true }).click();
-  const chapter = 'import {AbsoluteFill} from "remotion"; export default function Chapter(){return <AbsoluteFill>第一章</AbsoluteFill>;}';
+  const chapter =
+    'import {AbsoluteFill} from "remotion"; export default function Chapter(){return <AbsoluteFill>第一章</AbsoluteFill>;}';
   await editCode(page, chapter);
   await page.getByLabel("源码文件", { exact: true }).selectOption("");
   await editCode(page, 'export {default} from "./chapters/intro";');
-  await expect(page.frameLocator("iframe[title='动画画面']").getByText("第一章")).toBeVisible({ timeout: 20000 });
-  await page.getByRole("button", { name: "保存动画", exact: true }).click();
-  await expect(page.getByRole("button", { name: "保存动画", exact: true })).toBeDisabled();
-  const persisted = await call<MotionReply>("get_motion_scene", { scene_id: saved.record.id });
+  await expect(
+    page.frameLocator("iframe[title='动画画面']").getByText("第一章"),
+  ).toBeVisible({ timeout: 20000 });
+  await page.getByRole("button", { name: "保存作品", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "保存作品", exact: true }),
+  ).toBeDisabled();
+  const persisted = await call<MotionReply>("get_motion_scene", {
+    scene_id: saved.record.id,
+  });
   expect(persisted.scene.files?.["chapters/intro.tsx"]).toBe(chapter);
-  await page.getByLabel("源码文件", { exact: true }).selectOption("chapters/intro.tsx");
+  await page
+    .getByLabel("源码文件", { exact: true })
+    .selectOption("chapters/intro.tsx");
   await editCode(page, chapter.replace("第一章", "分章草稿"));
+  await page.getByRole("button", { name: "MCP 接口", exact: true }).click();
   await page.getByRole("button", { name: "工作区", exact: true }).click();
-  await page.getByRole("button", { name: "动画代码", exact: true }).click();
-  await expect(page.getByRole("textbox", { name: "动画 TypeScript 代码", exact: true })).toContainText("分章草稿");
-  await expect(page.frameLocator("iframe[title='动画画面']").getByText("分章草稿")).toBeVisible({ timeout: 20000 });
-  await expect(page.getByRole("button", { name: "复制全部源码", exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("textbox", { name: "动画 TypeScript 代码", exact: true }),
+  ).toContainText("分章草稿");
+  await expect(
+    page.frameLocator("iframe[title='动画画面']").getByText("分章草稿"),
+  ).toBeVisible({ timeout: 20000 });
+  await expect(
+    page.getByRole("button", { name: "复制全部源码", exact: true }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "删除分章文件", exact: true }).click();
   await page.getByRole("button", { name: "保留文件", exact: true }).click();
-  await expect(page.getByLabel("源码文件", { exact: true })).toHaveValue("chapters/intro.tsx");
+  await expect(page.getByLabel("源码文件", { exact: true })).toHaveValue(
+    "chapters/intro.tsx",
+  );
   await page.getByRole("button", { name: "删除分章文件", exact: true }).click();
   await page.getByRole("button", { name: "删除文件", exact: true }).click();
-  await expect(page.getByText(/找不到分章文件/)).toBeVisible({ timeout: 20000 });
-  await expect(page.frameLocator("iframe[title='动画画面']").getByText("分章草稿")).toBeVisible();
+  await expect(page.getByText(/找不到分章文件/)).toBeVisible({
+    timeout: 20000,
+  });
+  await expect(
+    page.frameLocator("iframe[title='动画画面']").getByText("分章草稿"),
+  ).toBeVisible();
   // A broken draft never deletes the saved chapter or replaces the last good picture.
-  expect((await call<MotionReply>("get_motion_scene", { scene_id: saved.record.id })).scene.files?.["chapters/intro.tsx"]).toBe(chapter);
+  expect(
+    (await call<MotionReply>("get_motion_scene", { scene_id: saved.record.id }))
+      .scene.files?.["chapters/intro.tsx"],
+  ).toBe(chapter);
 });
 
-test("chapter-only external saves synchronize clean drafts and preserve local conflicts", async ({ page }) => {
+test("chapter-only external saves synchronize clean drafts and preserve local conflicts", async ({
+  page,
+}) => {
   const { call, saved } = await setup(page, "title");
-  const chapter = 'import {AbsoluteFill} from "remotion"; export default function Chapter(){return <AbsoluteFill>外部章节</AbsoluteFill>;}';
+  const chapter =
+    'import {AbsoluteFill} from "remotion"; export default function Chapter(){return <AbsoluteFill>外部章节</AbsoluteFill>;}';
   const external = await call<MotionReply>("update_motion_scene", {
-    scene_id: saved.record.id, expected_revision_id: saved.revision_id,
-    spec: {...saved.scene, code: 'export {default} from "./chapter";', files: {"chapter.tsx": chapter}},
+    scene_id: saved.record.id,
+    expected_revision_id: saved.revision_id,
+    spec: {
+      ...saved.scene,
+      code: 'export {default} from "./chapter";',
+      files: { "chapter.tsx": chapter },
+    },
   });
-  await expect(page.getByLabel("源码文件", { exact: true }).locator("option[value='chapter.tsx']")).toHaveCount(1, { timeout: 15000 });
-  await page.getByLabel("源码文件", { exact: true }).selectOption("chapter.tsx");
+  await expect(
+    page
+      .getByLabel("源码文件", { exact: true })
+      .locator("option[value='chapter.tsx']"),
+  ).toHaveCount(1, { timeout: 15000 });
+  await page
+    .getByLabel("源码文件", { exact: true })
+    .selectOption("chapter.tsx");
   await editCode(page, chapter.replace("外部章节", "本地章节"));
   await call<MotionReply>("update_motion_scene", {
-    scene_id: saved.record.id, expected_revision_id: external.revision_id,
-    spec: {...external.scene, files: {"chapter.tsx": chapter.replace("外部章节", "较新章节")}},
+    scene_id: saved.record.id,
+    expected_revision_id: external.revision_id,
+    spec: {
+      ...external.scene,
+      files: { "chapter.tsx": chapter.replace("外部章节", "较新章节") },
+    },
   });
-  await expect(page.getByRole("button", { name: "载入最新版本", exact: true })).toBeVisible({ timeout: 15000 });
-  await expect(page.getByRole("textbox", { name: "动画 TypeScript 代码", exact: true })).toContainText("本地章节");
+  await expect(
+    page.getByRole("button", { name: "载入最新版本", exact: true }),
+  ).toBeVisible({ timeout: 15000 });
+  await expect(
+    page.getByRole("textbox", { name: "动画 TypeScript 代码", exact: true }),
+  ).toContainText("本地章节");
   await page.getByRole("button", { name: "载入最新版本", exact: true }).click();
-  await page.getByRole("button", { name: "丢弃修改并继续", exact: true }).click();
-  await expect(page.getByRole("textbox", { name: "动画 TypeScript 代码", exact: true })).toContainText("较新章节");
-  await expect(page.frameLocator("iframe[title='动画画面']").getByText("较新章节")).toBeVisible({ timeout: 20000 });
-  await page.screenshot({path: "../reports/motion-chapters-desktop.png", fullPage: true});
-  await page.setViewportSize({width: 390, height: 844});
-  await expect(page.getByLabel("源码文件", {exact: true})).toBeVisible();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.screenshot({path: "../reports/motion-chapters-mobile.png", fullPage: true});
+  await page
+    .getByRole("button", { name: "丢弃修改并继续", exact: true })
+    .click();
+  await expect(
+    page.getByRole("textbox", { name: "动画 TypeScript 代码", exact: true }),
+  ).toContainText("较新章节");
+  await expect(
+    page.frameLocator("iframe[title='动画画面']").getByText("较新章节"),
+  ).toBeVisible({ timeout: 20000 });
+  await page.screenshot({
+    path: "../reports/motion-chapters-desktop.png",
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByLabel("源码文件", { exact: true })).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: "../reports/motion-chapters-mobile.png",
+    fullPage: true,
+  });
 });

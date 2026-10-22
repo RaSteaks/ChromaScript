@@ -3,8 +3,6 @@ import {
   useEffect,
   useRef,
   useState,
-  lazy,
-  Suspense,
   type MouseEvent,
 } from "react";
 import {
@@ -17,19 +15,26 @@ import {
   Copy,
   FileImage,
   Film,
-  FolderPlus,
   Layers,
-  Pause,
   Play,
-  Plus,
   RefreshCw,
   Save,
   Settings2,
-  Square,
-  Workflow,
 } from "lucide-react";
 import { artifactUrl, call, connect } from "./api";
 import { loadProjects } from "./projects";
+import {
+  WorkspaceLibrary,
+  type AuthoringEngine,
+  type MotionTemplate,
+} from "./WorkspaceLibrary";
+import {
+  MotionWorkbench,
+  type MotionWorkbenchHandle,
+  type MotionSession,
+} from "./MotionWorkbench";
+import { CodeEditor } from "./CodeEditor";
+import { PreviewTimeline } from "./PreviewTimeline";
 import { PreviewAudio, type PreviewAudioHandle } from "./PreviewAudio";
 import { ProjectAudio } from "./ProjectAudio";
 import { WorkflowNav, WORKFLOW, type WorkflowStep } from "./WorkflowNav";
@@ -74,30 +79,13 @@ const STATUS: Record<string, string> = {
   cancelled: "已取消",
   interrupted: "已中断",
 };
-// Load the authoring editor only when requested, then retain its drafts across tabs.
-const MotionWorkbench = lazy(async () => ({
-  default: (await import("./MotionWorkbench")).MotionWorkbench,
-}));
 const STEP_HELP: Record<WorkflowStep, string> = {
-  scene: "先选择项目，再打开已有场景或新建空白场景；示例模板可选。",
-  preview: "设置画面规格，调整参数或代码，即时查看草稿效果。",
+  scene: "选择项目与作品，或新建 WGSL、Three.js、React 作品。",
+  preview: "设置画面规格，编辑代码与参数，即时查看草稿效果。",
   delivery:
     "沿用预览中的画面规格，选择一个或多个交付格式。下拉选项会自动联动。",
   jobs: "查看后台任务进度，选择任务后下载文件或导出完整图像序列。",
 };
-/** Scene lists show the contract's Asia/Taipei wall time, never the browser's zone. */
-const SAVED_AT = new Intl.DateTimeFormat("zh-CN", {
-  timeZone: "Asia/Taipei",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  hour12: false,
-});
-function savedAt(value: string) {
-  const time = new Date(value);
-  return Number.isNaN(time.getTime()) ? "" : SAVED_AT.format(time);
-}
 function jobLabel(job: Job) {
   if (job.kind === "frame")
     return (job.frame_indices?.length || 1) > 1 ? "关键帧预览" : "单帧预览";
@@ -130,13 +118,27 @@ function errorText(error: unknown) {
 
 export default function App() {
   const [tab, setTab] = useState("workspace");
-  const [motionVisited, setMotionVisited] = useState(false);
+  // Engine adapters stay mounted: switching authoring languages never discards a draft.
+  const [family, setFamily] = useState<"wgsl" | "motion">("wgsl");
+  const motionEditor = useRef<MotionWorkbenchHandle>(null);
+  const [motionSession, setMotionSession] = useState<MotionSession>({
+    record: null,
+    dirty: false,
+    pending: "",
+    canSave: false,
+    error: "",
+  });
+  const [motionTemplates, setMotionTemplates] = useState<MotionTemplate[]>([]);
+  const selectMotion = useCallback(() => {
+    setFamily("motion");
+    setStep("preview");
+  }, []);
   // Steps are views over the same drafts, not destructive wizard transitions.
   const [step, setStep] = useState<WorkflowStep>("scene");
   const stepHeading = useRef<HTMLHeadingElement>(null);
   const previousStep = useRef(step);
   useEffect(() => {
-    document.title = `${tab === "mcp" ? "MCP 接口" : tab === "motion" ? "动画代码" : WORKFLOW.find((item) => item.id === step)?.label} · ChromaScript`;
+    document.title = `${tab === "mcp" ? "MCP 接口" : WORKFLOW.find((item) => item.id === step)?.label} · ChromaScript`;
     if (tab === "workspace" && previousStep.current !== step) {
       stepHeading.current?.focus();
       previousStep.current = step;
@@ -144,6 +146,8 @@ export default function App() {
   }, [step, tab]);
   const [caps, setCaps] = useState<Capability | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [projectLoading, setProjectLoading] = useState(false);
+  const [connectionEpoch, setConnectionEpoch] = useState(0);
   const [projectId, setProjectId] = useState("");
   const [scenes, setScenes] = useState<SceneRecord[]>([]);
   const [sceneId, setSceneId] = useState("");
@@ -333,7 +337,7 @@ export default function App() {
 
   const boot = useCallback(async () => {
     await connect();
-    const [c, p, t, o] = await Promise.all([
+    const [c, p, t, o] = await Promise.allSettled([
       call<Capability>("get_capabilities"),
       loadProjects(),
       call<{ templates: Template[] }>("list_templates"),
@@ -349,12 +353,25 @@ export default function App() {
     boot()
       .then(({ c, p, t, o }) => {
         if (stopped) return;
-        setCaps(c);
-        setProjects(p.items);
-        setTemplates(t.templates);
-        setOperations(o.operations);
-        setToolName(o.operations[0]?.name || "");
-        setProjectId(p.items[0]?.id || "");
+        // A renderer discovery failure must not hide projects owned by the shared library.
+        const failures: string[] = [];
+        if (c.status === "fulfilled") setCaps(c.value);
+        else failures.push(errorText(c.reason));
+        if (p.status === "fulfilled") {
+          setProjects(p.value.items);
+          setProjectId(
+            (old) =>
+              old || p.value.items.find((item) => !item.archived)?.id || "",
+          );
+        } else failures.push(errorText(p.reason));
+        if (t.status === "fulfilled") setTemplates(t.value.templates);
+        else failures.push(errorText(t.reason));
+        if (o.status === "fulfilled") {
+          setOperations(o.value.operations);
+          setToolName((old) => old || o.value.operations[0]?.name || "");
+        } else failures.push(errorText(o.reason));
+        setError(failures.join(" "));
+        setOffline(p.status === "rejected");
       })
       .catch((e) => {
         if (!stopped) {
@@ -365,10 +382,11 @@ export default function App() {
     return () => {
       stopped = true;
     };
-  }, [boot]);
+  }, [boot, connectionEpoch]);
 
   useEffect(() => {
     if (!projectId) {
+      setProjectLoading(false);
       // An empty project selection must not retain another project's task/results context.
       setJobs([]);
       setJobTotal(0);
@@ -383,6 +401,15 @@ export default function App() {
       setDraft(null);
       return;
     }
+    // Clear the outgoing scene immediately after a guarded project transition.
+    setSceneId("");
+    setScenes([]);
+    setSaved(null);
+    setDraft(null);
+    setActiveJobId("");
+    setSelectedJob(null);
+    setArtifacts([]);
+    setProjectLoading(true);
     const controller = new AbortController();
     call<{ scenes: SceneRecord[] }>(
       "get_project",
@@ -390,6 +417,7 @@ export default function App() {
       controller.signal,
     )
       .then((v) => {
+        if (controller.signal.aborted) return;
         setScenes(v.scenes);
         setSceneId(v.scenes[0]?.id || "");
         setActiveJobId("");
@@ -398,6 +426,9 @@ export default function App() {
       })
       .catch((e) => {
         if (!controller.signal.aborted) setError(errorText(e));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setProjectLoading(false);
       });
     return () => controller.abort();
   }, [projectId]);
@@ -418,6 +449,7 @@ export default function App() {
     setPixel(null);
     call<SceneReply>("get_scene", { scene_id: sceneId }, controller.signal)
       .then((v) => {
+        if (controller.signal.aborted) return;
         setSaved(v);
         setDraft(structuredClone(v.scene));
       })
@@ -608,6 +640,7 @@ export default function App() {
     liveEnabled &&
       step === "preview" &&
       tab === "workspace" &&
+      family === "wgsl" &&
       !composing &&
       !offline,
     livePlaying,
@@ -678,6 +711,7 @@ export default function App() {
         setScenes((old) => [s.record, ...old]);
         setSceneId(s.record.id);
         setActiveJobId("");
+        setFamily("wgsl");
         setStep("preview");
         return s;
       });
@@ -932,6 +966,40 @@ export default function App() {
     2,
   );
 
+  const sharedBusy = projectLoading || !!pending || !!motionSession.pending;
+  const currentDirty = family === "wgsl" ? dirty : motionSession.dirty;
+  const currentRevision =
+    family === "wgsl" ? saved?.revision_id : motionSession.record?.revision_id;
+  const currentName =
+    family === "wgsl" ? draft?.name : motionSession.record?.name;
+  function changeProject(id: string) {
+    if (id === projectId || sharedBusy) return;
+    guardProject(() => setProjectId(id));
+  }
+  function guardProject(action: () => void) {
+    // A project transition affects both retained engines, including the hidden draft.
+    if (dirty || motionSession.dirty) setDiscard(() => action);
+    else action();
+  }
+  function selectWork(value: string) {
+    const [kind, id] = value.split(":");
+    if (sharedBusy) return;
+    if (kind === "motion") motionEditor.current?.open(id);
+    else {
+      const select = () => {
+        setFamily("wgsl");
+        setSceneId(id);
+        setStep("preview");
+      };
+      if (id === sceneId) select();
+      else guard(select);
+    }
+  }
+  function createWork(engine: AuthoringEngine, template?: string) {
+    if (engine === "wgsl") void createScene(template);
+    else motionEditor.current?.create(engine, template);
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -943,7 +1011,6 @@ export default function App() {
         <nav aria-label="主要导航">
           {[
             ["workspace", "工作区"],
-            ["motion", "动画代码"],
             ["mcp", "MCP 接口"],
           ].map(([id, label]) => (
             <Button
@@ -952,7 +1019,6 @@ export default function App() {
               aria-current={tab === id ? "page" : undefined}
               onClick={() => {
                 setTab(id);
-                if (id === "motion") setMotionVisited(true);
               }}
             >
               {label}
@@ -963,7 +1029,7 @@ export default function App() {
           <span className={"connection-dot " + (offline ? "offline" : "")} />
           {offline
             ? "服务未连接"
-            : tab === "motion"
+            : family === "motion"
               ? "Remotion / Three.js · HDR / SDR 本地渲染"
               : caps
                 ? caps.gpu.backend_type + " · " + caps.gpu.device
@@ -971,6 +1037,8 @@ export default function App() {
         </div>
       </header>
       <Notice text={error} error onClose={() => setError("")} />
+      {/* A failed open/create must remain visible even while its adapter is hidden. */}
+      <Notice text={family === "wgsl" ? motionSession.error : ""} error />
       <div className="status-line" aria-live="polite">
         {pending ? pending + "…" : status}
       </div>
@@ -982,6 +1050,8 @@ export default function App() {
               void run("重新连接", async () => {
                 await connect();
                 setOffline(false);
+                setConnectionEpoch((old) => old + 1);
+                motionEditor.current?.refresh();
               })
             }
           >
@@ -990,198 +1060,137 @@ export default function App() {
           </Button>
         </div>
       )}
-      {tab === "workspace" && (
-        <main className="workbench">
-          <div className="workbench-context">
-            <div className="context-title">
-              <span className="tiny-label">
-                {activeProject?.name || "本地工作区"} /
-              </span>
-              <h1>{draft?.name || "尚未选择场景"}</h1>
-            </div>
-            <div className="context-actions">
-              <ProjectAudio
-                key={projectId}
-                projectId={projectId}
-                disabled={!!pending}
-              />
-              <span className={"save-state " + (dirty ? "unsaved" : "")}>
-                {dirty
-                  ? "未保存"
-                  : saved
-                    ? "已保存 · " + saved.revision_id.slice(0, 8)
-                    : ""}
-              </span>
-              {step !== "scene" && (
-                <Button onClick={() => setStep("scene")}>
-                  <FileImage size={14} />
-                  切换场景
-                </Button>
-              )}
-              <span className="working-space">ACEScg · 线性光</span>
-            </div>
+      <main className="workbench" hidden={tab !== "workspace"}>
+        <div className="workbench-context">
+          <div className="context-title">
+            <span className="tiny-label">
+              {activeProject?.name || "本地工作区"} /
+            </span>
+            <h1>{currentName || "创作工作区"}</h1>
           </div>
-          <WorkflowNav
-            step={step}
-            onChange={setStep}
-            descriptions={[
-              projectId ? `${scenes.length} 个场景` : "创建或选择项目",
-              dirty
-                ? "有未保存修改"
-                : preview
-                  ? "已有画面预览"
-                  : "调整画面与运动",
-              `${delivery.targets.length} 个交付目标`,
-              `${jobTotal} 个任务`,
-            ]}
-          />
-          <section
-            className={"workflow-content step-" + step}
-            aria-labelledby="workflow-title"
-            onCompositionStart={() => setComposing(true)}
-            onCompositionEnd={() => setComposing(false)}
-          >
-            <div className="workflow-heading">
-              <div>
-                <h2 id="workflow-title" tabIndex={-1} ref={stepHeading}>
-                  {WORKFLOW.find((item) => item.id === step)?.label}
-                </h2>
-                <p>{STEP_HELP[step]}</p>
-              </div>
-              {step === "preview" && draft && (
-                <Button
-                  className={dirty ? "primary" : "outline"}
-                  disabled={!dirty || !!pending}
-                  onClick={() => void saveScene()}
-                >
-                  <Save size={14} />
-                  保存场景
+          <div className="context-actions">
+            <ProjectAudio
+              key={projectId}
+              projectId={projectId}
+              disabled={!!pending}
+            />
+            <span className={"save-state " + (currentDirty ? "unsaved" : "")}>
+              {currentDirty
+                ? "未保存"
+                : currentName
+                  ? "已保存 · " + currentRevision?.slice(0, 8)
+                  : ""}
+            </span>
+            <span className="working-space">
+              {family === "wgsl"
+                ? "WGSL · ACEScg"
+                : motionSession.engine === "remotion-sdr-v1"
+                  ? "React · SDR"
+                  : "Three.js · 浮点"}
+            </span>
+          </div>
+        </div>
+        <WorkspaceLibrary
+          projects={projects}
+          projectId={projectId}
+          scenes={scenes}
+          motionRecord={motionSession.record}
+          motionTemplates={motionTemplates}
+          templates={templates}
+          busy={sharedBusy}
+          selected={
+            family === "wgsl"
+              ? sceneId
+                ? `wgsl:${sceneId}`
+                : ""
+              : motionSession.record
+                ? `motion:${motionSession.record.id}`
+                : ""
+          }
+          onRefresh={() => {
+            motionEditor.current?.refresh();
+            void run("刷新作品", async () => {
+              await refreshProjects();
+              if (projectId) {
+                const reply = await call<{ scenes: SceneRecord[] }>(
+                  "get_project",
+                  { project_id: projectId },
+                );
+                setScenes(reply.scenes);
+              }
+            });
+          }}
+          onProject={changeProject}
+          onNewProject={() => guardProject(() => setProjectModal(true))}
+          onSelect={selectWork}
+          onCreate={createWork}
+        />
+        <WorkflowNav
+          step={step}
+          onChange={setStep}
+          descriptions={[
+            projectId ? "WGSL / Three.js / React" : "创建或选择项目",
+            currentDirty
+              ? "有未保存修改"
+              : family === "wgsl" && preview
+                ? "已有画面预览"
+                : "代码与画面同屏",
+            family === "wgsl"
+              ? `${delivery.targets.length} 个交付目标`
+              : "按源类型选择输出",
+            `${jobTotal} 个任务`,
+          ]}
+        />
+        <section
+          className={"workflow-content step-" + step}
+          aria-labelledby="workflow-title"
+          onCompositionStart={() => setComposing(true)}
+          onCompositionEnd={() => setComposing(false)}
+        >
+          <div className="workflow-heading">
+            <div>
+              <h2 id="workflow-title" tabIndex={-1} ref={stepHeading}>
+                {WORKFLOW.find((item) => item.id === step)?.label}
+              </h2>
+              <p>{STEP_HELP[step]}</p>
+            </div>
+            {step === "preview" && currentName && (
+              <Button
+                className={currentDirty ? "primary" : "outline"}
+                disabled={
+                  family === "wgsl"
+                    ? !dirty || !!pending
+                    : !motionSession.canSave
+                }
+                onClick={() =>
+                  family === "wgsl"
+                    ? void saveScene()
+                    : motionEditor.current?.save()
+                }
+              >
+                <Save size={14} />
+                保存作品
+              </Button>
+            )}
+          </div>
+          {step === "scene" && (
+            <div className="workflow-empty">
+              <Code2 size={28} aria-hidden="true" />
+              <h3>
+                {currentName ? `继续编辑：${currentName}` : "从代码开始创作"}
+              </h3>
+              <p>
+                在上方选择已有作品，或新建 WGSL、Three.js、React
+                作品。所有类型共用编辑、预览与导出流程。
+              </p>
+              {currentName && (
+                <Button className="primary" onClick={() => setStep("preview")}>
+                  继续编辑与预览
                 </Button>
               )}
             </div>
-            {step === "scene" && (
-              <div className="scene-layout">
-                <aside className="scene-rail">
-                  <div className="section-heading">
-                    <h3>项目与场景</h3>
-                    <Button
-                      aria-label="新建项目"
-                      onClick={() => guard(() => setProjectModal(true))}
-                    >
-                      <FolderPlus size={17} />
-                      新建项目
-                    </Button>
-                  </div>
-                  <Field label="当前项目" id="project-select">
-                    <select
-                      id="project-select"
-                      value={projectId}
-                      onChange={(e) => {
-                        // Capture before the controlled select resets during the discard dialog.
-                        const nextProjectId = e.target.value;
-                        guard(() => setProjectId(nextProjectId));
-                      }}
-                    >
-                      <option value="">选择或新建项目</option>
-                      {projects.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name}
-                        </option>
-                      ))}
-                    </select>
-                  </Field>
-                  <div className="scene-list">
-                    {scenes.map((s) => (
-                      <Button
-                        key={s.id}
-                        className={
-                          "scene-item " + (sceneId === s.id ? "selected" : "")
-                        }
-                        aria-pressed={sceneId === s.id}
-                        title={"最后保存 " + savedAt(s.updated_at)}
-                        onClick={() =>
-                          guard(() => {
-                            setSceneId(s.id);
-                            setActiveJobId("");
-                          })
-                        }
-                      >
-                        <FileImage size={16} />
-                        <span>{s.name}</span>
-                        <small className="mono" aria-hidden="true">
-                          {savedAt(s.updated_at)}
-                        </small>
-                      </Button>
-                    ))}
-                    {!scenes.length && (
-                      <p className="empty-small">
-                        点击右侧“新建空白场景”，或选择一个示例模板。
-                      </p>
-                    )}
-                  </div>
-
-                  {draft && (
-                    <div className="scene-continue">
-                      <span>已选择：{draft.name}</span>
-                      <Button
-                        className="primary"
-                        onClick={() => setStep("preview")}
-                      >
-                        继续编辑与预览
-                        <ChevronRight size={15} />
-                      </Button>
-                    </div>
-                  )}
-                </aside>
-                <section className="template-panel" aria-label="场景模板">
-                  <div className="section-heading">
-                    <h3>新建场景</h3>
-                    <Button
-                      className="primary"
-                      disabled={!!pending}
-                      onClick={() => void createScene()}
-                    >
-                      <Plus size={15} />
-                      新建空白场景
-                    </Button>
-                  </div>
-                  <p className="panel-description">
-                    {projectId
-                      ? "直接新建空白场景后，可通过代码或 MCP 添加内容。下方模板仅提供示例起点。"
-                      : "先新建项目，再从空白场景开始；也可以选择示例模板。"}
-                  </p>
-                  <h4>示例模板（可选）</h4>
-                  <div className="template-list">
-                    {templates.map((t, i) => (
-                      <Button
-                        key={t.id}
-                        className="template-item"
-                        onClick={() => void createScene(t.id)}
-                        disabled={!!pending}
-                      >
-                        <span className="template-symbol">
-                          {
-                            [
-                              <Activity size={18} />,
-                              <Layers size={18} />,
-                              <Square size={18} />,
-                              <Workflow size={18} />,
-                              <Braces size={18} />,
-                              <Activity size={18} />,
-                            ][i]
-                          }
-                        </span>
-                        <span>
-                          <strong>{t.name}</strong>
-                          <small>{t.description}</small>
-                        </span>
-                        <Plus size={13} />
-                      </Button>
-                    ))}
-                  </div>
-                </section>
-              </div>
-            )}
+          )}
+          <div hidden={family !== "wgsl"}>
             {(step === "preview" || step === "delivery") && !draft && (
               <div className="workflow-empty">
                 <FileImage size={28} />
@@ -1196,6 +1205,79 @@ export default function App() {
             {step === "preview" && draft && (
               <>
                 <div className="editor-layout">
+                  <section
+                    className="code-section motion-source-panel"
+                    aria-label="WGSL 代码编辑器"
+                  >
+                    <div className="section-heading">
+                      <span>
+                        <Code2 size={15} />
+                        场景代码 <small>WGSL</small>
+                      </span>
+                      <div>
+                        <Button
+                          disabled={!draft || !!pending}
+                          onClick={() =>
+                            void run("验证代码", () =>
+                              call("validate_scene", { scene_id: sceneId }),
+                            )
+                          }
+                        >
+                          <Check size={14} />
+                          验证已保存版本
+                        </Button>
+                        <Button
+                          disabled={!sceneId || !!pending}
+                          onClick={() =>
+                            guard(() => {
+                              void run("重新载入", async () => {
+                                const v = await call<SceneReply>("get_scene", {
+                                  scene_id: sceneId,
+                                });
+                                setSaved(v);
+                                setDraft(structuredClone(v.scene));
+                                setColorDrafts({});
+                                return v;
+                              });
+                            })
+                          }
+                        >
+                          <RefreshCw size={14} />
+                          重新载入
+                        </Button>
+                      </div>
+                    </div>
+                    {stale && (
+                      <Notice
+                        error
+                        text="场景已有其他客户端更新。请复制当前代码或重新载入后再保存。"
+                      />
+                    )}
+                    <CodeEditor
+                      language="wgsl"
+                      value={draft.code}
+                      editable={!pending}
+                      onChange={(code) =>
+                        setDraft((old) => (old ? { ...old, code } : old))
+                      }
+                      onComposing={setComposing}
+                    />
+                    <div className="code-footer">
+                      <span id="code-help">
+                        shade(ctx) 固定返回线性 ACEScg RGBA（非预乘）。RGB
+                        可小于 0 或大于 1，Alpha 为 0–1；颜色参数已转换为
+                        ACEScg。使用 ctx.time 与 ctx.seed。
+                      </span>
+                      <Button
+                        disabled={!draft}
+                        onClick={() => void copy(draft?.code || "")}
+                        aria-label="复制场景代码"
+                      >
+                        <Copy size={13} />
+                      </Button>
+                    </div>
+                  </section>
+
                   <div className="canvas-column">
                     <PreviewPanel
                       label="场景预览"
@@ -1432,51 +1514,22 @@ export default function App() {
                       )}
                       <div className="frame-strip">
                         {liveEnabled ? (
-                          <>
-                            <Button
-                              aria-label={
-                                livePlaying ? "暂停实时预览" : "播放实时预览"
-                              }
-                              aria-pressed={livePlaying}
-                              disabled={
-                                !live.active ||
-                                !!live.error ||
-                                Number(frames) < 2
-                              }
-                              onClick={() => {
-                                if (!livePlaying)
-                                  previewAudio.current?.unlock();
-                                setLivePlaying((value) => !value);
-                              }}
-                            >
-                              {livePlaying ? (
-                                <Pause size={14} />
-                              ) : (
-                                <Play size={14} />
-                              )}
-                            </Button>
-                            <label className="sr-only" htmlFor="live-timeline">
-                              实时预览播放位置
-                            </label>
-                            <input
-                              id="live-timeline"
-                              className="live-timeline"
-                              type="range"
-                              min={0}
-                              max={Math.max(0, Number(frames) - 1)}
-                              step={1}
-                              value={
-                                validLiveFrame
-                                  ? Math.min(Number(frame), Number(frames) - 1)
-                                  : 0
-                              }
-                              disabled={!!settingsError}
-                              onChange={(e) => {
-                                setLivePlaying(false);
-                                setFrame(e.target.value);
-                              }}
-                            />
-                          </>
+                          <PreviewTimeline
+                            frame={Number(frame)}
+                            maxFrame={Number(frames) - 1}
+                            playing={livePlaying}
+                            disabled={
+                              !live.active || !!live.error || !!settingsError
+                            }
+                            onPlay={() => {
+                              if (!livePlaying) previewAudio.current?.unlock();
+                              setLivePlaying((value) => !value);
+                            }}
+                            onSeek={(value) => {
+                              setLivePlaying(false);
+                              setFrame(String(value));
+                            }}
+                          />
                         ) : (
                           <div className="frame-buttons">
                             {previewImages.map((a, i) => (
@@ -1560,301 +1613,217 @@ export default function App() {
                         </div>
                       </div>
                     </PreviewPanel>
-                    {/* Code follows the picture in the same column, independent of inspector height. */}
-                    <details className="code-disclosure">
-                      <summary>
-                        <Code2 size={16} />
-                        <strong>代码编辑</strong>
-                        <span>WGSL · 展开修改画面逻辑</span>
-                        <ChevronRight size={15} />
-                      </summary>
-                      <section className="code-section">
+                    <aside className="parameter-panel">
+                      {/* Parameters are tuned against the picture, so they lead the inspector. */}
+                      <section
+                        className="scene-parameters"
+                        aria-label="场景参数"
+                      >
                         <div className="section-heading">
-                          <span>
-                            <Code2 size={15} />
-                            场景代码 <small>WGSL</small>
-                          </span>
-                          <div>
-                            <Button
-                              disabled={!draft || !!pending}
-                              onClick={() =>
-                                void run("验证代码", () =>
-                                  call("validate_scene", { scene_id: sceneId }),
-                                )
-                              }
-                            >
-                              <Check size={14} />
-                              验证已保存版本
-                            </Button>
-                            <Button
-                              disabled={!sceneId || !!pending}
-                              onClick={() =>
-                                guard(() => {
-                                  void run("重新载入", async () => {
-                                    const v = await call<SceneReply>(
-                                      "get_scene",
-                                      {
-                                        scene_id: sceneId,
-                                      },
-                                    );
-                                    setSaved(v);
-                                    setDraft(structuredClone(v.scene));
-                                    setColorDrafts({});
-                                    return v;
-                                  });
-                                })
-                              }
-                            >
-                              <RefreshCw size={14} />
-                              重新载入
-                            </Button>
-                          </div>
+                          <h3>
+                            <Settings2 size={16} />
+                            场景参数
+                          </h3>
                         </div>
-                        {stale && (
-                          <Notice
-                            error
-                            text="场景已有其他客户端更新。请复制当前代码或重新载入后再保存。"
-                          />
-                        )}
-                        <label className="sr-only" htmlFor="scene-code">
-                          WGSL 场景代码
-                        </label>
-                        <Textarea
-                          id="scene-code"
-                          className="resize-none code-editor"
-                          spellCheck={false}
-                          disabled={!draft || !!pending}
-                          value={draft?.code || ""}
-                          onChange={(e) =>
-                            setDraft((old) =>
-                              old ? { ...old, code: e.target.value } : old,
-                            )
-                          }
-                          aria-describedby="code-help"
-                        />
-                        <div className="code-footer">
-                          <span id="code-help">
-                            shade(ctx) 固定返回线性 ACEScg RGBA（非预乘）。RGB
-                            可小于 0 或大于 1，Alpha 为 0–1；颜色参数已转换为
-                            ACEScg。使用 ctx.time 与 ctx.seed。
-                          </span>
-                          <Button
-                            disabled={!draft}
-                            onClick={() => void copy(draft?.code || "")}
-                            aria-label="复制场景代码"
-                          >
-                            <Copy size={13} />
-                          </Button>
-                        </div>
-                      </section>
-                    </details>
-                  </div>
-                  <aside className="parameter-panel">
-                    {/* Parameters are tuned against the picture, so they lead the inspector. */}
-                    <section className="scene-parameters" aria-label="场景参数">
-                      <div className="section-heading">
-                        <h3>
-                          <Settings2 size={16} />
-                          场景参数
-                        </h3>
-                      </div>
-                      <p className="panel-description">
-                        调整参数即可实时查看；保存场景后用于正式渲染。
-                      </p>
-                      <div className="parameter-fields">
-                        {/* Visual colors keep display appearance separate from scene float RGB. */}
-                        {draft?.parameters.map((p) =>
-                          p.kind === "color" ? (
-                            <ColorField
-                              key={sceneId + "-" + p.name}
-                              id={"param-" + p.name}
-                              label={p.label || p.name}
-                              value={parameterValue(p) as number[]}
-                              colorSpace={p.color_space}
-                              disabled={!!pending}
-                              rawDraft={colorDrafts[p.name] ?? null}
-                              onRawDraftChange={(input) =>
-                                setColorDrafts((old) => ({
-                                  ...old,
-                                  [p.name]: input,
-                                }))
-                              }
-                              onChange={(rgb) => changeParameter(p.name, rgb)}
-                            />
-                          ) : (
-                            <Field
-                              key={p.name}
-                              label={p.label || p.name}
-                              id={"param-" + p.name}
-                              hint={
-                                p.minimum !== null || p.maximum !== null
-                                  ? [p.minimum ?? "−∞", p.maximum ?? "∞"].join(
-                                      " … ",
-                                    )
-                                  : undefined
-                              }
-                            >
-                              {p.kind === "boolean" ? (
-                                <input
-                                  id={"param-" + p.name}
-                                  type="checkbox"
-                                  checked={Boolean(parameterValue(p))}
-                                  disabled={!!pending}
-                                  onChange={(e) =>
-                                    changeParameter(p.name, e.target.checked)
-                                  }
-                                />
-                              ) : (
-                                <input
-                                  id={"param-" + p.name}
-                                  type="number"
-                                  step="0.1"
-                                  min={p.minimum ?? undefined}
-                                  max={p.maximum ?? undefined}
-                                  value={String(parameterValue(p))}
-                                  disabled={!!pending}
-                                  onChange={(e) =>
-                                    changeParameter(
-                                      p.name,
-                                      e.target.value === ""
-                                        ? ""
-                                        : Number(e.target.value),
-                                    )
-                                  }
-                                />
-                              )}
-                            </Field>
-                          ),
-                        )}
-                        {!draft && (
-                          <p className="empty-small">
-                            选择场景后显示可调参数。
-                          </p>
-                        )}
-                      </div>
-                    </section>
-                    {/* Keep logical canvas/time settings next to live feedback, separate from its proxy budget. */}
-                    <section className="frame-settings" aria-label="画面规格">
-                      <div className="section-heading">
-                        <h3>画面规格</h3>
-                        <small>预览与交付共用</small>
-                      </div>
-                      <Field label="画面尺寸" id="resolution">
-                        <select
-                          id="resolution"
-                          value={
-                            Object.entries(caps?.resolutions || {}).find(
-                              ([, v]) =>
-                                String(v[0]) === width &&
-                                String(v[1]) === height,
-                            )?.[0] || "custom"
-                          }
-                          onChange={(e) => {
-                            const v = caps?.resolutions[e.target.value];
-                            if (v) {
-                              setWidth(String(v[0]));
-                              setHeight(String(v[1]));
-                            }
-                          }}
-                        >
-                          <option value="custom">自定义</option>
-                          {Object.entries(caps?.resolutions || {}).map(
-                            ([label, v]) => (
-                              <option key={label} value={label}>
-                                {label} · {v[0]} × {v[1]}
-                              </option>
+                        <p className="panel-description">
+                          调整参数即可实时查看；保存场景后用于正式渲染。
+                        </p>
+                        <div className="parameter-fields">
+                          {/* Visual colors keep display appearance separate from scene float RGB. */}
+                          {draft?.parameters.map((p) =>
+                            p.kind === "color" ? (
+                              <ColorField
+                                key={sceneId + "-" + p.name}
+                                id={"param-" + p.name}
+                                label={p.label || p.name}
+                                value={parameterValue(p) as number[]}
+                                colorSpace={p.color_space}
+                                disabled={!!pending}
+                                rawDraft={colorDrafts[p.name] ?? null}
+                                onRawDraftChange={(input) =>
+                                  setColorDrafts((old) => ({
+                                    ...old,
+                                    [p.name]: input,
+                                  }))
+                                }
+                                onChange={(rgb) => changeParameter(p.name, rgb)}
+                              />
+                            ) : (
+                              <Field
+                                key={p.name}
+                                label={p.label || p.name}
+                                id={"param-" + p.name}
+                                hint={
+                                  p.minimum !== null || p.maximum !== null
+                                    ? [
+                                        p.minimum ?? "−∞",
+                                        p.maximum ?? "∞",
+                                      ].join(" … ")
+                                    : undefined
+                                }
+                              >
+                                {p.kind === "boolean" ? (
+                                  <input
+                                    id={"param-" + p.name}
+                                    type="checkbox"
+                                    checked={Boolean(parameterValue(p))}
+                                    disabled={!!pending}
+                                    onChange={(e) =>
+                                      changeParameter(p.name, e.target.checked)
+                                    }
+                                  />
+                                ) : (
+                                  <input
+                                    id={"param-" + p.name}
+                                    type="number"
+                                    step="0.1"
+                                    min={p.minimum ?? undefined}
+                                    max={p.maximum ?? undefined}
+                                    value={String(parameterValue(p))}
+                                    disabled={!!pending}
+                                    onChange={(e) =>
+                                      changeParameter(
+                                        p.name,
+                                        e.target.value === ""
+                                          ? ""
+                                          : Number(e.target.value),
+                                      )
+                                    }
+                                  />
+                                )}
+                              </Field>
                             ),
                           )}
-                        </select>
-                      </Field>
-                      <div className="two-fields">
-                        <Field label="宽度" id="out-width">
-                          <input
-                            id="out-width"
-                            type="number"
-                            min={16}
-                            max={8192}
-                            value={width}
-                            onChange={(e) => setWidth(e.target.value)}
-                          />
-                        </Field>
-                        <Field label="高度" id="out-height">
-                          <input
-                            id="out-height"
-                            type="number"
-                            min={16}
-                            max={8192}
-                            value={height}
-                            onChange={(e) => setHeight(e.target.value)}
-                          />
-                        </Field>
-                      </div>
-                      <div className="two-fields">
-                        <Field label="帧率" id="out-fps">
+                          {!draft && (
+                            <p className="empty-small">
+                              选择场景后显示可调参数。
+                            </p>
+                          )}
+                        </div>
+                      </section>
+                      {/* Keep logical canvas/time settings next to live feedback, separate from its proxy budget. */}
+                      <section className="frame-settings" aria-label="画面规格">
+                        <div className="section-heading">
+                          <h3>画面规格</h3>
+                          <small>预览与交付共用</small>
+                        </div>
+                        <Field label="画面尺寸" id="resolution">
                           <select
-                            id="out-fps"
-                            value={fps}
-                            onChange={(e) => setFps(e.target.value)}
+                            id="resolution"
+                            value={
+                              Object.entries(caps?.resolutions || {}).find(
+                                ([, v]) =>
+                                  String(v[0]) === width &&
+                                  String(v[1]) === height,
+                              )?.[0] || "custom"
+                            }
+                            onChange={(e) => {
+                              const v = caps?.resolutions[e.target.value];
+                              if (v) {
+                                setWidth(String(v[0]));
+                                setHeight(String(v[1]));
+                              }
+                            }}
                           >
-                            {validFrameRates.map((f) => (
-                              <option
-                                key={f.numerator + "/" + f.denominator}
-                                value={f.numerator + "/" + f.denominator}
-                              >
-                                {fmt(f.numerator / f.denominator)} fps
-                              </option>
-                            ))}
+                            <option value="custom">自定义</option>
+                            {Object.entries(caps?.resolutions || {}).map(
+                              ([label, v]) => (
+                                <option key={label} value={label}>
+                                  {label} · {v[0]} × {v[1]}
+                                </option>
+                              ),
+                            )}
                           </select>
                         </Field>
-                        <Field label="总帧数" id="out-frames">
-                          <input
-                            id="out-frames"
-                            type="number"
-                            min={1}
-                            max={216000}
-                            value={frames}
-                            onChange={(e) => setFrames(e.target.value)}
-                          />
-                        </Field>
-                      </div>
-                      <div className="two-fields">
-                        <Field
-                          label="空间采样"
-                          id="out-samples"
-                          hint="正式渲染使用；实时预览固定 1 样本。"
-                        >
-                          <select
+                        <div className="two-fields">
+                          <Field label="宽度" id="out-width">
+                            <input
+                              id="out-width"
+                              type="number"
+                              min={16}
+                              max={8192}
+                              value={width}
+                              onChange={(e) => setWidth(e.target.value)}
+                            />
+                          </Field>
+                          <Field label="高度" id="out-height">
+                            <input
+                              id="out-height"
+                              type="number"
+                              min={16}
+                              max={8192}
+                              value={height}
+                              onChange={(e) => setHeight(e.target.value)}
+                            />
+                          </Field>
+                        </div>
+                        <div className="two-fields">
+                          <Field label="帧率" id="out-fps">
+                            <select
+                              id="out-fps"
+                              value={fps}
+                              onChange={(e) => setFps(e.target.value)}
+                            >
+                              {validFrameRates.map((f) => (
+                                <option
+                                  key={f.numerator + "/" + f.denominator}
+                                  value={f.numerator + "/" + f.denominator}
+                                >
+                                  {fmt(f.numerator / f.denominator)} fps
+                                </option>
+                              ))}
+                            </select>
+                          </Field>
+                          <Field label="总帧数" id="out-frames">
+                            <input
+                              id="out-frames"
+                              type="number"
+                              min={1}
+                              max={216000}
+                              value={frames}
+                              onChange={(e) => setFrames(e.target.value)}
+                            />
+                          </Field>
+                        </div>
+                        <div className="two-fields">
+                          <Field
+                            label="空间采样"
                             id="out-samples"
-                            value={samples}
-                            onChange={(e) => setSamples(e.target.value)}
+                            hint="正式渲染使用；实时预览固定 1 样本。"
                           >
-                            {[1, 4, 16].map((n) => (
-                              <option key={n} value={n}>
-                                {n} 样本 / 像素
-                              </option>
-                            ))}
-                          </select>
-                        </Field>
-                        <Field label="起始时间码" id="out-timecode">
-                          <input
-                            id="out-timecode"
-                            value={timecode}
-                            onChange={(e) => setTimecode(e.target.value)}
-                          />
-                        </Field>
-                      </div>
-                      <div className="output-duration">
-                        <span>{fmt(Number(frames) / frameRate)} 秒</span>
-                        <span>
-                          {width} × {height} · {fmt(frameRate)} fps
-                        </span>
-                      </div>
+                            <select
+                              id="out-samples"
+                              value={samples}
+                              onChange={(e) => setSamples(e.target.value)}
+                            >
+                              {[1, 4, 16].map((n) => (
+                                <option key={n} value={n}>
+                                  {n} 样本 / 像素
+                                </option>
+                              ))}
+                            </select>
+                          </Field>
+                          <Field label="起始时间码" id="out-timecode">
+                            <input
+                              id="out-timecode"
+                              value={timecode}
+                              onChange={(e) => setTimecode(e.target.value)}
+                            />
+                          </Field>
+                        </div>
+                        <div className="output-duration">
+                          <span>{fmt(Number(frames) / frameRate)} 秒</span>
+                          <span>
+                            {width} × {height} · {fmt(frameRate)} fps
+                          </span>
+                        </div>
 
-                      {settingsError && <Notice error text={settingsError} />}
-                    </section>
-                    {/* The same fixed color contract is visible beside code and delivery. */}
-                    <ColorWorkflow />
-                  </aside>
+                        {settingsError && <Notice error text={settingsError} />}
+                      </section>
+                      {/* The same fixed color contract is visible beside code and delivery. */}
+                      <ColorWorkflow />
+                    </aside>
+                  </div>
                 </div>
                 <div className="step-actions">
                   <Button onClick={() => setStep("scene")}>返回选择场景</Button>
@@ -2288,28 +2257,19 @@ export default function App() {
                 </div>
               </>
             )}
-          </section>
-        </main>
-      )}
-      {motionVisited && (
-        <Suspense
-          fallback={
-            tab === "motion" ? (
-              <main className="workbench">
-                <p role="status">正在打开动画代码…</p>
-              </main>
-            ) : null
-          }
-        >
+          </div>
           <MotionWorkbench
-            active={tab === "motion"}
-            onWorkspace={() => {
-              setStep("scene");
-              setTab("workspace");
-            }}
+            ref={motionEditor}
+            projectId={projectId}
+            active={tab === "workspace" && family === "motion"}
+            step={step}
+            onStepChange={setStep}
+            onSelected={selectMotion}
+            onSessionChange={setMotionSession}
+            onTemplates={setMotionTemplates}
           />
-        </Suspense>
-      )}
+        </section>
+      </main>
       {tab === "mcp" && (
         <main className="page-content">
           <div className="page-heading">
@@ -2389,13 +2349,9 @@ export default function App() {
         </main>
       )}
       <footer className="app-footer">
+        <span>{activeProject?.name || "本地工作区"}</span>
         <span>
-          {tab === "motion"
-            ? "动画代码工作区"
-            : activeProject?.name || "本地工作区"}
-        </span>
-        <span>
-          {tab === "motion" ? (
+          {family === "motion" ? (
             // Preview transfer is selected independently from delivery.
             "HDR / SDR 动画 · 自动 HDR / sRGB 预览"
           ) : (
@@ -2444,10 +2400,13 @@ export default function App() {
       </Modal>
       <Modal
         open={!!discard}
-        title="保留场景修改"
+        title="保留未保存修改"
         onClose={() => setDiscard(null)}
       >
-        <p>当前场景有未保存修改。切换会舍弃这些本地修改。</p>
+        <p>
+          当前工作区有未保存修改。切换项目会影响 WGSL
+          与动画草稿；切换同类作品会替换该编辑器的草稿。
+        </p>
         <div className="modal-actions">
           <Button className="primary" onClick={() => setDiscard(null)}>
             继续编辑

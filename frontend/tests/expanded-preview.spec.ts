@@ -6,7 +6,7 @@ import AxeBuilder from "@axe-core/playwright";
 for (const engine of ["native", "three-float-v1", "remotion-sdr-v1"]) {
   test(`${engine} large preview preserves media, keyboard access and 720p detail`, async ({
     page,
-  }) => {
+  }, testInfo) => {
     const session = await (await page.request.get("/api/session")).json();
     async function call(name: string, data: unknown) {
       const reply = await page.request.post(`/api/operations/${name}`, {
@@ -43,6 +43,9 @@ for (const engine of ["native", "three-float-v1", "remotion-sdr-v1"]) {
             spec: {
               name: "大屏画面",
               engine,
+              ...(engine === "three-float-v1"
+                ? { source_color_space: "Linear Rec.2020" }
+                : {}),
               width: 1920,
               height: 1080,
               frames: 300,
@@ -73,13 +76,13 @@ for (const engine of ["native", "three-float-v1", "remotion-sdr-v1"]) {
         )
         .toEqual([1280, 720]);
     } else {
-      await page.getByRole("button", { name: "动画代码", exact: true }).click();
+      await page.getByRole("button", { name: "工作区", exact: true }).click();
       await page
-        .getByLabel("动画项目", { exact: true })
+        .getByLabel("当前项目", { exact: true })
         .selectOption(project.id);
       await page
-        .getByLabel("已保存的动画", { exact: true })
-        .selectOption(scene.record.id);
+        .getByLabel("当前作品", { exact: true })
+        .selectOption(`motion:${scene.record.id}`);
       await expect(page.locator("iframe[title='动画画面']")).toBeVisible({
         timeout: 20000,
       });
@@ -134,6 +137,35 @@ for (const engine of ["native", "three-float-v1", "remotion-sdr-v1"]) {
     expect((await surface.boundingBox())!.width).toBeGreaterThan(
       inline!.width + 100,
     );
+    // Width alone missed the regression: the flexing timeline stole most of
+    // the expanded height. The picture must dominate, even in a short window.
+    for (const [width, height] of [
+      [1440, 1000],
+      [1512, 760],
+      [1024, 700],
+    ]) {
+      await page.setViewportSize({ width, height });
+      await expect
+        .poll(async () => (await surface.boundingBox())!.height / height)
+        .toBeGreaterThan(engine === "native" ? 0.45 : 0.7);
+      await expect
+        .poll(
+          async () =>
+            (await panel.locator(".preview-timeline").boundingBox())!.height,
+        )
+        .toBeLessThanOrEqual(48);
+      await expect(
+        panel.getByRole("button", { name: pauseName, exact: true }),
+      ).toBeInViewport();
+      await expect
+        .poll(() =>
+          dialog.evaluate((node) => node.scrollHeight - node.clientHeight),
+        )
+        .toBeLessThanOrEqual(1);
+      await page.screenshot({
+        path: testInfo.outputPath(`expanded-${width}x${height}.png`),
+      });
+    }
     await expect(media).toHaveAttribute("data-retained-media", "yes");
     await expect(audio).toHaveAttribute("data-retained-audio", "yes");
     await expect(
@@ -143,8 +175,34 @@ for (const engine of ["native", "three-float-v1", "remotion-sdr-v1"]) {
       false,
     );
     await page.screenshot({
-      path: `/private/tmp/chromascript-large-${engine}.png`,
+      path: testInfo.outputPath("expanded-desktop.png"),
     });
+
+    if (engine !== "native") {
+      // Compact guidance stays reachable through the modal's actual keyboard cycle.
+      const notes = dialog.locator(".preview-notes > summary");
+      await dialog
+        .getByRole("button", { name: "退出大屏", exact: true })
+        .focus();
+      for (
+        let attempt = 0;
+        attempt < 24 &&
+        !(await notes.evaluate((node) => node === document.activeElement));
+        attempt++
+      )
+        await page.keyboard.press("Tab");
+      await expect(notes).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(dialog.locator(".preview-notes")).toHaveAttribute(
+        "open",
+        "",
+      );
+      await page.keyboard.press("Enter");
+      await expect(dialog.locator(".preview-notes")).not.toHaveAttribute(
+        "open",
+        "",
+      );
+    }
 
     // Tab cannot escape to the inert editor; the sandbox forwards Escape too.
     await page.keyboard.press("Shift+Tab");
@@ -173,12 +231,26 @@ for (const engine of ["native", "three-float-v1", "remotion-sdr-v1"]) {
     expect(
       await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth + 1),
     ).toBe(true);
+    await expect
+      .poll(
+        async () =>
+          (await panel.locator(".preview-timeline").boundingBox())!.height,
+      )
+      .toBeLessThanOrEqual(100);
+    if (engine !== "native") {
+      await expect
+        .poll(async () => (await surface.boundingBox())!.height / 844)
+        .toBeGreaterThan(0.6);
+      await expect(
+        panel.getByLabel("动画时间线", { exact: true }),
+      ).toBeInViewport();
+    }
     const audit = await new AxeBuilder({ page })
       .include(".preview-panel.is-expanded")
       .analyze();
     expect(audit.violations).toEqual([]);
     await page.screenshot({
-      path: `/private/tmp/chromascript-large-mobile-${engine}.png`,
+      path: testInfo.outputPath("expanded-mobile.png"),
     });
     await dialog.getByRole("button", { name: "退出大屏", exact: true }).click();
     expect(

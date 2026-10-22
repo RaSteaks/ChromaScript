@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { javascript } from "@codemirror/lang-javascript";
 import { EditorView } from "@codemirror/view";
@@ -48,22 +49,37 @@ const extensions = [
       },
     ]),
   ),
-  javascript({ jsx: true, typescript: true }),
-  EditorView.contentAttributes.of({
-    "aria-label": "动画 TypeScript 代码",
-    "aria-describedby": "motion-code-help",
-  }),
 ];
 
 export function CodeEditor({
   value,
   onChange,
   onComposing,
+  language = "typescript",
+  editable = true,
 }: {
+  language?: "typescript" | "wgsl";
+  editable?: boolean;
   value: string;
   onChange: (value: string) => void;
   onComposing: (value: boolean) => void;
 }) {
+  // Status polling must not reconfigure the editor or disturb its editing state.
+  const editorExtensions = useMemo(
+    () => [
+      ...extensions,
+      ...(language === "typescript"
+        ? [javascript({ jsx: true, typescript: true })]
+        : []),
+      EditorView.contentAttributes.of({
+        "aria-label":
+          language === "wgsl" ? "WGSL 场景代码" : "动画 TypeScript 代码",
+        "aria-describedby":
+          language === "wgsl" ? "code-help" : "motion-code-help",
+      }),
+    ],
+    [language],
+  );
   return (
     <div
       className="motion-code-editor"
@@ -74,7 +90,9 @@ export function CodeEditor({
         value={value}
         onChange={onChange}
         theme={theme}
-        extensions={extensions}
+        editable={editable}
+        // WGSL uses the same editor without applying an incorrect JavaScript grammar.
+        extensions={editorExtensions}
         height="540px"
         indentWithTab={false}
         onCreateEditor={(view) => {

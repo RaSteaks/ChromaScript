@@ -105,13 +105,13 @@ for (const engine of ["native", "three-float-v1", "remotion-sdr-v1"]) {
         .click();
       await expect(page.locator(".live-preview-image")).toBeVisible();
     } else {
-      await page.getByRole("button", { name: "动画代码", exact: true }).click();
+      await page.getByRole("button", { name: "工作区", exact: true }).click();
       await page
-        .getByLabel("动画项目", { exact: true })
+        .getByLabel("当前项目", { exact: true })
         .selectOption(project.id);
       await page
-        .getByLabel("已保存的动画", { exact: true })
-        .selectOption(scene.record.id);
+        .getByLabel("当前作品", { exact: true })
+        .selectOption(`motion:${scene.record.id}`);
       await expect(page.locator("iframe[title='动画画面']")).toBeVisible({
         timeout: 20000,
       });

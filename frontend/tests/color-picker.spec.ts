@@ -1,3 +1,4 @@
+import { openExamples } from "./workspace-navigation";
 import { test, expect, type Page, type Locator } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { mkdirSync } from "node:fs";
@@ -127,7 +128,7 @@ test("visual color selection saves scene RGB and matches the real ACES GPU previ
     (await call<SceneReply>("get_scene", { scene_id: created.record.id })).scene
       .values,
   ).toEqual({});
-  await page.getByRole("button", { name: "保存场景", exact: true }).click();
+  await page.getByRole("button", { name: "保存作品", exact: true }).click();
   await expect(page.getByText("保存场景已完成", { exact: true })).toBeVisible();
   const saved = await call<SceneReply>("get_scene", {
     scene_id: created.record.id,
@@ -184,7 +185,8 @@ test("cancel, Escape and navigation preserve original negative and HDR floats", 
     (await call<SceneReply>("get_scene", { scene_id: created.record.id })).scene
       .parameters[0].default,
   ).toEqual(original);
-  await page.locator(".color-advanced summary").click();
+  if ((await page.locator(".color-advanced").getAttribute("open")) === null)
+    await page.locator(".color-advanced summary").click();
   for (const [i, channel] of ["R", "G", "B"].entries())
     await expect(
       page.getByLabel("颜色 " + channel, { exact: true }),
@@ -202,7 +204,8 @@ test("cancel, Escape and navigation preserve original negative and HDR floats", 
   await page
     .getByRole("button", { name: "2. 编辑与预览", exact: true })
     .click();
-  await page.locator(".color-advanced summary").click();
+  if ((await page.locator(".color-advanced").getAttribute("open")) === null)
+    await page.locator(".color-advanced summary").click();
   await expect(page.getByLabel("颜色 R", { exact: true })).toHaveValue("-0.25");
 });
 
@@ -211,16 +214,18 @@ test("incomplete RGB drafts survive stage and MCP navigation and guard replaceme
 }) => {
   const original = [-0.123456789123, 16.987654321, 0.0000000123456789];
   const { call, created } = await scene(page, "ACEScg", original);
-  await page.locator(".color-advanced summary").click();
+  if ((await page.locator(".color-advanced").getAttribute("open")) === null)
+    await page.locator(".color-advanced summary").click();
   await page.getByLabel("颜色 R", { exact: true }).fill("");
   // Each view unmounts ColorField. Preserve the raw input and its error rather
   // than rebuilding it from the last valid numeric RGB stored in the scene.
-  for (const name of ["3. 设置交付", "4. 任务与成果", "1. 选择场景"]) {
+  for (const name of ["3. 设置交付", "4. 任务与成果", "1. 选择作品"]) {
     await page.getByRole("button", { name, exact: true }).click();
     await page
       .getByRole("button", { name: "2. 编辑与预览", exact: true })
       .click();
-    await page.locator(".color-advanced summary").click();
+    if ((await page.locator(".color-advanced").getAttribute("open")) === null)
+      await page.locator(".color-advanced summary").click();
     await expect(page.getByLabel("颜色 R", { exact: true })).toHaveValue("");
     await expect(page.getByLabel("颜色 R", { exact: true })).toHaveAttribute(
       "aria-invalid",
@@ -229,14 +234,15 @@ test("incomplete RGB drafts survive stage and MCP navigation and guard replaceme
   }
   await page.getByRole("button", { name: "MCP 接口", exact: true }).click();
   await page.getByRole("button", { name: "工作区", exact: true }).click();
-  await page.locator(".color-advanced summary").click();
+  if ((await page.locator(".color-advanced").getAttribute("open")) === null)
+    await page.locator(".color-advanced summary").click();
   await expect(page.getByLabel("颜色 R", { exact: true })).toHaveValue("");
   for (const [i, channel] of ["G", "B"].entries())
     await expect(
       page.getByLabel("颜色 " + channel, { exact: true }),
     ).toHaveValue(String(original[i + 1]));
   await expect(page.getByText("未保存", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "保存场景", exact: true }).click();
+  await page.getByRole("button", { name: "保存作品", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText([
     "请先完成高级 RGB 输入，再保存场景。",
     "请输入三个有限的浮点数；未完成的输入尚未应用。",
@@ -245,25 +251,26 @@ test("incomplete RGB drafts survive stage and MCP navigation and guard replaceme
     (await call<SceneReply>("get_scene", { scene_id: created.record.id }))
       .revision_id,
   ).toBe(created.revision_id);
-  await page.getByRole("button", { name: "1. 选择场景", exact: true }).click();
+  await page.getByRole("button", { name: "1. 选择作品", exact: true }).click();
+  await openExamples(page);
   await page.getByRole("button", { name: /广色域渐变/ }).click();
-  const discard = page.getByRole("dialog", { name: "保留场景修改" });
+  const discard = page.getByRole("dialog", { name: "保留未保存修改" });
   await expect(discard).toBeVisible();
   await discard.getByRole("button", { name: "继续编辑", exact: true }).click();
   await page
     .getByRole("button", { name: "2. 编辑与预览", exact: true })
     .click();
-  await page.locator(".color-advanced summary").click();
+  if ((await page.locator(".color-advanced").getAttribute("open")) === null)
+    await page.locator(".color-advanced summary").click();
   await expect(page.getByLabel("颜色 R", { exact: true })).toHaveValue("");
   await page.getByLabel("颜色 R", { exact: true }).fill("-0.25");
-  await page.getByRole("button", { name: "保存场景", exact: true }).click();
+  await page.getByRole("button", { name: "保存作品", exact: true }).click();
   await expect(page.getByText("保存场景已完成", { exact: true })).toBeVisible();
   const saved = await call<SceneReply>("get_scene", {
     scene_id: created.record.id,
   });
   expect(saved.scene.values.color).toEqual([-0.25, ...original.slice(1)]);
   await page.getByLabel("颜色 R", { exact: true }).fill("");
-  await page.locator(".code-disclosure > summary").click();
   await page.getByRole("button", { name: "重新载入", exact: true }).click();
   await discard
     .getByRole("button", { name: "切换并舍弃", exact: true })
@@ -328,7 +335,7 @@ test("failed and delayed color conversions preserve candidate and block stale Ap
   await expect(hue).toHaveValue("1");
   await dialog.getByRole("button", { name: "应用颜色" }).click();
   await expect(dialog).not.toBeVisible();
-  await page.getByRole("button", { name: "保存场景", exact: true }).click();
+  await page.getByRole("button", { name: "保存作品", exact: true }).click();
   await expect(page.getByText("保存场景已完成", { exact: true })).toBeVisible();
   expect(
     (await call<SceneReply>("get_scene", { scene_id: created.record.id })).scene
@@ -361,7 +368,8 @@ test("unavailable initial appearance keeps RGB accessible and supports retry", a
   await dialog.getByRole("button", { name: "重试选色换算" }).click();
   await expect(dialog.getByLabel("明度 L", { exact: true })).toBeVisible();
   await dialog.getByRole("button", { name: "取消", exact: true }).click();
-  await page.locator(".color-advanced summary").click();
+  if ((await page.locator(".color-advanced").getAttribute("open")) === null)
+    await page.locator(".color-advanced summary").click();
   await expect(page.getByLabel("颜色 R", { exact: true })).toHaveValue("-0.25");
   await expect(page.getByLabel("颜色 G", { exact: true })).toHaveValue("4");
   await expect(page.getByText("未保存", { exact: true })).not.toBeVisible();

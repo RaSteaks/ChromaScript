@@ -524,10 +524,10 @@ select {
   color: var(--color-muted);
   font-size: 13px;
 }
-/* The left column owns preview and code; the inspector's height never separates them. */
+/* All engines put source beside the picture; canvas controls remain below that picture. */
 .editor-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
   gap: 24px;
   align-items: start;
 }
@@ -1042,6 +1042,8 @@ progress::-moz-progress-bar {
 }
 .frame-strip {
   display: flex;
+  /* Frame-entry tools may wrap below the transport on narrow native previews. */
+  flex-wrap: wrap;
   align-items: center;
   gap: 7px;
   min-height: 49px;
@@ -1798,7 +1800,7 @@ form .modal-actions {
     max-width: 100%;
   }
   .editor-layout {
-    grid-template-columns: minmax(0, 1fr) 280px;
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
     gap: 20px;
   }
   .scene-layout {
@@ -2253,8 +2255,8 @@ input[type="search"]::-webkit-search-cancel-button {
   pointer-events: none;
 }
 .motion-preview-status {
-  min-height: 48px;
-  padding: var(--space-sm) 0;
+  min-height: 24px;
+  padding: var(--space-xs) 0;
   color: var(--color-muted);
   font-size: 12px;
 }
@@ -2323,7 +2325,8 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 .is-expanded .preview-stage,
 .is-expanded .motion-preview-surface {
-  flex: 1 0 180px;
+  /* The picture owns spare height; transport controls always keep intrinsic height. */
+  flex: 1 1 0;
   min-height: 180px;
   max-height: none;
   aspect-ratio: auto;
@@ -2586,21 +2589,65 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 /* Project audio shares form tokens and the app-owned modal's scroll boundary. */
-.project-audio { padding: var(--space-lg); }
-.project-audio .modal-actions { flex-wrap: wrap; padding-inline: 0; }
-.audio-editor-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
-.project-audio section { margin-block: var(--space-lg); }
-.audio-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-md); }
-.audio-asset, .audio-clip { padding-block: var(--space-md); border-bottom: 1px solid var(--color-border); }
-.audio-asset audio { display: block; width: 100%; height: 54px; margin-block: var(--space-sm); }
-.audio-asset .section-heading, .audio-clip .section-heading { flex-wrap: wrap; overflow-wrap: anywhere; }
-.project-audio input[type="file"] { max-width: 100%; }
-@media (max-width: 560px) { .audio-fields { grid-template-columns: 1fr; } }
+.project-audio {
+  padding: var(--space-lg);
+}
+.project-audio .modal-actions {
+  flex-wrap: wrap;
+  padding-inline: 0;
+}
+.audio-editor-fields {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.project-audio section {
+  margin-block: var(--space-lg);
+}
+.audio-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-md);
+}
+.audio-asset,
+.audio-clip {
+  padding-block: var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+}
+.audio-asset audio {
+  display: block;
+  width: 100%;
+  height: 54px;
+  margin-block: var(--space-sm);
+}
+.audio-asset .section-heading,
+.audio-clip .section-heading {
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
+}
+.project-audio input[type="file"] {
+  max-width: 100%;
+}
+@media (max-width: 560px) {
+  .audio-fields {
+    grid-template-columns: 1fr;
+  }
+}
 
 /* Storage estimates reuse specification rows and reserve feedback space while loading. */
-.motion-storage-estimate { border-top: 1px solid var(--color-border); padding-top: var(--space-lg); min-height: 220px; }
-.motion-storage-estimate .section-heading { flex-wrap: wrap; gap: var(--space-sm); }
-.motion-storage-estimate dd { overflow-wrap: anywhere; }
+.motion-storage-estimate {
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-lg);
+  min-height: 220px;
+}
+.motion-storage-estimate .section-heading {
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+.motion-storage-estimate dd {
+  overflow-wrap: anywhere;
+}
 
 /* Preview sound reuses control tokens and wraps without moving the media surface. */
 .preview-audio-controls {
@@ -2610,10 +2657,237 @@ input[type="search"]::-webkit-search-cancel-button {
   gap: var(--space-sm);
   min-height: 40px;
 }
-.preview-audio-controls .technical-note { margin: 0; }
+.preview-audio-controls .technical-note {
+  margin: 0;
+}
 
 /* One monitor fader keeps a fixed percentage column and remains usable on narrow previews. */
-.preview-audio-volume { display: flex; align-items: center; gap: var(--space-sm); width: 300px; max-width: 100%; min-height: 40px; }
-.preview-audio-volume label { display: flex; align-items: center; gap: var(--space-sm); white-space: nowrap; color: var(--color-muted); }
-.preview-audio-volume input[type="range"] { flex: 1; min-width: 60px; width: 0; accent-color: var(--color-primary); }
-.preview-audio-percentage { flex: 0 0 4ch; text-align: right; }
+.preview-audio-volume {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 300px;
+  max-width: 100%;
+  min-height: 40px;
+}
+.preview-audio-volume label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  white-space: nowrap;
+  color: var(--color-muted);
+}
+.preview-audio-volume input[type="range"] {
+  flex: 1;
+  min-width: 60px;
+  width: 0;
+  accent-color: var(--color-primary);
+}
+.preview-audio-percentage {
+  flex: 0 0 4ch;
+  text-align: right;
+}
+
+/* Shared workspace chrome is independent of engine-specific render adapters. */
+[hidden] {
+  display: none !important;
+}
+.workspace-library {
+  margin-bottom: var(--space-lg);
+  padding: var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+}
+.workspace-library-controls {
+  display: grid;
+  grid-template-columns:
+    minmax(140px, 1fr) auto minmax(180px, 1.5fr)
+    auto minmax(180px, 1fr) auto;
+  align-items: end;
+  gap: var(--space-md);
+}
+.workspace-library-controls .field {
+  min-width: 0;
+  margin: 0;
+}
+.library-status {
+  min-height: 24px;
+  margin-top: var(--space-sm);
+  color: var(--color-muted);
+  font-size: 12px;
+}
+/* Never use a percentage flex-basis here: in the expanded column it would
+   consume the viewer height and squeeze the picture down to its minimum. */
+.preview-timeline {
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "actions tools" "seek seek";
+  align-items: center;
+  gap: var(--space-xs) var(--space-sm);
+}
+.preview-timeline-actions {
+  grid-area: actions;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  align-items: center;
+}
+.preview-timeline-actions .mono {
+  white-space: nowrap;
+}
+.preview-timeline input[type="range"] {
+  grid-area: seek;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+}
+.preview-timeline-tools {
+  grid-area: tools;
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+.preview-timeline-tools .field {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-xs);
+  margin: 0;
+}
+.preview-timeline-tools .field label {
+  margin: 0;
+  white-space: nowrap;
+}
+.preview-timeline-tools select {
+  width: auto;
+  max-width: 140px;
+}
+.frame-strip .preview-timeline {
+  /* This parent is a horizontal row; a bounded basis leaves room for frame entry. */
+  flex: 1 1 260px;
+  width: auto;
+}
+.preview-panel .preview-notes {
+  margin: var(--space-xs) 0 0;
+}
+.is-expanded .preview-timeline {
+  grid-template-columns: auto minmax(120px, 1fr) auto;
+  grid-template-areas: "actions seek tools";
+  gap: var(--space-md);
+}
+/* The volume row is still keyboard-operable, but does not claim extra blank space. */
+.is-expanded .preview-audio-controls,
+.is-expanded .preview-audio-volume {
+  min-height: 32px;
+}
+@media (max-width: 560px) {
+  .preview-timeline,
+  .is-expanded .preview-timeline {
+    grid-template-columns: minmax(80px, 1fr) auto;
+    grid-template-areas: "actions actions" "seek tools";
+    gap: var(--space-xs) var(--space-sm);
+  }
+  .preview-timeline-tools .field label {
+    /* Keep the native select named without spending another visible row. */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+.canvas-column > .parameter-panel {
+  margin-top: var(--space-lg);
+}
+.editor-layout .code-section {
+  margin-top: 0;
+}
+@media (max-width: 900px) {
+  .workspace-library-controls {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+}
+@media (max-width: 900px) {
+  .editor-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 560px) {
+  .workspace-library-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+/* The shared library uses vertical space; keep delivery actions in normal flow
+   on short windows so keyboard-focused encoder fields cannot sit behind them. */
+@media (max-height: 759px) {
+  .delivery-review {
+    position: static;
+  }
+}
+
+/* Animation delivery shares one natural document scroller. Desktop columns pair
+   format choices with the destination and its budget, without duplicating fields. */
+.motion-export {
+  margin-top: 0;
+}
+.motion-export-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-lg);
+  align-items: start;
+  margin-top: var(--space-md);
+}
+.motion-export-settings,
+.motion-export-destination {
+  min-width: 0;
+}
+.motion-export-settings {
+  padding-right: var(--space-lg);
+  border-right: 1px solid var(--color-border);
+}
+.motion-export-settings > .frame-settings {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.motion-export-destination {
+  display: grid;
+  gap: var(--space-lg);
+}
+.motion-export-destination > .delivery-destination,
+.motion-export-destination > .motion-storage-estimate {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.motion-export-destination .delivery-destination .section-heading {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+.motion-export-layout .field:last-child {
+  margin-bottom: 0;
+}
+.motion-export .motion-export-actions {
+  margin-top: var(--space-lg);
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--color-border);
+}
+@media (max-width: 900px) {
+  .motion-export-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .motion-export-settings {
+    padding-right: 0;
+    border-right: 0;
+  }
+  .motion-export-destination {
+    padding-top: var(--space-md);
+    border-top: 1px solid var(--color-border);
+  }
+}

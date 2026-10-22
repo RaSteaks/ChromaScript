@@ -1,3 +1,4 @@
+import { openDelivery, openPreview } from "./workspace-navigation";
 import { expect, test } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 
@@ -23,11 +24,12 @@ test("ACEScct intermediate sampling, stale drafts and submission; accessibility"
     spec: { ...blank.scene, width: 64, height: 32, frames: 24 },
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "动画代码", exact: true }).click();
-  await page.getByLabel("动画项目", { exact: true }).selectOption(project.id);
+  await page.getByRole("button", { name: "工作区", exact: true }).click();
+  await page.getByLabel("当前项目", { exact: true }).selectOption(project.id);
   await page
-    .getByLabel("已保存的动画", { exact: true })
-    .selectOption(saved.record.id);
+    .getByLabel("当前作品", { exact: true })
+    .selectOption(`motion:${saved.record.id}`);
+  await openDelivery(page);
   await page.getByLabel("导出模式", { exact: true }).selectOption("video-only");
   const video = page.getByLabel("视频输出", { exact: true });
   await expect(
@@ -137,13 +139,19 @@ test("ACEScct intermediate sampling, stale drafts and submission; accessibility"
   await panel.getByRole("button", { name: "采样估算", exact: true }).click();
   await expect(panel.getByRole("button", { name: "取消采样" })).toBeVisible();
   // Saving a name refreshes capability discovery, but does not change pixels.
+  await openPreview(page);
   await page.getByLabel("动画名称", { exact: true }).fill("名称保存保留采样");
-  const refreshed = page.waitForResponse("**/api/operations/get_motion_delivery_options");
-  await page.getByRole("button", { name: "保存动画", exact: true }).click();
+  const refreshed = page.waitForResponse(
+    "**/api/operations/get_motion_delivery_options",
+  );
+  await page.getByRole("button", { name: "保存作品", exact: true }).click();
   await refreshed;
+  await openDelivery(page);
   await expect(panel.getByRole("button", { name: "取消采样" })).toBeVisible();
   expect(cancelled).not.toContain("sample-3");
+  await openPreview(page);
   await page.getByLabel("总帧数", { exact: true }).fill("25");
+  await openDelivery(page);
   await expect.poll(() => cancelled.includes("sample-3")).toBe(true);
   await expect(panel).toContainText("旧采样已失效");
   await expect(page.getByLabel("总帧数", { exact: true })).toHaveValue("25");
