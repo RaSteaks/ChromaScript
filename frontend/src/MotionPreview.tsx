@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Play, RefreshCw } from "lucide-react";
 import { PreviewTimeline } from "./PreviewTimeline";
 import { PreviewAudio, type PreviewAudioHandle } from "./PreviewAudio";
@@ -25,11 +25,13 @@ type Picture = {
   frames: number;
   ready: boolean;
   hdrPreview: boolean;
+  sceneId: string;
+  retry: number;
   hdr?: { mode: "hdr" | "sdr" | "buffering"; message: string };
 };
 
 /** A candidate proves it can mount before replacing the last working picture. */
-export function MotionPreview({
+export const MotionPreview = memo(function MotionPreview({
   spec,
   sceneId,
   projectId,
@@ -63,7 +65,8 @@ export function MotionPreview({
   const captureSequence = useRef(0);
   const latestFrame = useRef(frame);
   latestFrame.current = frame;
-  const recipe = spec ? JSON.stringify(spec) : "";
+  // A frame acknowledgement must not serialize up to 2 MB of unchanged source.
+  const recipe = useMemo(() => (spec ? JSON.stringify(spec) : ""), [spec]);
   const accepted = pictures.find((picture) => picture.ready);
   const command = useCallback((type: string, value?: number) => {
     const picture = current.current.find((item) => item.ready);
@@ -281,6 +284,24 @@ export function MotionPreview({
       setPending(false);
       return;
     }
+    // Returning to a retained preview (or ending IME without changes) reuses its
+    // mounted GPU/media state. Explicit retry and different works still compile.
+    if (
+      current.current.some(
+        (picture) =>
+          picture.ready &&
+          picture.recipe === recipe &&
+          picture.sceneId === sceneId &&
+          picture.hdrPreview === hdrPreview &&
+          picture.retry === retry,
+      )
+    ) {
+      setPending(false);
+      // Failed candidates no longer describe this restored draft. A mounted
+      // picture's own runtime error still needs a successful frame to recover.
+      setError((old) => (old?.channel ? old : null));
+      return;
+    }
     let cancelled = false;
     const abort = new AbortController();
     const timer = window.setTimeout(async () => {
@@ -305,6 +326,8 @@ export function MotionPreview({
               frames: JSON.parse(recipe).frames,
               ready: false,
               hdrPreview,
+              sceneId,
+              retry,
             },
           ]);
       } catch (cause) {
@@ -405,7 +428,7 @@ export function MotionPreview({
           {
             channel: data.channel,
             type: "seek",
-            value: Math.min(frame, picture.frames - 1),
+            value: Math.min(latestFrame.current, picture.frames - 1),
           },
           "*",
         );
@@ -431,7 +454,7 @@ export function MotionPreview({
     };
     window.addEventListener("message", message);
     return () => window.removeEventListener("message", message);
-  }, [recipe, frame, hdrPreview]);
+  }, [recipe, hdrPreview]);
 
   useEffect(() => {
     const pauseHidden = () => {
@@ -446,9 +469,10 @@ export function MotionPreview({
     !!accepted &&
     (accepted.recipe !== recipe || accepted.hdrPreview !== hdrPreview);
   // Retained pictures keep their own rational rate when a replacement draft fails.
-  const acceptedSpec: MotionSpec | null = accepted
-    ? JSON.parse(accepted.recipe)
-    : null;
+  const acceptedSpec = useMemo<MotionSpec | null>(
+    () => (acceptedRecipe ? JSON.parse(acceptedRecipe) : null),
+    [acceptedRecipe],
+  );
   const rate = acceptedSpec
     ? acceptedSpec.fps.numerator / acceptedSpec.fps.denominator
     : 1;
@@ -586,4 +610,4 @@ export function MotionPreview({
       </details>
     </PreviewPanel>
   );
-}
+});

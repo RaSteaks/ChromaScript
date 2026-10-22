@@ -56,6 +56,14 @@ test("first-frame readiness never enables audio before native HDR playback", (t)
     currentTime = 0;
     readyState = 0;
     paused = true;
+    ranges = [];
+    get buffered() {
+      return {
+        length: this.ranges.length,
+        start: (i) => this.ranges[i][0],
+        end: (i) => this.ranges[i][1],
+      };
+    }
     setAttribute() {}
     removeAttribute() {}
     remove() {}
@@ -86,6 +94,7 @@ test("first-frame readiness never enables audio before native HDR playback", (t)
   t.mock.method(URL, "revokeObjectURL", () => {});
   let playing = false;
   let status;
+  const acknowledged = [];
   const controller = createHDRPreview({
     mount: { append() {} },
     width: 1280,
@@ -98,7 +107,7 @@ test("first-frame readiness never enables audio before native HDR playback", (t)
     },
     capture: async () => [],
     encodeChunk: async () => ({}),
-    onFrame() {},
+    onFrame: (frame) => acknowledged.push(frame),
     onFallback() {},
     onPlaying: (value) => {
       playing = value;
@@ -147,6 +156,28 @@ test("first-frame readiness never enables audio before native HDR playback", (t)
       "a paused poster should still be shown as ready",
     );
     assert.equal(audioEnabled(), false);
+
+    // A buffered seek must preserve the media source and avoid another encode.
+    const source = video.src;
+    video.ranges = [[0, 12]];
+    controller.seek(240);
+    assert.equal(video.currentTime, 1);
+    assert.equal(video.src, source);
+    assert.equal(acknowledged.length, 0, "do not acknowledge before decoding");
+    video.dispatchEvent(new Event("seeked"));
+    assert.equal(acknowledged.at(-1), 240);
+    assert.equal(status.mode, "hdr");
+
+    // Select the nearest copy after a loop, then reject an evicted frame.
+    video.currentTime = 9;
+    controller.seek(200);
+    assert.ok(Math.abs(video.currentTime - (10 + 20 / 60)) < 1e-9);
+    video.dispatchEvent(new Event("seeked"));
+    assert.equal(acknowledged.at(-1), 200);
+    video.ranges = [[4, 7]];
+    controller.seek(200);
+    assert.equal(video.readyState, 0, "evicted target rebuilds the buffer");
+    assert.equal(status.mode, "buffering");
   } finally {
     controller.dispose();
     for (const [key, descriptor] of originals) {

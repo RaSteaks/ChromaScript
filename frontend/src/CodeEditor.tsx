@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { javascript } from "@codemirror/lang-javascript";
 import { EditorView } from "@codemirror/view";
@@ -51,7 +51,8 @@ const extensions = [
   ),
 ];
 
-export function CodeEditor({
+// Playback and queue updates leave the source editor untouched.
+export const CodeEditor = memo(function CodeEditor({
   value,
   onChange,
   onComposing,
@@ -106,4 +107,4 @@ export function CodeEditor({
       />
     </div>
   );
-}
+});

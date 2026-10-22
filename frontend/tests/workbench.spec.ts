@@ -686,16 +686,19 @@ test("short desktop layouts keep preview and keyboard form controls reachable", 
   await page.keyboard.press("Tab");
   const interval = page.getByLabel("关键帧间隔（秒）", { exact: true });
   await expect(interval).toBeFocused();
-  // A sticky review bar must never cover the focused field or its hit target.
-  expect(
-    await interval.evaluate((node) => {
-      const r = node.getBoundingClientRect();
-      return (
-        document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) ===
-        node
-      );
-    }),
-  ).toBe(true);
+  // WebKit finishes native focus scrolling after focus is assigned. Wait for
+  // the hit target itself, still failing if an overlay keeps the field covered.
+  await expect
+    .poll(() =>
+      interval.evaluate((node) => {
+        const r = node.getBoundingClientRect();
+        return (
+          document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) ===
+          node
+        );
+      }),
+    )
+    .toBe(true);
   for (const name of ["scene", "preview", "delivery", "jobs"] as const) {
     await stage(page, name);
     expect(

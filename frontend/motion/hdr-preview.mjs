@@ -287,6 +287,9 @@ export function createHDRPreview({
     reportFrame(metadata.mediaTime);
     video.requestVideoFrameCallback(presented);
   };
+  // Paused seeks also acknowledge the decoded frame on engines that do not
+  // deliver a video-frame callback until playback resumes.
+  video.addEventListener("seeked", () => reportFrame(video.currentTime));
   if (video.requestVideoFrameCallback)
     video.requestVideoFrameCallback(presented);
   else {
@@ -326,6 +329,47 @@ export function createHDRPreview({
     if (video.error && !disposed) fallback("HDR 视频播放失败");
   });
   const seek = (frame) => {
+    // Reuse decoded segments when the exact requested frame is still buffered.
+    // A looping timeline may contain multiple copies; choose the nearest one.
+    const period = config.frames / rate;
+    const first = ((frame - origin + config.frames) % config.frames) / rate;
+    let target = null;
+    if (media && video.readyState >= 2) {
+      for (let i = 0; i < video.buffered.length; i++) {
+        const low = Math.max(
+          0,
+          Math.ceil((video.buffered.start(i) - first - 1e-6) / period),
+        );
+        const high = Math.floor(
+          (video.buffered.end(i) - 1 / rate - first + 1e-6) / period,
+        );
+        if (low > high) continue;
+        const cycle = Math.max(
+          low,
+          Math.min(high, Math.round((video.currentTime - first) / period)),
+        );
+        const candidate = first + cycle * period;
+        if (
+          target === null ||
+          Math.abs(candidate - video.currentTime) <
+            Math.abs(target - video.currentTime)
+        )
+          target = candidate;
+      }
+    }
+    if (target !== null) {
+      video.currentTime = target;
+      rebuffering = false;
+      onPlaying(wanted);
+      status(
+        wanted ? "buffering" : "hdr",
+        wanted
+          ? "正在定位 HDR 视频…"
+          : `HDR · PQ · ${width} × ${height} · ${rate.toFixed(2)} fps`,
+      );
+      if (wanted) void startPlayback();
+      return;
+    }
     clear();
     origin = frame;
     rendered = 0;

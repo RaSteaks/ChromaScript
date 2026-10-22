@@ -172,11 +172,12 @@ export function WorkspaceLibrary({
           新建作品
         </Button>
       </div>
+      {/* Reserve feedback space without repeating the workflow on every screen. */}
       <div className="library-status" role="status">
         {loading
           ? "正在读取作品…"
           : projectId
-            ? "选择作品后，在同一个工作区编辑、预览与导出。"
+            ? ""
             : "创建项目后，选择创作类型开始。"}
       </div>
       <Notice text={error} error />

@@ -119,10 +119,11 @@ test("fixed ACEScg generation and sRGB preview remain independent of delivery", 
 }) => {
   const { image } = await scene(page);
   const original = await image.getAttribute("src");
-  const workflow = page.getByRole("region", {
-    name: "色彩工作流程",
-    exact: true,
-  });
+  // Technical guidance stays accessible by keyboard, but is collapsed by default.
+  const workflow = page.locator('details[aria-label="色彩工作流程"]');
+  await expect(workflow).not.toHaveAttribute("open");
+  await workflow.locator("summary").press("Enter");
+  await expect(workflow).toHaveAttribute("open", "");
   await expect(workflow).toContainText("ACEScg · AP1 · 线性（固定）");
   await expect(workflow).toContainText("sRGB · ACES 2.0 显示变换");
   await expect(workflow.locator("select, input")).toHaveCount(0);
@@ -443,7 +444,7 @@ test("hidden documents stop live work and return with playback paused", async ({
   await page.getByRole("button", { name: "播放实时预览", exact: true }).click();
   await expect.poll(() => count).toBeGreaterThanOrEqual(2);
   // Reproduce the browser visibility lifecycle deterministically in headless
-  // Chrome, where opening another page does not consistently background a tab.
+  // WebKit, where opening another page does not consistently background a tab.
   await page.evaluate(() => {
     Object.defineProperty(document, "hidden", {
       configurable: true,

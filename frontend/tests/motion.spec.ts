@@ -68,6 +68,85 @@ async function editCode(page: Page, code: string) {
   await editor.fill(code);
 }
 
+test("unchanged animation resumes its retained preview without recompiling", async ({
+  page,
+}) => {
+  await setup(page);
+  const picture = page.locator("iframe[title='动画画面']");
+  const timeline = page.getByLabel("动画时间线", { exact: true });
+  await timeline.focus();
+  for (let i = 0; i < 5; i++) {
+    await timeline.press("ArrowRight");
+    await expect(timeline).toHaveValue(String(i + 1));
+  }
+  await expect(timeline).toHaveValue("5");
+  await picture.evaluate((node) => node.setAttribute("data-retained", "yes"));
+  let compilations = 0;
+  page.on("request", (request) => {
+    if (request.url().endsWith("/compile_motion_preview")) compilations++;
+  });
+  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  await page
+    .getByRole("button", { name: "2. 编辑与预览", exact: true })
+    .click();
+  // Wait beyond the compile debounce: no new request, iframe or playback clock.
+  await page.waitForTimeout(700);
+  await expect(picture).toHaveAttribute("data-retained", "yes");
+  await expect(timeline).toHaveValue("5");
+  await expect(
+    page.getByRole("button", { name: "播放动画", exact: true }),
+  ).toHaveAttribute("aria-pressed", "false");
+  expect(compilations).toBe(0);
+  await page.getByRole("button", { name: "重新编译动画", exact: true }).click();
+  await expect.poll(() => compilations).toBe(1);
+  await expect(picture).not.toHaveAttribute("data-retained");
+});
+
+test("restoring the accepted animation clears failed-draft errors without recompiling", async ({
+  page,
+}, testInfo) => {
+  const { saved } = await setup(page);
+  const preview = page.getByRole("region", { name: "动画实时预览" });
+  const picture = page.locator("iframe[title='动画画面']");
+  const timeline = page.getByLabel("动画时间线", { exact: true });
+  await timeline.fill("5");
+  await expect(timeline).toHaveValue("5");
+  await picture.evaluate((node) => node.setAttribute("data-retained", "yes"));
+  let compilations = 0;
+  page.on("request", (request) => {
+    if (request.url().endsWith("/compile_motion_preview")) compilations++;
+  });
+  // Both compiler and candidate-startup errors belong to the abandoned draft.
+  for (const [code, message] of [
+    ["export default function {", "Expected"],
+    [
+      "export default function Broken() { throw new Error('candidate-check'); }",
+      "candidate-check",
+    ],
+  ]) {
+    await editCode(page, code);
+    await expect(preview.getByRole("alert")).toContainText(message);
+    const attempts = compilations;
+    await editCode(page, saved.scene.code);
+    await expect(preview.getByRole("alert")).not.toBeVisible();
+    await expect(preview.getByRole("status")).not.toContainText("未能预览");
+    await expect(
+      page.getByRole("button", { name: "保存作品", exact: true }),
+    ).toBeDisabled();
+    // Wait past the debounce to reject a recovery that silently recompiles A.
+    await page.waitForTimeout(700);
+    expect(compilations).toBe(attempts);
+    await expect(picture).toHaveAttribute("data-retained", "yes");
+    await expect(timeline).toHaveValue("5");
+  }
+  const screenshot = testInfo.outputPath("restored-preview.png");
+  await page.screenshot({ path: screenshot, fullPage: true });
+  await testInfo.attach("restored-preview", {
+    path: screenshot,
+    contentType: "image/png",
+  });
+});
+
 for (const suspendedAudio of [false, true]) {
   test(`silent playback advances, loops and pauses (suspended audio: ${suspendedAudio})`, async ({
     page,
@@ -136,6 +215,15 @@ for (const width of [1440, 390]) {
     );
     await expect(body).toHaveAttribute("data-frame", "0");
     await expect(timeline).toHaveValue("0");
+    await expect(preview.getByRole("status")).toContainText("可拖动时间线重试");
+
+    // Reusing the same mounted preview must retain its own runtime error until
+    // a successful frame acknowledges recovery, even after leaving the stage.
+    await openDelivery(page);
+    await openPreview(page);
+    await expect(preview.getByRole("alert")).toContainText(
+      "HDR GPU 渲染失败。",
+    );
     await expect(preview.getByRole("status")).toContainText("可拖动时间线重试");
 
     // Exercise a pointer drag, not just programmatic range input, after failure.

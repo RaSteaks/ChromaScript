@@ -1,20 +1,174 @@
 # ChromaScript
 
-本地运行的 ACES 2.0 程序化视频工作台，通过网页、MCP 或 CLI 创建画面、预览动画并导出视频与图像序列。
+**用代码创作画面，在本机完成预览、色彩管理与交付。**
 
-## 功能介绍
+ACES 2.0 程序化视频工作台 · 网页 / MCP / CLI · 本地渲染
 
-- **场景创作**：从模板开始，用 JSON 和 WGSL 定义画面，调整参数、颜色与关键帧。
-- **HDR / SDR 动画代码**：同时提供浮点 Three.js、SDR React 文字和 ThreeCanvas 模板；统一预览，按源类型导出 HDR/SDR 视频或浮点母版。
-- **实时预览**：播放、暂停和逐帧查看动画，检查原始像素值。
-- **大屏查看**：场景与动画预览均可放大至网页视口，保留播放位置和监听状态；点击“退出大屏”或按 Esc 返回。实时 WGSL 与浮点动画采用最高 1280×720（竖屏 720×1280）的预览尺寸，小画面不放大渲染，交付仍使用原规格。
-- **色彩管理**：WGSL 生成与母版处理使用 float32 线性 ACEScg（AP1）；Three.js 动画可原生使用线性 Rec.709、线性 BT.2020、ACEScg/AP1 或 ACES2065-1/AP0，再线性转换为 ACEScg，网页自动选择低分辨率 HDR 视频或 sRGB 预览，输出色彩空间在交付时选择；统一通过 OCIO / ACES 2.0 转换，原始浮点数据与显示预览分别保留。
-- **多格式交付**：导出 EXR、PNG、TIFF、DPX 图像序列，以及 H.264、HEVC、ProRes、DNxHR 等视频；可用组合由本机能力决定。
-- **项目音频**：导入本地音频，或用代码生成音调、节奏与音效；设置音轨裁切、起点和音量，随视频混音或作为独立 WAV 交付。
-- **任务管理**：查看渲染进度、下载成果，恢复符合条件的中断任务。
-- **模型调用**：所有产品操作均提供 MCP 工具和 CLI 调用。场景示例见 [examples](examples/README.md)。
+[快速开始](#快速开始) · [创作流程](#创作流程) · [预览与性能](#预览与性能) · [色彩与交付](#色彩与交付) · [音频](#项目音频) · [MCP 接入](#mcp-接入) · [常见问题](#常见问题)
 
-## 音频制作与 MCP
+| 创作方式 | 适合内容 | 输出路径 |
+| --- | --- | --- |
+| **WGSL** | 程序图形、色彩实验、参数化动画 | 线性 ACEScg → 图像序列 / 视频 |
+| **Three.js 浮点** | HDR 图形、光效、多章节动画 | RGBA32F → ACEScg EXR / SDR、HDR 视频 |
+| **React SDR** | 文字、DOM、SVG、ThreeCanvas | sRGB 画面 → SDR 视频 |
+
+共享源码编辑、逐帧时间线、大屏预览、项目音轨和后台任务。所有产品操作均有等效 MCP 工具与 CLI 调用；参考 [场景示例](examples/README.md) 与 [多文件动画](examples/motion-chapters/README.md)。
+
+## 快速开始
+
+需要 macOS、Python 3.12、Node.js 22.12+（含 npm），以及包含 `libx264`、`libx265`、`prores_ks`、`dnxhd` 编码器和 `zscale` 滤镜的 FFmpeg。确保 `ffmpeg` 和 `ffprobe` 可在终端调用。
+
+动画代码的本地导出还需要已安装的 Google Chrome 或 Chromium；自定义路径可通过 `CHROMASCRIPT_CHROME` 指定。运行时不会下载浏览器或访问云端渲染服务。
+
+下载仓库后，在终端执行：
+
+```sh
+# 将占位路径替换为本机仓库的实际路径。
+cd /absolute/path/ChromaScript
+./install.sh
+./start.sh
+```
+
+安装脚本会检查系统依赖、创建或复用 Python 3.12 虚拟环境、按锁文件安装依赖并构建网页；首次安装需要联网下载依赖。项目更新后重新运行 `./install.sh`。脚本不会自动安装系统依赖。
+
+日常只需运行 `./start.sh`，打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)，创建项目并新建空白场景（示例模板可选）。启动不联网安装依赖，数据默认保存在仓库下的 `workspace`，按 `Ctrl+C` 停止服务。
+
+## 创作流程
+
+1. **选择作品** — 创建项目，选择已有作品或新建 WGSL、Three.js、React 作品。示例模板可选。
+2. **编辑与预览** — 修改源码、参数和画面规格，直接预览草稿；播放、逐帧定位或使用“大屏查看”。
+3. **设置交付** — 保存作品，选择格式、色彩、采样与导出目录。浮点动画默认交付 32-bit ACEScg EXR 母版、2×2 空间采样，也可选择仅视频。
+4. **任务与成果** — 查看进度、下载文件、打开导出文件夹，或恢复满足条件的中断任务。
+
+切换步骤保留草稿；外部更新与本地修改冲突时保留编辑内容。项目音轨独立保存，交付冻结提交时的源码、音轨、色彩配置与有理数帧率。
+
+## 预览与性能
+
+| 路径 | 行为 |
+| --- | --- |
+| **原生 WGSL 渲染** | 最多四个分块批量提交和读回 GPU；传输缓冲上限 16 MiB，保持原有 float32、Alpha 和采样算法。 |
+| **实时 WGSL 预览** | 最高 1280×720，竖屏 720×1280；单次采样。按最高 24 次/秒调度，耗时计入刷新间隔，同一时刻只有一个请求；慢帧会跳过显示位置。 |
+| **动画交互** | 播放时复用源码序列化结果和消息监听；返回未改动的动画直接复用已挂载预览。隐藏视图暂停播放，显式重新编译仍可重试。 |
+| **HDR 视频预览** | 在兼容设备上使用项目原始帧率的 PQ / HEVC 10-bit 分段视频。跳转优先复用缓冲中的帧，超出缓冲时重新生成。 |
+
+预览刷新上限不代表保证实时帧率。渲染尺寸、交付帧率与采样设置保持独立；预览不会降低母版精度。自动 HDR 需浏览器与显示设备支持实际 HEVC/PQ 解码，否则回退 sRGB；也可手动选择 sRGB SDR。HDR 启动需要缓冲，自动化检查不证明实体屏幕的亮度表现。
+
+## 色彩与交付
+
+“动画代码”使用 `Three.js RGBA32F → 浮点读取 → OCIO → ACEScg EXR`，母版不烘焙显示变换。SDR 预览使用 ACES 2.0 sRGB 变换；HDR 预览与视频使用 ACES 1000-nit PQ/HLG 输出变换，可选 HEVC Main10 或 Apple ProRes 422 HQ（MOV、10-bit 4:2:2）。GPU 会实际测试负值、超过 1 的高光和 float32 读回；无法满足时明确失败。同时支持 `remotion-sdr-v1`：React/DOM/SVG/ThreeCanvas → sRGB 截图 → SDR 视频。历史未标记引擎的动画按 SDR 打开，源码与修订记录不变。
+
+`WGSL 代码 → 线性 ACEScg 生成与处理 → ACES 变换 → sRGB 网页预览 / 用户选择的交付空间`
+
+`shade(ctx)` 返回非预乘的线性 ACEScg RGBA：RGB 可为负值或大于 1，Alpha 为 0–1，始终不参与色彩转换。代码中的 RGB 常量按 ACEScg 解释，不需要另选输入色彩空间或在代码中烘焙显示变换。
+
+颜色参数的 `color_space` 仅声明参数的存储编码（ACEScg 或 sRGB）；参数进入 `ctx.params` 前统一转换为线性 ACEScg，不会改变整个场景的生成空间。WGSL 网页预览固定使用 ACES 2.0 sRGB SDR 显示变换，不随交付设置改变，也不替代 HDR 校准监看。
+
+在交付面板分别选择输出色彩空间与 Gamma。显示交付应用一次 ACES 输出变换；ACEScg、ACES2065-1 或 ACEScct 场景编码仅做色彩空间转换，不烘焙显示效果。可用组合仍受封装、编码器与位深限制。
+
+<details>
+<summary><strong>交付格式、磁盘预算与恢复规则</strong></summary>
+
+### ACEScct 12-bit 调色中间片
+
+浮点动画新增 `output.video=prores-4444-acescct`。选择“仅视频”可直接逐帧输出 MOV，不保留 EXR；也可与 EXR 同时交付。原生 `prores_videotoolbox` profile 4 使用 P416 高精度输入并验证相邻 12-bit Y/Cb/Cr 码值；不提供 XQ，不回退为 10-bit。能力不足时显示原因。
+
+线性黑底合成后只进行 ACEScg → ACEScct 编码，不烘焙显示变换，不带 Alpha。整数存储前拒绝超出 0–1 的 Log 码值。AP1/D60 与 ACEScct 通过 MOV 声明和 `color-encoding.json` 记录；标准 colr 为 2/2/1，BT.709 仅表示 YCbCr 打包矩阵。Resolve 请手动指定 ACEScct 输入和 Video 数据范围。这是制作中间片，不是标准 ACES2065-1 归档容器；报告不会把声明验证说成自动颜色识别或 Resolve 导入认证。
+
+磁盘面板区分“预计成品体积”和“预计磁盘峰值占用”，不增加 20%、30% 或 EXR 10% 余量。快速规格估算不创建文件；“采样估算”按当前完整草稿、正式尺寸和采样倍率处理最多 12 帧，使用真实 ZIP 文件和 ProRes 包的平均大小外推，不使用最大帧放大。未采样的编码部分及未知开销明确注明；估算不是体积上限。临时原始帧只保留一帧，发布重命名不计第二份视频。
+
+CLI/MCP 与网页共享 `start_motion_render_estimate`、`get_motion_render_estimate`、`cancel_motion_render_estimate`。提交可传 `storage_estimate_id`，采用匹配源码、颜色、时间、输出和运行环境的采样结果验盘。内容改变即失效，名称改变不失效；刷新只重读磁盘和音轨。采样可取消、不保存草稿、不创建正式渲染任务，超时或中断后清理临时样片；正式任务仍保留自己的恢复规则。
+
+### 调色母版与完整色彩标签
+
+动画的“视频输出”支持 **Apple ProRes 422 HQ · MOV**：浮点源可选 sRGB、PQ 或 HLG，SDR 网页源可选 sRGB。支持仅视频及 EXR 母版附带视频；视频合成到黑底，不携带 Alpha。需要本机 `prores_ks` 编码器，导出后检查实际 codec、HQ profile、位深、采样、帧率与原生色彩标签。SDR 网页截图仍为 8-bit 源，不因 ProRes 编码而增加源精度。CLI/MCP 的 `submit_motion_render` 使用 `output.video=prores-hq-srgb|prores-hq-pq|prores-hq-hlg`，通过 `get_motion_delivery_options` 查询当前源的可用选项。ProRes 视频空间按 `prores_ks` HQ 的压缩宏块目标码率计算，按帧数累积，不增加百分比余量；不再用未压缩帧体积预算压缩视频。3840×2160、60 fps、9 分 20 秒的仅视频规格估算约 121 GiB，实际文件随画面复杂度变化；不会为调整预算而降低编码质量。
+
+“动画导出”面板按所选导出模式提供 **渲染预估磁盘空间**，随当前草稿尺寸、帧数、Half/Float 精度、超采样、视频输出和导出目录更新。分别显示 EXR 未压缩体积、导出盘所需空间预算、磁盘可用空间，以及中间数据、视频、音轨和工作区元数据明细。ZIP 实际体积取决于画面；预估不预留空间、不扣除已有缓存，提交时使用同一套预算重新检查。修改音轨或释放磁盘后可点击“刷新预估”。
+
+MCP 使用 `chromascript.estimate_motion_render`，CLI 使用同名操作：
+
+```sh
+.venv/bin/chromascript call estimate_motion_render --arguments '{"settings":{"width":3840,"height":2160,"frames":300,"fps":{"numerator":60,"denominator":1}},"output":{"master_bit_depth":32,"video":"none","render_scale":2}}'
+```
+
+可传 `export_directory` 检查指定磁盘，传 `project_id` 计入项目当前音轨；估算不会创建目录或渲染任务。SDR 源显示中间帧和视频预算，不标作浮点母版。
+
+
+新建动画默认使用浮点引擎，默认导出 ACEScg 32-bit Float / ZIP EXR 母版、不额外编码视频。`submit_motion_render.output.render_scale` 可选 1、2、4，默认 2，即每个输出像素使用 2×2 空间采样。浮点路径在线性预乘 RGB/Alpha 中平均后解除预乘、转为 ACEScg；SDR 截图在线性 sRGB 光量中合成和缩小，不增加源位深。预览仍为低分辨率单次采样；本项不添加运动模糊。
+
+动画尺寸、总帧数和帧率分子/分母可自定义，整数范围为 1–2147483647，不再限定 4096 像素、36000 帧或 1–240 fps。实际渲染受 GPU 纹理/视口、可用内存、磁盘和编码器约束；不支持时明确失败，不缩放成其他交付规格。有理数帧率始终原样传递并在编码后核对。
+
+浮点和 SDR 动画均直接在 `export_directory` 所选磁盘的任务临时目录生成中间帧、编码文件与最终成果，验证后在同一磁盘发布。本机工作区保留任务数据库与日志；浏览器仍使用系统临时配置。支持外部硬盘，断开或替换导出卷时失败，不回退写入本机。SDR 和仅视频模式重试时从头渲染；保留母版模式重试复用已验证 EXR。
+
+自定义 shader 保持可用。报告分别记录 `float_pipeline_verified` 与 `source_color_contract`。浮点验证不自动证明任意源码的颜色语义；`scene_linear_master` 表示是否交付场景线性母版；仅视频模式为 false，浮点源仍独立验证。人工审核后通过界面“记录源码审核”或共享 `record_motion_color_review(scene_id, expected_revision_id, reviewer, notes)` 记录依据。审核绑定修订及源码哈希；修订改变后为未审核，旧任务保留提交时的审核记录。未审核不阻止创作和渲染。
+
+显示交付必须使用能准确标记色域和传递函数的组合。默认 SDR 为 Rec.709 色域 / sRGB，HDR 为 Rec.2020 / PQ 或 HLG；通用交付也保留受支持的 P3-D65 和 Gamma 2.2。纯 Gamma 2.4/2.6 及 AP1/ACEScct 没有精确的标准视频标签，不能通过备注或错误套用 BT.709 标签发布；这些旧视频组合禁用；动画 ACEScct 4444 使用独立、明确声明的中间片规则，EXR 与有原生数字 Gamma 字段的 DPX 不受影响。回读验证码流的 primaries、transfer、matrix、range，MOV/MP4 还核对实际 colr 字段；报告、CLI 和 MCP 使用同一规则。
+
+HLG 高饱和高光可能产生大于 1 的编码值。Limited YCbCr 交付以 32-bit float RGB 送入矩阵／范围转换，保留窄范围允许的超白，不在 RGB 阶段裁切；Alpha 独立处理。Full／RGB 整数输出遇到无法表示的 HLG 超白会明确拒绝，请改用 Limited YCbCr；超出窄范围实际码位的信号同样拒绝。HDR 4:2:0 按 BT.2100 使用 top-left 色度共址，并核对原生位置标记。视频交付还须完整严格解码，解码错误即使不改变帧数也不能通过验证；报告以 `decode_verified` 单独记录结果。
+
+Three.js 的 Hex/CSS 颜色表示 sRGB，宿主将其转换到所选线性创作空间；数值 RGB 直接采用该空间。新建浮点动画默认线性 BT.2020，历史未声明源空间的动画保持线性 Rec.709。线性并不等于 SDR 或 0–1；其他编码输入需要真实转换，不能只改标签。
+
+</details>
+
+<details>
+<summary><strong>动画源码、线性空间与多文件约定</strong></summary>
+
+HDR 浮点代码的外部包仅允许 `three`，默认导出同步 `createScene({width,height,frames,fps,frameRate})`，返回 `{scene,camera,update({frame,time,fps,width,height})}`。工厂与 update 另提供 `rasterWidth/rasterHeight` 表示实际采样尺寸；使用 `gl_FragCoord` 的 shader 应用它们归一化坐标，布局仍使用逻辑 width/height。每帧直接设置状态，时间为 `frame × 帧率分母 / 分子`。Three 数值颜色采用 `source_color_space` 指定的线性空间，保留负值和超过 1 的值；交由宿主线性转换为 ACEScg/AP1。旧源码省略该字段时保持线性 Rec.709/D65，新建空白浮点动画默认线性 BT.2020。材质不得烘焙 tone mapping 或显示编码。透明材质使用 NormalBlending，输出小于 1 的 Alpha 时必须启用 transparent。允许导入同一动画的分章模块；禁止网络素材及宿主文件导入，代码只在隔离浏览器运行。
+
+不透明自定义 shader 的实际覆盖率固定为 1，宿主只调整编译副本，不改变保存的源码和 RGB。需要半透明时使用 `transparent:true` 与 `NormalBlending`；透明材质的 `NoBlending` 会被拒绝。不透明 GLSL3 自定义 shader 需要唯一可识别的 vec4 颜色输出。透明自定义 shader 默认 `premultipliedAlpha:false`，应输出非预乘 RGB，由混合阶段乘以 Alpha；若设置 `premultipliedAlpha:true`，作者必须输出已经乘过 Alpha 的 RGB，宿主不会自动判断或修正不一致的声明。Three 内置材质保留其原有预乘处理。
+
+原生宽色域创作通过 `MotionSpec.source_color_space` 选择 `"Linear Rec.709 (sRGB)"`、`"Linear Rec.2020"`、`"ACEScg"` 或 `"ACES2065-1"`。工作空间在执行入口及分章顶层代码前设置；数值 `THREE.Color(r,g,b)`、灯光和 shader 输出直接采用所选原色，不需手动转换。十六进制/CSS 颜色仍表示 sRGB，由 Three 转入当前工作空间；新宽色域空间的颜色纹理需预先成为工作空间线性采样并使用 `NoColorSpace`，不能仅重标记 sRGB 纹理。工厂额外获得 `sourceColorSpace` 和 `workingColorSpace`。创作空间不接受 PQ、HLG 或 ACEScct；采样、预乘 Alpha 合成、白点适应与母版转换保持线性，显示变换仅发生于 sRGB/HDR 预览或视频出口。AP0/AP1 超出显示设备范围的颜色仍需在显示出口映射。
+
+已有动画通过界面的“管线目标空间 → 升级色彩管线”，或共享 `upgrade_motion_scene(scene_id, expected_revision_id, source_color_space)` 保色升级。旧源码与分章保存在 `preserved_layers`（最多 16 层），各层保留原线性空间并在浮点像素交界处转换；新内容在目标空间原生创作。图层按顺序合成，**图层之间不共享三维深度**；“编辑图层”可继续修改旧内容。换工作空间不自动扩大旧画面的饱和度。直接在 `update_motion_scene` 改 `source_color_space` 则会重新解释数值，需由作者明确选择。升级是新修订，保留历史、冲突检查、完整源码快照和导出；保留图层源码另存于 `preserved-layers/`。
+
+```sh
+.venv/bin/chromascript call create_motion_scene --arguments '{"project_id":"PROJECT_ID","engine":"three-float-v1","source_color_space":"ACEScg"}'
+.venv/bin/chromascript call upgrade_motion_scene --arguments '{"scene_id":"SCENE_ID","expected_revision_id":"REVISION_ID","source_color_space":"ACES2065-1"}'
+```
+
+视频出口继续选择 `output.video="pq"` 或 `"prores-hq-pq"` 获得 PQ 编码 BT.2020；该选择不改变源空间或 EXR 的线性处理。显示输出仍应用一次 ACES 2.0 输出变换，不能将其理解为纯矩阵变换。
+
+Agent 通过 `get_motion_capabilities.color_authoring` 发现保色升级操作和指南；读取 MCP 资源 `chromascript://docs/motion-color`，或调用 `get_documentation(topic="motion-color")` 获取同一套步骤。MCP 还提供 `upgrade_animation_color_space` prompt。先 `get_motion_scene` 取得真实修订，再调用 `upgrade_motion_scene`；编辑后使用返回的新修订保存完整 spec，保留 `preserved_layers`，不能只改颜色空间字段冒充保色转换。原生 MCP 工具参数包装为 `{"request": {...}}`，HTTP/CLI 参数保持扁平结构。服务升级后重启本地服务并重新连接 MCP，使工具目录与指引刷新。
+
+单场景支持多个分章文件联合渲染。在“源码文件”中切换入口与分章，用“添加分章文件”拆分长动画；入口通过 `import ... from "./chapters/intro"` 引用分章并安排时间。浮点场景共享同一 scene/camera，SDR 可用 Remotion `Sequence` 组织各章。全部文件一起预览、保存、检查修订冲突并冻结到渲染任务，交付中附带完整 `sources/` 源码树。CLI/MCP 的 `MotionSpec` 新增可选 `files: {相对路径: 源码}`，旧 `code` 仍是入口；参见 [多文件示例与调用方式](examples/motion-chapters/README.md)。
+
+本地创作源码可放在 `workspace/authored/`，使用本地 `workspace/tsconfig.json` 指向 `frontend` 的 TypeScript 设置与已安装的 Three 类型声明。工作区不纳入 Git 或前端应用构建。
+
+MCP/CLI 使用 `get_motion_delivery_options` 发现输出，`render_motion_frame` 检查未保存草稿的 sRGB 图片和原始浮点范围，`submit_motion_render` 的 `output` 为 `{"master_bit_depth":32,"video":"pq"}`（video 可选 none/pq/hlg）。浮点动画直接在导出盘的任务临时目录生成逐帧 EXR、源码、快照、缩略图、可选视频与验证报告，验证后原地发布；workspace 不再复制母版。失败或中断保留已验证帧，重试校验帧哈希和冻结的 GPU/运行环境/色彩配置。`inspect_frame` / `sample_pixels` 可检查导出目录中的原始母版。
+
+新增“仅视频”模式使用 `output={"master_bit_depth":null,"video":"pq","render_scale":1}`（视频也可选 `hlg` / `srgb`），通过同一 `submit_motion_render` / `estimate_motion_render` 操作在界面、CLI 和 MCP 使用。每帧浮点读取、线性采样/Alpha 处理与 ACES 输出变换后直接送入 FFmpeg，不写 EXR，也不二次渲染。导出盘仅保留一帧临时 `.f32` 传输文件，消费后删除；成果仍附源码、规格、缩略图和验证报告。默认母版模式保持不变。仅视频不能同时设置 `video="none"`，中断后的显式重试从头开始；已原子发布的成果可直接恢复完成状态。
+
+仅视频空间预算包含单帧中间数据、音轨、辅助文件以及压缩视频估算；规划码率为 `max(8 Mbps, 宽×高×fps×0.2)`，按精确有理帧率算时长，不追加百分比余量；未测量的封装开销会单独注明。规划码率**不是编码器限制**，原有 CRF/质量不变，不能保证实际文件大小；运行时持续检查磁盘余量。4K UHD 60fps、10 分钟、1×1 无音轨的估算约 7.08 GiB，而不是按整段未压缩 EXR 计算。
+
+“下载 ACEScg 母版 ZIP”在下载时流式打包，不在服务端保存 ZIP；浏览器下载位置会保存用户请求的归档。MCP/CLI 可通过 `export_artifact` 将同一虚拟 `master-archive` 写入指定文件。流式 ZIP 不支持断点下载，中断后需重新开始。旧任务文件和快照保留不迁移；升级改变运行时指纹后，旧任务若要继续渲染需重新提交。
+
+模型/CLI 使用 `list_motion_templates`、`create_motion_scene`、`get_motion_scene`、`update_motion_scene`、`compile_motion_preview`、`submit_motion_render` 等共享操作，例如 `chromascript call list_motion_templates`。`get_documentation` 的 `motion` 主题提供完整调用约定。
+
+</details>
+
+<details>
+<summary><strong>HDR 预览接口与兼容性细节</strong></summary>
+
+SDR 模板使用`engine=remotion-sdr-v1`，默认导出 React 组件。允许原有 React、Remotion、ThreeCanvas 与 Three.js 导入。`get_motion_delivery_options(engine)` 返回源类型对应的选项；SDR 的 `output` 为 `{"master_bit_depth":null,"video":"srgb"}` 。`rec709`（纯 Gamma 2.4）因缺少精确标准视频标签而禁用。浏览器 SDR 源不会被重新标记为 HDR 或 ACEScg 母版。
+
+不需要通过模板开始：`create_scene` 仅传 `project_id` 即创建空白 WGSL 场景；`create_motion_scene` 仅传 `project_id` 创建空白浮点动画；显式传入 `engine: "remotion-sdr-v1"` 创建 SDR 网页动画。两者均可直接传入 `spec`，也可在创建后使用修订号通过 MCP/CLI 修改源码。空白场景只含可运行的最小透明画面代码，没有示例图形或动画；项目用于归属与历史管理，模板不构成依赖。
+
+HDR 预览通过共享 `encode_motion_hdr_preview(chunk)` 操作在本机编码，HTTP、CLI 和 MCP 使用同一严格模型。输入可为原始线性 RGBA32F 的 Base64 帧，或 GPU 已经显示转换的 P010 PQ。每片段最多 64 帧且不超过 192 MiB，偶数尺寸最高 1280×720（或竖屏 720×1280），保留项目精确有理数帧率。P010 输入不会再执行色调映射。宿主将线性像素转为 ACEScg、合成黑底并应用一次 ACES 2.0 1000-nit PQ 输出变换；验证实际解码属性和 MP4 色彩标签后返回临时 fMP4。无后台导出任务，不保存片段，不修改母版/草稿。`compile_motion_preview(spec, hdr_preview=true)` 启用 720p GPU P010 采集协议；外层播放器负责编码调用和 MSE，源码 iframe 保持 opaque origin、禁止网络和媒体。默认编译调用仍返回独立可用的 sRGB 预览。
+
+Safari 26.2 的 `video-dynamic-range` 查询可能尚未实现。自动 HDR 在 high/standard 均不匹配时改用 `dynamic-range: high`，再核对 HEVC/MSE 以及实际 PQ 编码；已明确报告 SDR 视频平面的设备仍回退 sRGB。
+
+720p HDR 预览通过 transferable buffer 和鉴权二进制接口减少像素复制，优先使用通过实际回读验证的 VideoToolbox Main10；软件回退仍保留原帧率。采集下一片段与编码重叠，播放前缓冲约 2 秒，暂停或跳转只生成一帧清晰 HDR 图像。二进制地址为 `/api/operations/encode_motion_hdr_preview/binary`，`X-Chroma-HDR` 为规格 JSON（含 `frame_count`、`input_format` 和原帧率）；与 MCP/CLI 的 Base64 操作共用处理规则。
+
+
+采样生命周期：名称修改及保存触发的能力刷新保留正在运行的采样；源码、输出、目录或工作上下文改变后取消。取消和超时会对任务拥有的子进程先终止、再强制结束，初始化失败或线程中断会释放采样槽位。12-bit 能力探测或诊断文件写入失败仅禁用 4444，不影响已有输出格式。动画 EXR 与缩略图均不添加隐藏磁盘余量。
+
+</details>
+
+## 项目音频
+
+导入音频或用代码生成音效、配乐，在“项目音频”中编排时间线并保存。预览音量只影响监听；交付按冻结音轨混音，并附精确时长的 WAV。
+
+<details>
+<summary><strong>音轨、SoundFont 配乐、听审与 MCP 参数</strong></summary>
 
 统一“工作区”提供 **项目音频**：导入文件或生成音效，试听素材，点击“添加到音轨”，设置时间线起点、素材起点、播放时长及增益，再保存音轨。音轨用于该项目所有场景的新交付任务；保存后，网页实时场景与动画预览会随播放、暂停、跳转和循环同步播放音轨；首次需用户点击播放。Agent 保存的音轨约每 2 秒自动同步，可直接拖动预览音量条调整 0–100% 音量，0% 即静音，仅影响监听、不改变音轨或导出增益。浏览器预览用于监听，不替代交付的精确样本验证。
 
@@ -106,110 +260,11 @@ Agent 先调用 `chromascript.get_audio_guidelines(project_id)` 获取项目对�
 
 交付冻结音轨修订与素材校验和。后续修改不影响已排队任务；使用修改后的音轨需新任务键。视频交付混入音频（MP4/AAC，MOV/MKV/MXF 使用 PCM，仍须通过实际编码验证），所有带音频的交付额外包含精确时长的 `audio.wav`。EXR 等图像序列通过交付接口获得独立 WAV；单帧、保存的预览文件和单独的 `render_sequence` 操作仍静音。音轨空白补静音、超出画面时长裁切；报告记录实际解码样本数和削波情况。WAV 混音须小于 4 GiB。音频不进入 OCIO，画面色彩流程保持独立。
 
-## 色彩工作流程
+</details>
 
-“动画代码”使用 `Three.js RGBA32F → 浮点读取 → OCIO → ACEScg EXR`，母版不烘焙显示变换。预览使用同一套 ACES 2.0 SDR sRGB 变换；HDR 视频使用 ACES 1000-nit PQ/HLG 输出变换，可选 HEVC Main10 或 Apple ProRes 422 HQ（MOV、10-bit 4:2:2）。GPU 会实际测试负值、超过 1 的高光和 float32 读回；无法满足时明确失败。同时支持 `remotion-sdr-v1`：React/DOM/SVG/ThreeCanvas → sRGB 截图 → SDR 视频。历史未标记引擎的动画按 SDR 打开，源码与修订记录不变。
+## MCP 接入
 
-`WGSL 代码 → 线性 ACEScg 生成与处理 → ACES 变换 → sRGB 网页预览 / 用户选择的交付空间`
-
-`shade(ctx)` 返回非预乘的线性 ACEScg RGBA：RGB 可为负值或大于 1，Alpha 为 0–1，始终不参与色彩转换。代码中的 RGB 常量按 ACEScg 解释，不需要另选输入色彩空间或在代码中烘焙显示变换。
-
-颜色参数的 `color_space` 仅声明参数的存储编码（ACEScg 或 sRGB）；参数进入 `ctx.params` 前统一转换为线性 ACEScg，不会改变整个场景的生成空间。网页预览固定使用 ACES 2.0 sRGB SDR 显示变换，不随交付设置改变，也不替代 HDR 校准监看。
-
-在交付面板分别选择输出色彩空间与 Gamma。显示交付应用一次 ACES 输出变换；ACEScg、ACES2065-1 或 ACEScct 场景编码仅做色彩空间转换，不烘焙显示效果。可用组合仍受封装、编码器与位深限制。
-
-## ACEScct 12-bit 调色中间片
-
-浮点动画新增 `output.video=prores-4444-acescct`。选择“仅视频”可直接逐帧输出 MOV，不保留 EXR；也可与 EXR 同时交付。原生 `prores_videotoolbox` profile 4 使用 P416 高精度输入并验证相邻 12-bit Y/Cb/Cr 码值；不提供 XQ，不回退为 10-bit。能力不足时显示原因。
-
-线性黑底合成后只进行 ACEScg → ACEScct 编码，不烘焙显示变换，不带 Alpha。整数存储前拒绝超出 0–1 的 Log 码值。AP1/D60 与 ACEScct 通过 MOV 声明和 `color-encoding.json` 记录；标准 colr 为 2/2/1，BT.709 仅表示 YCbCr 打包矩阵。Resolve 请手动指定 ACEScct 输入和 Video 数据范围。这是制作中间片，不是标准 ACES2065-1 归档容器；报告不会把声明验证说成自动颜色识别或 Resolve 导入认证。
-
-磁盘面板区分“预计成品体积”和“预计磁盘峰值占用”，不增加 20%、30% 或 EXR 10% 余量。快速规格估算不创建文件；“采样估算”按当前完整草稿、正式尺寸和采样倍率处理最多 12 帧，使用真实 ZIP 文件和 ProRes 包的平均大小外推，不使用最大帧放大。未采样的编码部分及未知开销明确注明；估算不是体积上限。临时原始帧只保留一帧，发布重命名不计第二份视频。
-
-CLI/MCP 与网页共享 `start_motion_render_estimate`、`get_motion_render_estimate`、`cancel_motion_render_estimate`。提交可传 `storage_estimate_id`，采用匹配源码、颜色、时间、输出和运行环境的采样结果验盘。内容改变即失效，名称改变不失效；刷新只重读磁盘和音轨。采样可取消、不保存草稿、不创建正式渲染任务，超时或中断后清理临时样片；正式任务仍保留自己的恢复规则。
-
-## 调色母版与完整色彩标签
-
-动画的“视频输出”支持 **Apple ProRes 422 HQ · MOV**：浮点源可选 sRGB、PQ 或 HLG，SDR 网页源可选 sRGB。支持仅视频及 EXR 母版附带视频；视频合成到黑底，不携带 Alpha。需要本机 `prores_ks` 编码器，导出后检查实际 codec、HQ profile、位深、采样、帧率与原生色彩标签。SDR 网页截图仍为 8-bit 源，不因 ProRes 编码而增加源精度。CLI/MCP 的 `submit_motion_render` 使用 `output.video=prores-hq-srgb|prores-hq-pq|prores-hq-hlg`，通过 `get_motion_delivery_options` 查询当前源的可用选项。ProRes 视频空间按 `prores_ks` HQ 的压缩宏块目标码率计算，按帧数累积，不增加百分比余量；不再用未压缩帧体积预算压缩视频。3840×2160、60 fps、9 分 20 秒的仅视频规格估算约 121 GiB，实际文件随画面复杂度变化；不会为调整预算而降低编码质量。
-
-“动画导出”面板按所选导出模式提供 **渲染预估磁盘空间**，随当前草稿尺寸、帧数、Half/Float 精度、超采样、视频输出和导出目录更新。分别显示 EXR 未压缩体积、导出盘所需空间预算、磁盘可用空间，以及中间数据、视频、音轨和工作区元数据明细。ZIP 实际体积取决于画面；预估不预留空间、不扣除已有缓存，提交时使用同一套预算重新检查。修改音轨或释放磁盘后可点击“刷新预估”。
-
-MCP 使用 `chromascript.estimate_motion_render`，CLI 使用同名操作：
-
-```sh
-.venv/bin/chromascript call estimate_motion_render --arguments '{"settings":{"width":3840,"height":2160,"frames":300,"fps":{"numerator":60,"denominator":1}},"output":{"master_bit_depth":32,"video":"none","render_scale":2}}'
-```
-
-可传 `export_directory` 检查指定磁盘，传 `project_id` 计入项目当前音轨；估算不会创建目录或渲染任务。SDR 源显示中间帧和视频预算，不标作浮点母版。
-
-
-新建动画默认使用浮点引擎，默认导出 ACEScg 32-bit Float / ZIP EXR 母版、不额外编码视频。`submit_motion_render.output.render_scale` 可选 1、2、4，默认 2，即每个输出像素使用 2×2 空间采样。浮点路径在线性预乘 RGB/Alpha 中平均后解除预乘、转为 ACEScg；SDR 截图在线性 sRGB 光量中合成和缩小，不增加源位深。预览仍为低分辨率单次采样；本项不添加运动模糊。
-
-动画尺寸、总帧数和帧率分子/分母可自定义，整数范围为 1–2147483647，不再限定 4096 像素、36000 帧或 1–240 fps。实际渲染受 GPU 纹理/视口、可用内存、磁盘和编码器约束；不支持时明确失败，不缩放成其他交付规格。有理数帧率始终原样传递并在编码后核对。
-
-浮点和 SDR 动画均直接在 `export_directory` 所选磁盘的任务临时目录生成中间帧、编码文件与最终成果，验证后在同一磁盘发布。本机工作区保留任务数据库与日志；浏览器仍使用系统临时配置。支持外部硬盘，断开或替换导出卷时失败，不回退写入本机。SDR 和仅视频模式重试时从头渲染；保留母版模式重试复用已验证 EXR。
-
-自定义 shader 保持可用。报告分别记录 `float_pipeline_verified` 与 `source_color_contract`。浮点验证不自动证明任意源码的颜色语义；`scene_linear_master` 表示是否交付场景线性母版；仅视频模式为 false，浮点源仍独立验证。人工审核后通过界面“记录源码审核”或共享 `record_motion_color_review(scene_id, expected_revision_id, reviewer, notes)` 记录依据。审核绑定修订及源码哈希；修订改变后为未审核，旧任务保留提交时的审核记录。未审核不阻止创作和渲染。
-
-显示交付必须使用能准确标记色域和传递函数的组合。默认 SDR 为 Rec.709 色域 / sRGB，HDR 为 Rec.2020 / PQ 或 HLG；通用交付也保留受支持的 P3-D65 和 Gamma 2.2。纯 Gamma 2.4/2.6 及 AP1/ACEScct 没有精确的标准视频标签，不能通过备注或错误套用 BT.709 标签发布；这些旧视频组合禁用；下述动画 ACEScct 4444 使用独立、明确声明的中间片规则，EXR 与有原生数字 Gamma 字段的 DPX 不受影响。回读验证码流的 primaries、transfer、matrix、range，MOV/MP4 还核对实际 colr 字段；报告、CLI 和 MCP 使用同一规则。
-
-HLG 高饱和高光可能产生大于 1 的编码值。Limited YCbCr 交付以 32-bit float RGB 送入矩阵／范围转换，保留窄范围允许的超白，不在 RGB 阶段裁切；Alpha 独立处理。Full／RGB 整数输出遇到无法表示的 HLG 超白会明确拒绝，请改用 Limited YCbCr；超出窄范围实际码位的信号同样拒绝。HDR 4:2:0 按 BT.2100 使用 top-left 色度共址，并核对原生位置标记。视频交付还须完整严格解码，解码错误即使不改变帧数也不能通过验证；报告以 `decode_verified` 单独记录结果。
-
-Three.js 接受 sRGB 编码颜色（如 Hex/CSS），转换后在默认线性 Rec.709/D65 中计算；线性并不等于 SDR 或 0–1。当前宿主固定这一工作空间再由 OCIO 转为 ACEScg，禁止源码修改全局工作空间而破坏解释。其他色域/Log/PQ 输入需先正确转换，不能只改标签。
-
-## 安装方法
-
-需要 macOS、Python 3.12、Node.js 22.12+（含 npm），以及包含 `libx264`、`libx265`、`prores_ks`、`dnxhd` 编码器和 `zscale` 滤镜的 FFmpeg。确保 `ffmpeg` 和 `ffprobe` 可在终端调用。
-
-动画代码的本地导出还需要已安装的 Google Chrome 或 Chromium；自定义路径可通过 `CHROMASCRIPT_CHROME` 指定。运行时不会下载浏览器或访问云端渲染服务。
-
-下载仓库后，在终端执行：
-
-```sh
-# 将占位路径替换为本机仓库的实际路径。
-cd /absolute/path/ChromaScript
-./install.sh
-./start.sh
-```
-
-安装脚本会检查系统依赖、创建或复用 Python 3.12 虚拟环境、按锁文件安装依赖并构建网页；首次安装需要联网下载依赖。项目更新后重新运行 `./install.sh`。脚本不会自动安装系统依赖。
-
-日常只需运行 `./start.sh`，打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)，创建项目并新建空白场景（示例模板可选）。启动不联网安装依赖，数据默认保存在仓库下的 `workspace`，按 `Ctrl+C` 停止服务。
-
-制作作品时，在“工作区”选择项目，通过“当前作品”打开已有 WGSL / Three.js / React 内容，或在“新建类型”选择类型后点击“新建作品”；“示例模板（可选）”中保留文字、几何、光能等起点。在“编辑与预览”中修改代码后自动预览，使用共享时间轴播放和逐帧定位；点击“保存作品”，再到“设置交付”选择“保留 EXR 母版”或“仅视频”。保留母版时可选 16-bit Half 或 32-bit Float，并可另输出视频；仅视频时选择 PQ、HLG 或 sRGB，点击“导出动画”。EXR 保留直通 Alpha，视频在场景线性空间合成黑底。视频要求偶数宽高及相应本机编码器（HDR 用 libx265，sRGB 用 libx264）；EXR 可使用奇数尺寸。浏览器「预览显示」默认自动 HDR：线性 BT.2020/AP1/AP0 源在报告 HDR 视频能力且支持实际 HEVC 配置的设备上，以最高 1280×720（竖屏 720×1280）、项目原始帧率 的 PQ/HEVC 10-bit 分段视频预览；其他情况回退 sRGB。可显式选择 sRGB SDR。点击播放开始，暂停/隐藏停止继续生成片段；拖动时间线重建缓冲。编码与解码需要短暂缓冲，不保证实时帧率；自动化测试不能证明实体屏幕 HDR 亮度。
-
-HDR 浮点代码的外部包仅允许 `three`，默认导出同步 `createScene({width,height,frames,fps,frameRate})`，返回 `{scene,camera,update({frame,time,fps,width,height})}`。工厂与 update 另提供 `rasterWidth/rasterHeight` 表示实际采样尺寸；使用 `gl_FragCoord` 的 shader 应用它们归一化坐标，布局仍使用逻辑 width/height。每帧直接设置状态，时间为 `frame × 帧率分母 / 分子`。Three 数值颜色采用 `source_color_space` 指定的线性空间，保留负值和超过 1 的值；交由宿主线性转换为 ACEScg/AP1。旧源码省略该字段时保持线性 Rec.709/D65，新建空白浮点动画默认线性 BT.2020。材质不得烘焙 tone mapping 或显示编码。透明材质使用 NormalBlending，输出小于 1 的 Alpha 时必须启用 transparent。允许导入同一动画的分章模块；禁止网络素材及宿主文件导入，代码只在隔离浏览器运行。
-
-不透明自定义 shader 的实际覆盖率固定为 1，宿主只调整编译副本，不改变保存的源码和 RGB。需要半透明时使用 `transparent:true` 与 `NormalBlending`；透明材质的 `NoBlending` 会被拒绝。不透明 GLSL3 自定义 shader 需要唯一可识别的 vec4 颜色输出。透明自定义 shader 默认 `premultipliedAlpha:false`，应输出非预乘 RGB，由混合阶段乘以 Alpha；若设置 `premultipliedAlpha:true`，作者必须输出已经乘过 Alpha 的 RGB，宿主不会自动判断或修正不一致的声明。Three 内置材质保留其原有预乘处理。
-
-原生宽色域创作通过 `MotionSpec.source_color_space` 选择 `"Linear Rec.709 (sRGB)"`、`"Linear Rec.2020"`、`"ACEScg"` 或 `"ACES2065-1"`。工作空间在执行入口及分章顶层代码前设置；数值 `THREE.Color(r,g,b)`、灯光和 shader 输出直接采用所选原色，不需手动转换。十六进制/CSS 颜色仍表示 sRGB，由 Three 转入当前工作空间；新宽色域空间的颜色纹理需预先成为工作空间线性采样并使用 `NoColorSpace`，不能仅重标记 sRGB 纹理。工厂额外获得 `sourceColorSpace` 和 `workingColorSpace`。创作空间不接受 PQ、HLG 或 ACEScct；采样、预乘 Alpha 合成、白点适应与母版转换保持线性，显示变换仅发生于 sRGB/HDR 预览或视频出口。AP0/AP1 超出显示设备范围的颜色仍需在显示出口映射。
-
-已有动画通过界面的“管线目标空间 → 升级色彩管线”，或共享 `upgrade_motion_scene(scene_id, expected_revision_id, source_color_space)` 保色升级。旧源码与分章保存在 `preserved_layers`（最多 16 层），各层保留原线性空间并在浮点像素交界处转换；新内容在目标空间原生创作。图层按顺序合成，**图层之间不共享三维深度**；“编辑图层”可继续修改旧内容。换工作空间不自动扩大旧画面的饱和度。直接在 `update_motion_scene` 改 `source_color_space` 则会重新解释数值，需由作者明确选择。升级是新修订，保留历史、冲突检查、完整源码快照和导出；保留图层源码另存于 `preserved-layers/`。
-
-```sh
-.venv/bin/chromascript call create_motion_scene --arguments '{"project_id":"PROJECT_ID","engine":"three-float-v1","source_color_space":"ACEScg"}'
-.venv/bin/chromascript call upgrade_motion_scene --arguments '{"scene_id":"SCENE_ID","expected_revision_id":"REVISION_ID","source_color_space":"ACES2065-1"}'
-```
-
-视频出口继续选择 `output.video="pq"` 或 `"prores-hq-pq"` 获得 PQ 编码 BT.2020；该选择不改变源空间或 EXR 的线性处理。显示输出仍应用一次 ACES 2.0 输出变换，不能将其理解为纯矩阵变换。
-
-Agent 通过 `get_motion_capabilities.color_authoring` 发现保色升级操作和指南；读取 MCP 资源 `chromascript://docs/motion-color`，或调用 `get_documentation(topic="motion-color")` 获取同一套步骤。MCP 还提供 `upgrade_animation_color_space` prompt。先 `get_motion_scene` 取得真实修订，再调用 `upgrade_motion_scene`；编辑后使用返回的新修订保存完整 spec，保留 `preserved_layers`，不能只改颜色空间字段冒充保色转换。原生 MCP 工具参数包装为 `{"request": {...}}`，HTTP/CLI 参数保持扁平结构。服务升级后重启本地服务并重新连接 MCP，使工具目录与指引刷新。
-
-单场景支持多个分章文件联合渲染。在“源码文件”中切换入口与分章，用“添加分章文件”拆分长动画；入口通过 `import ... from "./chapters/intro"` 引用分章并安排时间。浮点场景共享同一 scene/camera，SDR 可用 Remotion `Sequence` 组织各章。全部文件一起预览、保存、检查修订冲突并冻结到渲染任务，交付中附带完整 `sources/` 源码树。CLI/MCP 的 `MotionSpec` 新增可选 `files: {相对路径: 源码}`，旧 `code` 仍是入口；参见 [多文件示例与调用方式](examples/motion-chapters/README.md)。
-
-本地创作源码可放在 `workspace/authored/`，使用本地 `workspace/tsconfig.json` 指向 `frontend` 的 TypeScript 设置与已安装的 Three 类型声明。工作区不纳入 Git 或前端应用构建。
-
-MCP/CLI 使用 `get_motion_delivery_options` 发现输出，`render_motion_frame` 检查未保存草稿的 sRGB 图片和原始浮点范围，`submit_motion_render` 的 `output` 为 `{"master_bit_depth":32,"video":"pq"}`（video 可选 none/pq/hlg）。浮点动画直接在导出盘的任务临时目录生成逐帧 EXR、源码、快照、缩略图、可选视频与验证报告，验证后原地发布；workspace 不再复制母版。失败或中断保留已验证帧，重试校验帧哈希和冻结的 GPU/运行环境/色彩配置。`inspect_frame` / `sample_pixels` 可检查导出目录中的原始母版。
-
-新增“仅视频”模式使用 `output={"master_bit_depth":null,"video":"pq","render_scale":1}`（视频也可选 `hlg` / `srgb`），通过同一 `submit_motion_render` / `estimate_motion_render` 操作在界面、CLI 和 MCP 使用。每帧浮点读取、线性采样/Alpha 处理与 ACES 输出变换后直接送入 FFmpeg，不写 EXR，也不二次渲染。导出盘仅保留一帧临时 `.f32` 传输文件，消费后删除；成果仍附源码、规格、缩略图和验证报告。默认母版模式保持不变。仅视频不能同时设置 `video="none"`，中断后的显式重试从头开始；已原子发布的成果可直接恢复完成状态。
-
-仅视频空间预算包含单帧中间数据、音轨、辅助文件以及压缩视频估算；规划码率为 `max(8 Mbps, 宽×高×fps×0.2)`，按精确有理帧率算时长，不追加百分比余量；未测量的封装开销会单独注明。规划码率**不是编码器限制**，原有 CRF/质量不变，不能保证实际文件大小；运行时持续检查磁盘余量。4K UHD 60fps、10 分钟、1×1 无音轨的估算约 7.08 GiB，而不是按整段未压缩 EXR 计算。
-
-“下载 ACEScg 母版 ZIP”在下载时流式打包，不在服务端保存 ZIP；浏览器下载位置会保存用户请求的归档。MCP/CLI 可通过 `export_artifact` 将同一虚拟 `master-archive` 写入指定文件。流式 ZIP 不支持断点下载，中断后需重新开始。旧任务文件和快照保留不迁移；升级改变运行时指纹后，旧任务若要继续渲染需重新提交。
-
-模型/CLI 使用 `list_motion_templates`、`create_motion_scene`、`get_motion_scene`、`update_motion_scene`、`compile_motion_preview`、`submit_motion_render` 等共享操作，例如 `chromascript call list_motion_templates`。`get_documentation` 的 `motion` 主题提供完整调用约定。
-
-如需通过模型调用，在 MCP 客户端中添加以下配置，将两处占位路径替换为实际绝对路径：
+在 MCP 客户端中添加以下配置，将两处占位路径替换为实际绝对路径：
 
 ```json
 {
@@ -254,15 +309,26 @@ MCP 自动启动的网页固定使用 [http://127.0.0.1:8765](http://127.0.0.1:8
 
 网页、MCP 与 CLI 共用 `choose_export_directory`（可选 `initial_directory`）和 `open_export_directory`（`directory`）操作，例如 `chromascript call choose_export_directory`。系统文件夹选择器目前用于 macOS；其他系统可直接输入目录。旧脚本的 `--export-root` 参数仍可解析，但不再限制导出位置。
 
-SDR 模板使用 `engine=remotion-sdr-v1`，默认导出 React 组件。允许原有 React、Remotion、ThreeCanvas 与 Three.js 导入。`get_motion_delivery_options(engine)` 返回源类型对应的选项；SDR 的 `output` 为 `{"master_bit_depth":null,"video":"srgb"}` 。`rec709`（纯 Gamma 2.4）因缺少精确标准视频标签而禁用。浏览器 SDR 源不会被重新标记为 HDR 或 ACEScg 母版。
+## 开发与验证
 
-不需要通过模板开始：`create_scene` 仅传 `project_id` 即创建空白 WGSL 场景；`create_motion_scene` 仅传 `project_id` 创建空白浮点动画；显式传入 `engine: "remotion-sdr-v1"` 创建 SDR 网页动画。两者均可直接传入 `spec`，也可在创建后使用修订号通过 MCP/CLI 修改源码。空白场景只含可运行的最小透明画面代码，没有示例图形或动画；项目用于归属与历史管理，模板不构成依赖。
+使用 Python 3.12 锁定环境。修改设计规范后由脚本生成 UI tokens；测试产物和工作区数据不纳入 Git。
 
-HDR 预览通过共享 `encode_motion_hdr_preview(chunk)` 操作在本机编码，HTTP、CLI 和 MCP 使用同一严格模型。输入可为原始线性 RGBA32F 的 Base64 帧，或 GPU 已经显示转换的 P010 PQ。每片段最多 64 帧且不超过 192 MiB，偶数尺寸最高 1280×720（或竖屏 720×1280），保留项目精确有理数帧率。P010 输入不会再执行色调映射。宿主将线性像素转为 ACEScg、合成黑底并应用一次 ACES 2.0 1000-nit PQ 输出变换；验证实际解码属性和 MP4 色彩标签后返回临时 fMP4。无后台导出任务，不保存片段，不修改母版/草稿。`compile_motion_preview(spec, hdr_preview=true)` 启用 720p GPU P010 采集协议；外层播放器负责编码调用和 MSE，源码 iframe 保持 opaque origin、禁止网络和媒体。默认编译调用仍返回独立可用的 sRGB 预览。
+```sh
+.venv/bin/python -m pytest tests/test_rendering.py tests/test_live_preview.py -q
+.venv/bin/ruff check src tests
+.venv/bin/mypy src
+npm --prefix frontend run test:unit
+npm --prefix frontend run typecheck
+npm --prefix frontend run lint
+npm --prefix frontend run build
+```
 
-Safari 26.2 的 `video-dynamic-range` 查询可能尚未实现。自动 HDR 在 high/standard 均不匹配时改用 `dynamic-range: high`，再核对 HEVC/MSE 以及实际 PQ 编码；已明确报告 SDR 视频平面的设备仍回退 sRGB。
+网页交互验证优先使用内置浏览器；自动化配置为 **Playwright WebKit、headless**，不连接个人浏览器配置。启动独立测试工作区后，可运行原生预览回归：
 
-720p HDR 预览通过 transferable buffer 和鉴权二进制接口减少像素复制，优先使用通过实际回读验证的 VideoToolbox Main10；软件回退仍保留原帧率。采集下一片段与编码重叠，播放前缓冲约 2 秒，暂停或跳转只生成一帧清晰 HDR 图像。二进制地址为 `/api/operations/encode_motion_hdr_preview/binary`，`X-Chroma-HDR` 为规格 JSON（含 `frame_count`、`input_format` 和原帧率）；与 MCP/CLI 的 Base64 操作共用处理规则。
+```sh
+.venv/bin/chromascript --workspace /tmp/chromascript-test serve --port 8875
+# 在另一个终端运行：
+CHROMASCRIPT_URL=http://127.0.0.1:8875 npm --prefix frontend run test:e2e -- tests/live-preview.spec.ts
+```
 
-
-采样生命周期：名称修改及保存触发的能力刷新保留正在运行的采样；源码、输出、目录或工作上下文改变后取消。取消和超时会对任务拥有的子进程先终止、再强制结束，初始化失败或线程中断会释放采样槽位。12-bit 能力探测或诊断文件写入失败仅禁用 4444，不影响已有输出格式。动画 EXR 与缩略图均不添加隐藏磁盘余量。
+截图、日志和报告保存在 `reports/`、`frontend/test-results/` 与 `frontend/playwright-report/`。动画离线导出所需的浏览器运行时与网页测试引擎是不同路径；执行测试前检查用例是否会触发离线导出。

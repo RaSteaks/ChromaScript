@@ -128,6 +128,61 @@ def test_tile_boundaries_and_seed(renderer):
 
 
 @pytest.mark.gpu
+def test_batched_readback_keeps_edge_tiles_and_frame_uniforms(renderer, monkeypatch):
+    # Nine uneven tiles cross two batch boundaries. Independent pixel/time values
+    # catch overlapping storage slots and uniforms overwritten before submission.
+    scene = SceneSpec(
+        name="batch reference",
+        code="""fn shade(ctx: SceneContext) -> vec4<f32> {
+            return vec4<f32>(ctx.pixel.x, -ctx.pixel.y, ctx.time, 0.375);
+        }""",
+    )
+    settings = RenderSettings(
+        width=259, height=267, frames=1, tile_size=128, samples=4,
+        fps=Rational(numerator=24000, denominator=1001),
+    )
+    reads = []
+    read_buffer = renderer.device.queue.read_buffer
+
+    def read(*args):
+        reads.append(args[2])
+        return read_buffer(*args)
+
+    monkeypatch.setattr(renderer.device.queue, "read_buffer", read)
+    completed = []
+    for frame in [12, 24]:
+        actual = renderer.render(scene, settings, frame, lambda: completed.append(True))
+        y, x = np.mgrid[:settings.height, :settings.width]
+        expected = np.stack([
+            x + 0.5, -(y + 0.5), np.full_like(x, frame * 1001 / 24000, dtype=float),
+            np.full_like(x, 0.375, dtype=float),
+        ], axis=-1).astype(np.float32)
+        np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-6)
+    assert len(reads) == 6  # Three synchronization points per nine-tile frame.
+    assert max(reads) <= 4 * 128 * 128 * 16
+    assert len(completed) == 18
+
+
+@pytest.mark.gpu
+def test_cancellation_does_not_submit_another_tile_batch(renderer):
+    # A failed progress callback exits before the next bounded GPU submission.
+    def cancel():
+        raise ChromaError("cancelled", "cancelled at tile boundary")
+
+    with pytest.raises(ChromaError, match="cancelled at tile boundary"):
+        renderer.render(
+            TEMPLATES["gradient"],
+            RenderSettings(width=1024, height=1024, tile_size=128, frames=1),
+            0, cancel,
+        )
+    # Cancellation cannot poison the reusable uniform/output buffers.
+    result = renderer.render(
+        TEMPLATES["gradient"], RenderSettings(width=16, height=16, frames=1), 1
+    )
+    assert np.isfinite(result).all()
+
+
+@pytest.mark.gpu
 def test_all_templates_and_diagnostics(renderer):
     for scene in TEMPLATES.values():
         renderer.validate(scene)

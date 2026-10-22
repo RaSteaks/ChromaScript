@@ -7,6 +7,7 @@ import math
 import struct
 import threading
 from collections import OrderedDict
+from itertools import batched
 from typing import Any, Callable
 
 import numpy as np
@@ -16,6 +17,11 @@ from numpy.typing import NDArray
 from .color import input_rgb
 from .errors import ChromaError
 from .models import RenderSettings, SceneSpec
+
+# Four independent tiles share one submission/readback (at most 16 MiB).
+# Uniform slots are 256-byte aligned; each dispatch retains its own frame/origin.
+TILE_BATCH_SIZE = 4
+UNIFORM_STRIDE = 512
 
 HEADER = """
 struct Uniforms {
@@ -139,10 +145,12 @@ class Renderer:
             self.cache: OrderedDict[str, Any] = OrderedDict()
             self.lock = threading.Lock()
             self.uniform = self.device.create_buffer(
-                size=432, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
+                size=UNIFORM_STRIDE * TILE_BATCH_SIZE,
+                usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST,
             )
             self.output = self.device.create_buffer(
-                size=512 * 512 * 16, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC
+                size=512 * 512 * 16 * TILE_BATCH_SIZE,
+                usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC,
             )
         except Exception as exc:
             raise ChromaError("gpu_unavailable", f"GPU initialization failed: {exc}") from exc
@@ -204,18 +212,35 @@ class Renderer:
                 params[index, :3] = input_rgb(value, parameter.color_space)
             else:
                 params[index, 0] = float(value)
-        bind = self.device.create_bind_group(
-            layout=pipeline.get_bind_group_layout(0),
-            entries=[
-                {"binding": 0, "resource": {"buffer": self.uniform}},
-                {"binding": 1, "resource": {"buffer": self.output}},
-            ],
-        )
+        tile_bytes = settings.tile_size**2 * 16
+        binds = [
+            self.device.create_bind_group(
+                layout=pipeline.get_bind_group_layout(0),
+                entries=[
+                    {"binding": 0, "resource": {
+                        "buffer": self.uniform, "offset": slot * UNIFORM_STRIDE, "size": 432,
+                    }},
+                    {"binding": 1, "resource": {
+                        "buffer": self.output, "offset": slot * tile_bytes, "size": tile_bytes,
+                    }},
+                ],
+            )
+            for slot in range(TILE_BATCH_SIZE)
+        ]
+        parameter_bytes = params.tobytes()
         image = np.empty((settings.height, settings.width, 4), dtype=np.float32)
-        for y in range(0, settings.height, settings.tile_size):
-            for x in range(0, settings.width, settings.tile_size):
-                width = min(settings.tile_size, settings.width - x)
-                height = min(settings.tile_size, settings.height - y)
+        tiles = (
+            (x, y, min(settings.tile_size, settings.width - x),
+             min(settings.tile_size, settings.height - y))
+            for y in range(0, settings.height, settings.tile_size)
+            for x in range(0, settings.width, settings.tile_size)
+        )
+        for batch in batched(tiles, TILE_BATCH_SIZE):
+            uniforms = bytearray(UNIFORM_STRIDE * len(batch))
+            encoder = self.device.create_command_encoder()
+            compute = encoder.begin_compute_pass()
+            compute.set_pipeline(pipeline)
+            for slot, (x, y, width, height) in enumerate(batch):
                 # Frame time comes from the exact rational timebase, not elapsed wall time.
                 header = struct.pack(
                     "<8I4f",
@@ -231,19 +256,26 @@ class Renderer:
                     float(settings.width),
                     float(settings.height),
                 )
-                self.device.queue.write_buffer(self.uniform, 0, header + params.tobytes())
-                encoder = self.device.create_command_encoder()
-                compute = encoder.begin_compute_pass()
-                compute.set_pipeline(pipeline)
-                compute.set_bind_group(0, bind)
+                offset = slot * UNIFORM_STRIDE
+                uniforms[offset : offset + 432] = header + parameter_bytes
+                compute.set_bind_group(0, binds[slot])
                 compute.dispatch_workgroups(math.ceil(width / 8), math.ceil(height / 8))
-                compute.end()
-                self.device.queue.submit([encoder.finish()])
-                memory = self.device.queue.read_buffer(self.output, 0, width * height * 16)
+            compute.end()
+            self.device.queue.write_buffer(self.uniform, 0, uniforms)
+            self.device.queue.submit([encoder.finish()])
+            # Read only through the final tile's pixels, including inter-slot gaps.
+            # No OCIO, alpha association or sampling changes enter this transport.
+            last_width, last_height = batch[-1][2:]
+            memory = self.device.queue.read_buffer(
+                self.output, 0, (len(batch) - 1) * tile_bytes + last_width * last_height * 16
+            )
+            for slot, (x, y, width, height) in enumerate(batch):
                 image[y : y + height, x : x + width] = np.frombuffer(
-                    memory, dtype=np.float32
+                    memory, dtype=np.float32, count=width * height * 4, offset=slot * tile_bytes
                 ).reshape(height, width, 4)
                 if on_tile:
+                    # Keep cancellation/progress callbacks at tile boundaries;
+                    # only this bounded batch may finish before cancellation wins.
                     on_tile()
         if not np.isfinite(image).all():
             raise ChromaError("non_finite_pixels", "Shader produced NaN or infinity")

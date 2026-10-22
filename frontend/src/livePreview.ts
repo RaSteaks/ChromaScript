@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { call } from "./api";
 import type { Scene } from "./types";
 
@@ -32,7 +32,7 @@ type PreviewState = {
 
 // Playback may skip timeline frames; shader time still comes from each exact
 // frame index and rational fps. A slow GPU never builds a request backlog.
-export const LIVE_PLAYBACK_INTERVAL = 125;
+export const LIVE_PLAYBACK_INTERVAL = 1000 / 24;
 const EDIT_DELAY = 180;
 
 export function useLivePreview(
@@ -48,9 +48,25 @@ export function useLivePreview(
   const latestFrame = useRef(0);
   // During playback, changing time must not invalidate an otherwise current
   // render: even a GPU slower than the refresh cap must be able to show frames.
-  const recipe = request
-    ? JSON.stringify(playing ? { ...request, frame: undefined } : request)
-    : "";
+  const spec = request?.spec;
+  const width = request?.width;
+  const height = request?.height;
+  const numerator = request?.fps.numerator;
+  const denominator = request?.fps.denominator;
+  const stillFrame = playing ? undefined : request?.frame;
+  const recipe = useMemo(
+    () =>
+      spec
+        ? JSON.stringify({
+            spec,
+            width,
+            height,
+            fps: { numerator, denominator },
+            frame: stillFrame,
+          })
+        : "",
+    [spec, width, height, numerator, denominator, stillFrame],
+  );
   const active = enabled && visible && !!recipe;
 
   useEffect(() => {
@@ -72,6 +88,7 @@ export function useLivePreview(
       // that work, then send only the newest draft; discard every stale reply.
       if (inFlight.current) await inFlight.current.catch(() => {});
       if (stopped) return;
+      const started = performance.now();
       setState((old) => ({
         sceneId,
         attempt: recipe,
@@ -104,7 +121,9 @@ export function useLivePreview(
         if (!stopped && playing)
           timer = window.setTimeout(
             () => void render(),
-            LIVE_PLAYBACK_INTERVAL,
+            // Rendering time counts toward the refresh budget; never add a full
+            // interval after a slow frame or overlap native GPU requests.
+            Math.max(0, LIVE_PLAYBACK_INTERVAL - (performance.now() - started)),
           );
       } catch (error) {
         if (!stopped)

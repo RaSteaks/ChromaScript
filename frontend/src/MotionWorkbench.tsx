@@ -6,6 +6,7 @@ import {
 import {
   useCallback,
   useEffect,
+  memo,
   useMemo,
   useRef,
   useState,
@@ -177,7 +178,8 @@ function validate(draft: Draft | null): {
 }
 
 /** The workspace owns project/navigation; this adapter retains revision-safe source drafts. */
-export function MotionWorkbench({
+// Hidden adapters retain drafts without rendering on the WGSL playback clock.
+export const MotionWorkbench = memo(function MotionWorkbench({
   active,
   projectId,
   step,
@@ -893,8 +895,7 @@ export function MotionWorkbench({
                 {draft.engine === "three-float-v1" && (
                   <div className="frame-settings">
                     <p className="technical-note">
-                      当前创作空间：{spaceLabel(draft.source_color_space)}
-                      。创作与合成保持线性，PQ 仅在 HDR 预览或视频导出时编码。
+                      当前创作空间：{spaceLabel(draft.source_color_space)}· 线性
                     </p>
                     <Field label="管线目标空间" id="motion-target-space">
                       <select
@@ -926,9 +927,13 @@ export function MotionWorkbench({
                     >
                       升级色彩管线
                     </Button>
-                    <p className="technical-note">
-                      先保存再升级。旧源码保留为背景图层并在线性空间转换，新源码原生使用目标空间；图层之间不共享深度。扩大色域不会自动增加原画面的饱和度。
-                    </p>
+                    {/* Pipeline consequences remain available before committing an upgrade. */}
+                    <details className="technical-note">
+                      <summary>管线升级说明</summary>
+                      <p>
+                        先保存再升级。旧源码保留为背景图层并在线性空间转换；图层之间不共享深度。扩大色域不会自动增加饱和度。
+                      </p>
+                    </details>
                     {!!draft.preserved_layers.length && (
                       <Field label="编辑图层" id="motion-source-layer">
                         <select
@@ -971,8 +976,8 @@ export function MotionWorkbench({
                 />
                 <p id="motion-code-help" className="technical-note">
                   {draft.engine === "remotion-sdr-v1"
-                    ? "SDR 网页动画：默认导出 React 组件，用 useCurrentFrame() 驱动时间；支持 DOM、SVG 与 ThreeCanvas。Tab 键可离开编辑器。"
-                    : `浮点场景：默认导出工厂并返回 scene、camera、update。当前编辑图层的 RGB 为 ${spaceLabel(source?.source_color_space ?? draft.source_color_space)}，保留负值与高光；不在源码中编码 PQ。母版为线性 ACEScg。`}
+                    ? "React 组件 · useCurrentFrame() 驱动时间 · Tab 离开编辑器"
+                    : `工厂返回 scene、camera、update · ${spaceLabel(source?.source_color_space ?? draft.source_color_space)} · 线性 RGB`}
                 </p>
                 <div className="motion-save-actions">
                   <Button
@@ -1116,10 +1121,6 @@ export function MotionWorkbench({
                       />
                     </Field>
                   </div>
-                  <p className="panel-description">
-                    支持自定义尺寸和帧率。预览使用低分辨率；正式导出受当前
-                    GPU、内存、磁盘与编码器能力限制。
-                  </p>
                 </section>
               </div>
             </div>
@@ -1132,8 +1133,8 @@ export function MotionWorkbench({
                 <h2>动画导出</h2>
                 <p className="panel-description">
                   {draft.engine === "remotion-sdr-v1"
-                    ? "SDR 网页源为 8-bit sRGB，可输出带完整色域与传递函数标签的 sRGB 视频。"
-                    : "可保留 ACEScg EXR 母版，或仅输出 ACEScct 调色中间片、SDR sRGB / HDR PQ、HLG 视频。仅视频不生成 EXR；预览显示独立选择。"}
+                    ? "8-bit sRGB 源 · SDR 视频"
+                    : "ACEScg EXR 母版 · SDR / HDR 视频 · ACEScct 中间片"}
                 </p>
               </div>
               <Notice text={outputError} error />
@@ -1152,7 +1153,7 @@ export function MotionWorkbench({
                     <Field
                       label="正式导出采样"
                       id="motion-render-scale"
-                      hint="2×2 / 4×4 提升空间边缘质量，渲染更慢；不添加运动模糊。快速预览不受影响。"
+                      hint="采样越高，边缘越细腻、渲染越慢。"
                     >
                       <select
                         id="motion-render-scale"
@@ -1671,4 +1672,4 @@ export function MotionWorkbench({
       </Modal>
     </>
   );
-}
+});

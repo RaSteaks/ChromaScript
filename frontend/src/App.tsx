@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type MouseEvent,
@@ -78,13 +79,6 @@ const STATUS: Record<string, string> = {
   failed: "失败",
   cancelled: "已取消",
   interrupted: "已中断",
-};
-const STEP_HELP: Record<WorkflowStep, string> = {
-  scene: "选择项目与作品，或新建 WGSL、Three.js、React 作品。",
-  preview: "设置画面规格，编辑代码与参数，即时查看草稿效果。",
-  delivery:
-    "沿用预览中的画面规格，选择一个或多个交付格式。下拉选项会自动联动。",
-  jobs: "查看后台任务进度，选择任务后下载文件或导出完整图像序列。",
 };
 function jobLabel(job: Job) {
   if (job.kind === "frame")
@@ -229,10 +223,17 @@ export default function App() {
   const incompleteColor = Object.values(colorDrafts).some(
     (input) => input !== null && !validColorChannels(input.channels),
   );
+  // Compare source only when edits or revisions change, never for playback ticks.
+  const draftRecipe = useMemo(() => JSON.stringify(draft), [draft]);
+  const savedRecipe = useMemo(
+    () => JSON.stringify(saved?.scene ?? null),
+    [saved],
+  );
+  const changeCode = useCallback((code: string) => {
+    setDraft((old) => (old ? { ...old, code } : old));
+  }, []);
   const dirty =
-    !!draft &&
-    !!saved &&
-    (incompleteColor || JSON.stringify(draft) !== JSON.stringify(saved.scene));
+    !!draft && !!saved && (incompleteColor || draftRecipe !== savedRecipe);
   const activeProject = projects.find((p) => p.id === projectId);
   const activeJob =
     jobs.find((j) => j.id === activeJobId) ||
@@ -1152,7 +1153,6 @@ export default function App() {
               <h2 id="workflow-title" tabIndex={-1} ref={stepHeading}>
                 {WORKFLOW.find((item) => item.id === step)?.label}
               </h2>
-              <p>{STEP_HELP[step]}</p>
             </div>
             {step === "preview" && currentName && (
               <Button
@@ -1179,10 +1179,7 @@ export default function App() {
               <h3>
                 {currentName ? `继续编辑：${currentName}` : "从代码开始创作"}
               </h3>
-              <p>
-                在上方选择已有作品，或新建 WGSL、Three.js、React
-                作品。所有类型共用编辑、预览与导出流程。
-              </p>
+              <p>在上方选择作品，或新建作品。</p>
               {currentName && (
                 <Button className="primary" onClick={() => setStep("preview")}>
                   继续编辑与预览
@@ -1257,16 +1254,12 @@ export default function App() {
                       language="wgsl"
                       value={draft.code}
                       editable={!pending}
-                      onChange={(code) =>
-                        setDraft((old) => (old ? { ...old, code } : old))
-                      }
+                      onChange={changeCode}
                       onComposing={setComposing}
                     />
                     <div className="code-footer">
                       <span id="code-help">
-                        shade(ctx) 固定返回线性 ACEScg RGBA（非预乘）。RGB
-                        可小于 0 或大于 1，Alpha 为 0–1；颜色参数已转换为
-                        ACEScg。使用 ctx.time 与 ctx.seed。
+                        shade(ctx) → 线性 ACEScg RGBA · 非预乘 Alpha
                       </span>
                       <Button
                         disabled={!draft}
@@ -1370,8 +1363,8 @@ export default function App() {
                           }
                         >
                           {dirty
-                            ? "修改无需保存即可实时预览；保存后可渲染关键帧与动画。"
-                            : "实时预览最高 720p 级、单次采样，交付按完整规格渲染。"}
+                            ? "草稿预览 · 保存后可渲染"
+                            : "最高 720p · 单次采样"}
                         </p>
                         <span>
                           sRGB 显示预览{" "}
@@ -1412,7 +1405,6 @@ export default function App() {
                                 ? "实时预览未完成"
                                 : "正在准备实时预览"}
                             </strong>
-                            <p>直接显示当前草稿，无需先保存场景。</p>
                           </div>
                         ) : showMotion && motion ? (
                           <video
@@ -1625,9 +1617,6 @@ export default function App() {
                             场景参数
                           </h3>
                         </div>
-                        <p className="panel-description">
-                          调整参数即可实时查看；保存场景后用于正式渲染。
-                        </p>
                         <div className="parameter-fields">
                           {/* Visual colors keep display appearance separate from scene float RGB. */}
                           {draft?.parameters.map((p) =>
@@ -1902,11 +1891,6 @@ export default function App() {
                       }}
                     />
                     <DeliveryEditor delivery={delivery} disabled={!!pending} />
-                    <p className="technical-note">
-                      从线性 ACEScg 转换至所选输出：显示交付应用一次 ACES
-                      输出变换；ACES 场景编码仅转换色彩空间，不烘焙显示效果。
-                      网页始终使用 sRGB 预览，不替代 HDR 校准监看。
-                    </p>
                   </div>
                 </div>
                 <div className="delivery-review">
@@ -2253,7 +2237,6 @@ export default function App() {
                   <Button onClick={() => setStep("delivery")}>
                     返回设置交付
                   </Button>
-                  <span>任务在后台执行，切换步骤不会中止渲染。</span>
                 </div>
               </>
             )}
@@ -2375,7 +2358,7 @@ export default function App() {
           <Field
             label="项目名称"
             id="project-name"
-            hint={nameError || "用于组织场景、渲染任务和交付文件。"}
+            hint={nameError}
             invalid={!!nameError}
           >
             <input
