@@ -38,9 +38,16 @@ Agent 先调用 `chromascript.get_audio_guidelines(project_id)` 获取项目对�
 - `hit_points`：`label`、`time_seconds`、`tolerance_seconds`（默认 0.05，范围 0–1）及可选 `track_name`。服务要求指定声部或任一非静音声部在容差内有起音。
 - `reading_windows`：`label`、`start_seconds`、`end_seconds`、`max_velocity`（默认 64）和 `allow_note_onsets`（默认 true）。窗口内重叠的按键音符不能超过力度限制；设为 false 可禁止窗口内起音。
 
-约束时间相对于音乐素材，编曲时从场景时间中减去预定的音轨起点；窗口含起点、不含终点。服务校验乐谱时间与落点，不分析画面或认证听感；阅读窗口不检查音源释放尾音。MIDI 时间使用每秒 48000 ticks，但 FluidSynth 内部调度仍有时间量化，音色本身也可能缓慢起音，需试听。音符时长指按键时间，应在总时长内给释放尾音留余量；最后按指定总时长裁切并淡出。当前固定关闭混响/合唱、合成器增益 0.2、256 发声数、单 CPU 核心、无延音踏板，原生渲染超时为 300 秒。
+可选效果与踏板字段（MCP、CLI、HTTP 使用同一模型）：
 
-返回的 `generation_report` 同时保存在 `asset.metadata.generation_report`，记录实际样本数、时长、采样率、声道、PCM 样本峰值/dBFS、饱和前峰值、削波声道样本数、WAV 哈希、音源快照哈希与预设、完整乐谱及约束、落点检查、FluidSynth 版本/选项/输出探测和实现哈希。输出增益与淡出在浮点域完成后才转换为 32-bit 整数 PCM，不自动归一化。静音的 `peak_dbfs` 为 null；未进行 LUFS 或真峰值分析。保留原音源与乐谱以便重复生成，不保证跨 FluidSynth 版本或平台逐位一致。分轨、片段预览、公开 MIDI 导入/导出和多版本自动试配留待后续扩展。
+- `score.reverb`：对象启用混响，默认参数为 `{"room_size":0.5,"damp":0.2,"width":0.8,"level":0.7}`；`room_size`、`damp`、`level` 范围 0–1，`width` 范围 0–100。
+- `score.chorus`：对象启用合唱，默认参数为 `{"nr":3,"level":0.6,"speed":0.2,"depth":4.25}`；`nr` 为 0–99 个声部，`level` 为 0–10，`speed` 为 0.1–5 Hz，`depth` 为 0–256 ms。两种效果省略或设为 null 时关闭；传 `{}` 使用上述默认值。
+- 声部的 `reverb_send`、`chorus_send`：可选 0–127 整数，分别发送 CC91、CC93；省略或 null 保留原生送量默认值。启用效果时建议显式设置送量。效果参数全局共享，SoundFont 调制器也会影响效果量，最终混入 WAV。
+- 声部的 `sustain_pedal`：例如 `[{"down_seconds":0,"up_seconds":1.8}]`。每段必须在采样舍入后先踩下再松开，段间不可重叠（允许首尾相接），松开后必须至少保留 `max(0.02, fade_out_seconds)` 秒。相同时刻依次发送松键、松踏板、踩踏板、按键；同音按键区间的重叠校验不变。
+
+约束时间相对于音乐素材，编曲时从场景时间中减去预定的音轨起点；窗口含起点、不含终点。服务校验乐谱时间与落点，不分析画面或认证听感；阅读窗口不检查踏板延音、释放与效果尾音。MIDI 时间使用每秒 48000 ticks，但 FluidSynth 内部调度仍有时间量化，音色本身也可能缓慢起音，需试听。音符时长指按键时间，踏板踩下时松键的音会保持到松踏板；应按音色和效果实际需要留出超过最低要求的尾音余量，最后按指定总时长裁切并淡出。合成器增益 0.2、256 发声数、单 CPU 核心，原生渲染超时为 300 秒。
+
+返回的 `generation_report` 同时保存在 `asset.metadata.generation_report`，记录实际样本数、时长、采样率、声道、PCM 样本峰值/dBFS、饱和前峰值、削波声道样本数、WAV 哈希、音源快照哈希与预设、完整乐谱及约束、落点检查、FluidSynth 版本/选项/输出探测和实现哈希。输出增益与淡出在浮点域完成后才转换为 32-bit 整数 PCM，不自动归一化。新增 `loudness` 含 `integrated_lufs`、`loudness_range_lu`、`true_peak_dbtp`、`method`、FFmpeg 版本与原始 Summary，通过 FFmpeg `ebur128=peak=true` 测量最终 WAV。`create_audio`、`import_audio` 也在 `asset.metadata.loudness` 保存同样的测量；听审在 `report.objective.loudness` 测量选中的原始立体声片段。Summary 分辨率为 0.1 LU/dB；静音真峰值、低于或等于 -70 LUFS 门限或没有有效门控块（含不足 400 ms 片段）的综合响度为 null，短片段的 LRA=0 不代表有意义的响度范围。测量失败不会发布素材，测量结果不等于交付认证。保留原音源与乐谱以便重复生成，不保证跨 FluidSynth 版本或平台逐位一致。更新代码后重启服务和 MCP 客户端以加载新字段。分轨、片段预览、公开 MIDI 导入/导出和多版本自动试配留待后续扩展。
 
 本地 Qwen2.5-Omni / llama.cpp 可作为配乐听审模型，MCP 与 CLI 提供同名操作：
 
@@ -60,7 +67,7 @@ Agent 先调用 `chromascript.get_audio_guidelines(project_id)` 获取项目对�
 
 真实音频以 base64 WAV 传给模型；监听副本转换为 16 kHz 单声道 16-bit PCM，不做响度归一化，原始 48 kHz 双声道素材不变。生成时的主题、配器及相关落点/阅读窗口会作为“创作目标”附带；它们不代表模型实际听到了这些内容。模型未收到画面，不能认证音画同步，也不能通过监听副本认证原始声像、高频质量、LUFS、真峰值或削波。
 
-结果直接反馈给调用 agent：`report.objective` 是源片段的实测样本峰值、每声道 RMS 和满幅样本计数；`report.feedback` 是模型的总结、优点、问题、建议和不确定性。满幅样本数不等于已证实削波。问题时间是片段内近似秒数，加上 `objective.start_seconds` 才是素材时间。`feedback_status="complete"` 仅表示结构有效；截断、无效 JSON、越界时间或模型切换会返回 `invalid`、原始回答和原因。网络或模型拒绝请求则明确报错，不伪造听审结果。模型意见可能出错，agent 应结合客观结果和制作要求判断；不会自动修改音符、覆盖素材或替换音轨。
+结果直接反馈给调用 agent：`report.objective` 是源片段的实测样本峰值、每声道 RMS、满幅样本计数及 `loudness`（综合响度、响度范围、真峰值与测量方法）；`report.feedback` 是模型的总结、优点、问题、建议和不确定性。满幅样本数不等于已证实削波。问题时间是片段内近似秒数，加上 `objective.start_seconds` 才是素材时间。`feedback_status="complete"` 仅表示结构有效；截断、无效 JSON、越界时间或模型切换会返回 `invalid`、原始回答和原因。网络或模型拒绝请求则明确报错，不伪造听审结果。模型意见可能出错，agent 应结合客观结果和制作要求判断；不会自动修改音符、覆盖素材或替换音轨。
 
 听审报告作为 `audio-review` JSON 成果保存在 `<workspace>/audio-reviews/`，可通过现有 `get_artifact`、`export_artifact` 读取/导出。报告记录素材与监听副本哈希、检查范围、上下文、模型 ID/配置/服务版本、token 使用量及提示词/实现指纹；不认证模型权重哈希或跨运行环境的逐位重现。每个服务同时执行一项听审，不阻塞普通编辑操作。模型协议依据 [llama.cpp 服务文档](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)。
 

@@ -25,7 +25,7 @@ from chromascript.errors import ChromaError
 from chromascript.mcp_server import create_mcp
 from chromascript.models import Rational, RenderSettings
 from chromascript.music import finish_pcm, music_environment, score_midi
-from chromascript.operations import execute
+from chromascript.operations import catalogue, execute
 from chromascript.service import Service
 
 
@@ -142,6 +142,18 @@ def score_data():
             ],
         },
     }
+
+
+def expressive_score_data():
+    # Use the same score across transports so new nested fields cannot disappear
+    # at the MCP/HTTP/CLI boundary while local rendering still happens to work.
+    data = score_data()
+    data.update(reverb={"level": 0.3}, chorus={"nr": 2, "speed": 0.5})
+    data["tracks"][0].update(
+        reverb_send=70, chorus_send=40,
+        sustain_pedal=[{"down_seconds": 0.1, "up_seconds": 0.95}],
+    )
+    return data
 
 
 def pcm(path):
@@ -290,6 +302,9 @@ def test_real_four_part_render_report_and_existing_timeline(project, font):
     assert np.max(np.abs(actual[36000:, 1])) > 0.001
     assert report["peak"] == float(np.max(np.abs(actual)))
     assert report["sha256"] == asset["sha256"]
+    assert report["loudness"]["integrated_lufs"] is not None
+    assert report["loudness"]["true_peak_dbtp"] is not None
+    assert report["loudness"] == asset["metadata"]["loudness"]
     assert report["soundfont"]["sha256"] == hashlib.sha256(font.read_bytes()).hexdigest()
     assert report["constraint_checks"]["hit_points"][0]["matched"]
     assert report["renderer"]["probe"]["streams"][0]["codec_name"] == "pcm_f32le"
@@ -370,13 +385,17 @@ def test_cli_mcp_http_parity(tmp_path, font, monkeypatch):
                             "project_id": pid,
                             "name": "MCP Music",
                             "soundfont_path": str(font),
-                            "score": score_data(),
+                            "score": expressive_score_data(),
                         }
                     },
                 )
                 assert not reply.is_error
                 aid = reply.structured_content["asset"]["id"]
                 assert service.store.get("audio_asset", aid)["name"] == "MCP Music"
+                report = reply.structured_content["generation_report"]
+                assert report["score"]["reverb"]["level"] == 0.3
+                assert report["score"]["tracks"][0]["sustain_pedal"][0]["up_seconds"] == 0.95
+                assert report["loudness"]["true_peak_dbtp"] is not None
                 docs = await client.read_resource("chromascript://docs/audio")
                 assert "reading_windows" in docs.contents[0].text
 
@@ -403,7 +422,7 @@ def test_cli_mcp_http_parity(tmp_path, font, monkeypatch):
                     "project_id": pid,
                     "name": "CLI Music",
                     "soundfont_path": str(font),
-                    "score": score_data(),
+                    "score": expressive_score_data(),
                 },
             ),
         ]:
@@ -411,8 +430,141 @@ def test_cli_mcp_http_parity(tmp_path, font, monkeypatch):
                 app, ["call", operation, "--arguments", json.dumps(arguments)]
             )
             assert result.exit_code == 0, result.output
+            if operation == "create_music":
+                report = json.loads(result.output)["generation_report"]
+                assert report["score"]["chorus"]["nr"] == 2
+                assert report["loudness"]["integrated_lufs"] is not None
         service._renderer = SimpleNamespace(info={})
         assert (
             service.get_capabilities()["audio"]["music"]
             == service.get_audio_guidelines(pid)["music"]
         )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda d: d.update(reverb={"room_size": 1.01}),
+        lambda d: d.update(reverb={"damp": -0.01}),
+        lambda d: d.update(reverb={"width": 101}),
+        lambda d: d.update(reverb={"level": float("nan")}),
+        lambda d: d.update(reverb={"unknown": 1}),
+        lambda d: d.update(chorus={"nr": True}),
+        lambda d: d.update(chorus={"nr": "3"}),
+        lambda d: d.update(chorus={"nr": 100}),
+        lambda d: d.update(chorus={"speed": 0.09}),
+        lambda d: d.update(chorus={"depth": 257}),
+        lambda d: d.update(chorus={"level": 11}),
+        lambda d: d["tracks"][0].update(reverb_send=128),
+        lambda d: d["tracks"][0].update(chorus_send=True),
+        lambda d: d["tracks"][0].update(sustain_pedal=[{"down_seconds": 0.2, "up_seconds": 0.1}]),
+        lambda d: d["tracks"][0].update(sustain_pedal=[{"down_seconds": 0.1, "up_seconds": 0.100001}]),
+        lambda d: d["tracks"][0].update(sustain_pedal=[{"down_seconds": 0, "up_seconds": 1.25}]),
+        lambda d: d["tracks"][0].update(sustain_pedal=[{"down_seconds": 0, "up_seconds": 1.2}]),
+        lambda d: d["tracks"][0].update(sustain_pedal=[
+            {"down_seconds": 0.2, "up_seconds": 0.7}, {"down_seconds": 0, "up_seconds": 0.3},
+        ]),
+    ],
+)
+def test_invalid_effects_and_pedals(change):
+    data = score_data()
+    change(data)
+    with pytest.raises(ValidationError):
+        MusicScore.model_validate(data)
+
+
+def midi_events(encoded):
+    # Decode actual MIDI delta times/status bytes to assert simultaneous-event
+    # semantics, including multi-byte deltas, rather than searching raw substrings.
+    pos, tick, events = 22, 0, []
+
+    def variable():
+        nonlocal pos
+        value = 0
+        while True:
+            byte = encoded[pos]
+            pos += 1
+            value = (value << 7) | (byte & 127)
+            if byte < 128:
+                return value
+
+    while pos < len(encoded):
+        tick += variable()
+        status = encoded[pos]
+        pos += 1
+        if status == 255:
+            pos += 1
+            length = variable()
+            pos += length
+        else:
+            length = 1 if status & 0xF0 == 0xC0 else 2
+            events.append((tick, bytes([status]) + encoded[pos:pos + length]))
+            pos += length
+    return events
+
+
+def test_pedal_same_tick_order_adjacent_unisons_and_channels():
+    data = score_data()
+    data["constraints"] = {}
+    track = data["tracks"][0]
+    track.update(reverb_send=0, chorus_send=127, sustain_pedal=[
+        {"down_seconds": 0.6, "up_seconds": 1.15},
+        {"down_seconds": 0.1, "up_seconds": 0.6},
+    ])
+    track["notes"].append({"pitch": 69, "start_seconds": 0.6, "duration_seconds": 0.3})
+    data["tracks"] = [{**copy.deepcopy(track), "name": str(i)} for i in range(15)]
+    events = midi_events(score_midi(MusicScore.model_validate(data)))
+    for channel in [*range(9), *range(10, 16)]:
+        assert (0, bytes([0xB0 | channel, 91, 0])) in events
+        assert (0, bytes([0xB0 | channel, 93, 127])) in events
+        same_tick = [event for tick, event in events if tick == 28800 and event[0] & 15 == channel]
+        assert same_tick == [
+            bytes([0x80 | channel, 69, 0]), bytes([0xB0 | channel, 64, 0]),
+            bytes([0xB0 | channel, 64, 127]), bytes([0x90 | channel, 69, 72]),
+        ]
+    assert not any(event[0] & 15 == 9 for _, event in events)
+    # Key-down overlap remains forbidden even when the whole phrase is pedalled.
+    data["tracks"][0]["notes"][1]["start_seconds"] = 0.59
+    with pytest.raises(ValidationError, match="Same-pitch"):
+        MusicScore.model_validate(data)
+
+
+@pytest.mark.skipif(not shutil.which("fluidsynth"), reason="FluidSynth is optional")
+@pytest.mark.parametrize("feature", ["reverb", "chorus", "sustain_pedal"])
+def test_real_effect_and_pedal_audio(project, font, feature):
+    service, pid = project
+    data = score_data()
+    data["tracks"][0].update(reverb_send=100, chorus_send=100)
+    dry = service.create_music(pid, "dry", str(font), MusicScore.model_validate(data))
+    if feature == "sustain_pedal":
+        data["tracks"][0][feature] = [{"down_seconds": 0.1, "up_seconds": 0.95}]
+    else:
+        data[feature] = {}
+    wet = service.create_music(pid, feature, str(font), MusicScore.model_validate(data))
+    dry_pcm = pcm(service.store.file(dry["asset"]["relative_path"]))
+    wet_pcm = pcm(service.store.file(wet["asset"]["relative_path"]))
+    assert wet_pcm.shape == dry_pcm.shape == (60000, 2)
+    assert np.max(np.abs(wet_pcm - dry_pcm)) > 0.0001
+    assert np.isfinite(wet_pcm).all() and not np.any(wet_pcm[-1])
+    if feature == "sustain_pedal":
+        # The native synth holds the sample after note-off until the later CC64 up.
+        assert np.mean(wet_pcm[40000:44000] ** 2) > 20 * np.mean(dry_pcm[40000:44000] ** 2)
+    else:
+        options = wet["generation_report"]["renderer"]["options"]
+        flag = "-R" if feature == "reverb" else "-C"
+        assert options[options.index(flag) + 1] == "1"
+        assert any(option.startswith(f"synth.{feature}.") for option in options)
+        data["tracks"][0][f"{feature}_send"] = 0
+        zero = service.create_music(pid, "zero send", str(font), MusicScore.model_validate(data))
+        np.testing.assert_array_equal(pcm(service.store.file(zero["asset"]["relative_path"])), dry_pcm)
+
+
+def test_controls_in_shared_schema_and_example():
+    from pathlib import Path
+
+    operation = next(op for op in catalogue() if op["name"] == "chromascript.create_music")
+    schema = operation["inputSchema"]
+    assert {"reverb", "chorus"} <= schema["$defs"]["MusicScore"]["properties"].keys()
+    assert {"sustain_pedal", "reverb_send", "chorus_send"} <= schema["$defs"]["MusicTrack"]["properties"].keys()
+    example = json.loads((Path(__file__).parents[1] / "examples/music-score.json").read_text())
+    MusicScore.model_validate(example["score"])

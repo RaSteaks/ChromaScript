@@ -13,7 +13,16 @@ from typing import Any, BinaryIO, Iterator
 
 import numpy as np
 
-from .audio import BLOCK, CHANNELS, RATE, MusicScore, pcm_bytes, pcm_writer, samples
+from .audio import (
+    BLOCK,
+    CHANNELS,
+    RATE,
+    MusicScore,
+    measure_loudness,
+    pcm_bytes,
+    pcm_writer,
+    samples,
+)
 from .encoding import probe
 from .errors import ChromaError
 from .images import file_hash
@@ -73,7 +82,9 @@ def music_environment() -> dict[str, Any]:
         "soundfont_required": "Absolute local file; no bundled/downloaded instruments",
         "constraints": ["theme", "instrumentation", "hit_points", "reading_windows"],
         "timing": "Score boundaries use 48000 ticks/second; FluidSynth playback has internal timer/block quantization. Hit checks validate score onsets, not acoustic attacks.",
-        "analysis": "Sample peaks and saturation counts only; no LUFS or true-peak analysis",
+        "analysis": "Sample peaks/saturation counts plus FFmpeg ebur128 integrated LUFS, LRA and true peak on the final WAV; no normalization",
+        "effects": "Optional score.reverb/chorus objects enable global effects; null disables. Track reverb_send/chorus_send set CC91/CC93 (0..127); omitted sends retain native defaults.",
+        "sustain_pedal": "Track sustain_pedal intervals emit CC64; non-overlapping and leave max(0.02, fade_out_seconds) seconds after pedal-up for release.",
     }
 
 
@@ -206,14 +217,23 @@ def score_midi(score: MusicScore) -> bytes:
         ):
             events.append((0, -1, bytes([0xB0 | channel, controller, value])))
         events.append((0, -1, bytes([0xC0 | channel, track.program])))
+        for controller, send in ((91, track.reverb_send), (93, track.chorus_send)):
+            if send is not None:
+                events.append((0, -1, bytes([0xB0 | channel, controller, send])))
+        for pedal in track.sustain_pedal:
+            down, up = pedal.bounds()
+            events.append((down, 2, bytes([0xB0 | channel, 64, 127])))
+            events.append((up, 1, bytes([0xB0 | channel, 64, 0])))
         for note in track.notes:
             start, end = note.bounds()
-            events.append((start, 1, bytes([0x90 | channel, note.pitch, note.velocity])))
+            events.append((start, 3, bytes([0x90 | channel, note.pitch, note.velocity])))
             events.append((end, 0, bytes([0x80 | channel, note.pitch, 0])))
-    events.append((samples(score.duration_seconds), 2, b"\xff\x2f\x00"))
+    events.append((samples(score.duration_seconds), 4, b"\xff\x2f\x00"))
     track_data, previous = bytearray(), 0
     # Stable sort preserves controller bank selection order; releases precede
     # attacks at the same tick so adjacent unisons are not accidentally cut off.
+    # Note-off -> pedal-up -> pedal-down -> note-on also handles touching pedal
+    # intervals without leaving CC64 off or releasing a newly attacked note.
     for tick, _, event in sorted(events, key=lambda e: (e[0], e[1])):
         track_data.extend(variable_length(tick - previous) + event)
         previous = tick
@@ -272,6 +292,7 @@ def finish_pcm(raw: Path, path: Path, score: MusicScore) -> dict[str, Any]:
         "clipping": clipped > 0,
         "clipping_unit": "channel samples after output gain/fade, before PCM saturation",
         "sha256": file_hash(path),
+        "loudness": measure_loudness(path),
     }
 
 
@@ -311,9 +332,9 @@ def render_music(path: Path, source_path: str, score: MusicScore) -> dict[str, A
         "-f",
         str(config),
         "-R",
-        "0",
+        "1" if score.reverb is not None else "0",
         "-C",
-        "0",
+        "1" if score.chorus is not None else "0",
         "-g",
         "0.2",
         "-r",
@@ -337,6 +358,12 @@ def render_music(path: Path, source_path: str, score: MusicScore) -> dict[str, A
         "-o",
         "synth.min-note-length=0",
     ]
+    # Only public typed settings reach the native command; record every effective
+    # value in renderer.options so changed synth defaults do not hide parameters.
+    for effect, settings in (("reverb", score.reverb), ("chorus", score.chorus)):
+        if settings is not None:
+            for key, value in settings.model_dump(exclude={"schema_version"}).items():
+                options.extend(["-o", f"synth.{effect}.{key.replace('_', '-')}={value}"])
     result = run_process(
         [runtime["executable"], *options, "-F", str(floating), str(font), str(midi)], RENDER_TIMEOUT
     )
@@ -403,11 +430,11 @@ def render_music(path: Path, source_path: str, score: MusicScore) -> dict[str, A
         ).hexdigest(),
         "constraint_checks": {
             "hit_points": score.hit_report(),
-            "reading_windows": "passed (key-down intervals only; release tails excluded)",
+            "reading_windows": "passed (key-down intervals only; pedal sustain, release and effect tails excluded)",
             "instrumentation": "passed (track names and actual preset existence)",
             "theme": "agent guidance; not semantically verified",
         },
         "timing": runtime["timing"],
-        "release_policy": "Note durations are key-down; release tails play only until score end, then crop/fade. Leave tail room in the score.",
+        "release_policy": "Note durations are key-down; notes released with sustain pedal down remain held until pedal-up. Pedal-up reserves max(0.02, fade_out_seconds) seconds, but the SoundFont/effects can need more. Sustain, release and effect tails play only until score end, then crop/fade.",
         "reproducibility": "Retain the exact SoundFont and score. Bit identity across FluidSynth builds/platforms is not guaranteed.",
     }

@@ -73,6 +73,10 @@ def test_create_import_and_cli(audio_project, monkeypatch):
     assert np.argmax(np.abs(np.fft.rfft(data[:, 0]))) == 1000
     assert asset["metadata"]["probe"]["streams"][0]["codec_name"] == "pcm_s32le"
     imported = service.import_audio(project, "imported", source_path=str(path))["asset"]
+    # Import measures the managed PCM, so a lossless round trip has identical metrics.
+    for key in ("integrated_lufs", "loudness_range_lu", "true_peak_dbtp"):
+        assert asset["metadata"]["loudness"][key] == imported["metadata"]["loudness"][key]
+    assert asset["metadata"]["loudness"]["true_peak_dbtp"] == pytest.approx(-6, abs=0.1)
     np.testing.assert_array_equal(pcm(service.store.file(imported["relative_path"])), data)
     encoded = base64.b64encode(path.read_bytes()).decode()
     assert service.import_audio(project, "bytes", data_base64=encoded)["asset"]["samples"] == 48000

@@ -6,6 +6,8 @@
     "duration_seconds": 8,
     "gain_db": -6,
     "fade_out_seconds": 1,
+    "reverb": {"room_size": 0.5, "damp": 0.3, "width": 0.8, "level": 0.25},
+    "chorus": {"nr": 3, "level": 0.3, "speed": 0.2, "depth": 4.25},
     "constraints": {
       "theme": "温和而清晰：钢琴提出主题，弦乐托住公式阅读，六秒处呼应镜头切换。",
       "instrumentation": ["piano", "violin", "viola", "cello"],
@@ -20,6 +22,11 @@
     "tracks": [
       {
         "name": "piano", "bank": 0, "program": 0, "volume": 90, "pan": -0.2,
+        "reverb_send": 40, "chorus_send": 0,
+        "sustain_pedal": [
+          {"down_seconds": 0, "up_seconds": 1.8},
+          {"down_seconds": 6, "up_seconds": 7}
+        ],
         "notes": [
           {"pitch": 60, "start_seconds": 0, "duration_seconds": 0.7, "velocity": 68},
           {"pitch": 64, "start_seconds": 0.8, "duration_seconds": 0.7, "velocity": 64},
@@ -28,14 +35,17 @@
       },
       {
         "name": "violin", "bank": 0, "program": 40, "volume": 65, "pan": -0.45,
+        "reverb_send": 45, "chorus_send": 20,
         "notes": [{"pitch": 67, "start_seconds": 1.5, "duration_seconds": 4, "velocity": 48}]
       },
       {
         "name": "viola", "bank": 0, "program": 41, "volume": 65, "pan": 0.1,
+        "reverb_send": 45, "chorus_send": 20,
         "notes": [{"pitch": 64, "start_seconds": 1.5, "duration_seconds": 4, "velocity": 48}]
       },
       {
         "name": "cello", "bank": 0, "program": 42, "volume": 70, "pan": 0.4,
+        "reverb_send": 40, "chorus_send": 16,
         "notes": [{"pitch": 48, "start_seconds": 1.5, "duration_seconds": 4, "velocity": 52}]
       }
     ]

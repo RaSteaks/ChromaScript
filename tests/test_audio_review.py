@@ -206,6 +206,9 @@ def test_actual_clip_bytes_feedback_and_report(audio_project, local_model):
     assert report["objective"]["samples"] == 24000
     assert report["objective"]["sample_peak"] == pytest.approx(10 ** (-6 / 20))
     assert report["objective"]["rms_per_channel"][1] == 0
+    # This is the selected stereo source clip, independently of model/downmix output.
+    assert report["objective"]["loudness"]["true_peak_dbtp"] == pytest.approx(-6, abs=0.1)
+    assert report["objective"]["loudness"]["integrated_lufs"] == pytest.approx(-9.7, abs=0.2)
     payload = local_model["posts"][0]
     assert payload["stream"] is False and "tools" not in payload
     part = payload["messages"][1]["content"][0]

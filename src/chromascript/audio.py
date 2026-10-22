@@ -7,6 +7,7 @@ import binascii
 import hashlib
 import json
 import math
+import re
 import shutil
 import subprocess
 import tempfile
@@ -65,7 +66,7 @@ class AudioSynthesis(Model):
 
 
 class MusicNote(Model):
-    # Duration is key-down time. SoundFont release tails need room before the score ends.
+    # Duration is key-down time, independent of CC64 sustain and SoundFont release tails.
     pitch: int = Field(ge=0, le=127, strict=True)
     start_seconds: float = Field(default=0, ge=0, le=MAX_SECONDS)
     duration_seconds: float = Field(ge=0.001, le=MAX_SECONDS)
@@ -78,12 +79,44 @@ class MusicNote(Model):
         )
 
 
+class MusicReverb(Model):
+    # Pin effect settings explicitly instead of inheriting version-dependent defaults.
+    room_size: float = Field(default=0.5, ge=0, le=1)
+    damp: float = Field(default=0.2, ge=0, le=1)
+    width: float = Field(default=0.8, ge=0, le=100)
+    level: float = Field(default=0.7, ge=0, le=1)
+
+
+class MusicChorus(Model):
+    nr: int = Field(default=3, ge=0, le=99, strict=True)
+    level: float = Field(default=0.6, ge=0, le=10)
+    speed: float = Field(default=0.2, ge=0.1, le=5, description="Modulation rate in Hz")
+    depth: float = Field(default=4.25, ge=0, le=256, description="Modulation depth in ms")
+
+
+class SustainPedal(Model):
+    down_seconds: float = Field(ge=0, le=MAX_SECONDS)
+    up_seconds: float = Field(gt=0, le=MAX_SECONDS)
+
+    def bounds(self) -> tuple[int, int]:
+        return samples(self.down_seconds), samples(self.up_seconds)
+
+    @model_validator(mode="after")
+    def interval(self) -> SustainPedal:
+        if self.bounds()[0] >= self.bounds()[1]:
+            raise ValueError("Sustain pedal down must precede up by at least one sample")
+        return self
+
+
 class MusicTrack(Model):
     name: str = Field(min_length=1, max_length=120, pattern=r"\S")
     bank: int = Field(default=0, ge=0, le=16383, strict=True)
     program: int = Field(ge=0, le=127, strict=True)
     volume: int = Field(default=100, ge=0, le=127, strict=True)
     pan: float = Field(default=0, ge=-1, le=1)
+    reverb_send: int | None = Field(default=None, ge=0, le=127, strict=True)
+    chorus_send: int | None = Field(default=None, ge=0, le=127, strict=True)
+    sustain_pedal: list[SustainPedal] = Field(default_factory=list, max_length=4096)
     notes: list[MusicNote] = Field(min_length=1, max_length=4096)
 
 
@@ -115,6 +148,9 @@ class MusicScore(Model):
     tracks: list[MusicTrack] = Field(min_length=1, max_length=15)
     gain_db: float = Field(default=0, ge=-96, le=12)
     fade_out_seconds: float = Field(default=0.02, ge=0, le=10)
+    # Omitted/null effects preserve dry rendering; an object enables that global effect.
+    reverb: MusicReverb | None = None
+    chorus: MusicChorus | None = None
     constraints: MusicConstraints = Field(default_factory=MusicConstraints)
 
     def hit_report(self) -> list[dict[str, Any]]:
@@ -153,6 +189,16 @@ class MusicScore(Model):
             if not 0 <= samples(window.start_seconds) < samples(window.end_seconds) <= total:
                 raise ValueError("Reading windows must fit inside duration_seconds")
         for track in self.tracks:
+            previous_up = -1
+            for pedal in sorted(track.sustain_pedal, key=lambda p: p.bounds()[0]):
+                down, up = pedal.bounds()
+                if down < previous_up:
+                    raise ValueError("Sustain pedal intervals must not overlap within a track")
+                # Reserve at least 20 ms and the final fade for release. A font can
+                # need more time; this minimum does not certify an untruncated tail.
+                if up > total - max(samples(0.02), samples(self.fade_out_seconds)):
+                    raise ValueError("Sustain pedal up must leave max(0.02, fade_out_seconds) of release room")
+                previous_up = up
             ends: dict[int, int] = {}
             for note in sorted(track.notes, key=lambda n: n.start_seconds):
                 start, end = note.bounds()
@@ -351,6 +397,59 @@ def run_audio_process(args: list[str], timeout: int) -> subprocess.CompletedProc
         raise ChromaError("audio_runtime", "无法启动音频解码器，请检查 FFmpeg 安装。") from exc
 
 
+def measure_loudness(path: Path) -> dict[str, Any]:
+    """Measure the finished PCM file without normalizing or modifying its samples."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise ChromaError("ffmpeg_unavailable", "FFmpeg is required for loudness measurement")
+    result = run_audio_process(
+        [
+            ffmpeg, "-v", "info", "-nostats", "-nostdin",
+            "-protocol_whitelist", "file", "-format_whitelist", "wav",
+            "-i", str(path), "-map", "0:a:0",
+            "-af", "ebur128=peak=true:framelog=verbose", "-f", "null", "-",
+        ],
+        timeout=120,
+    )
+    if result.returncode:
+        raise ChromaError(
+            "audio_loudness", "FFmpeg loudness measurement failed", diagnostic=result.stderr[-2000:]
+        )
+    # Parse only the final summary, never the per-frame I/peak telemetry or the
+    # initialization summary. Keep -inf JSON-safe and expose the gating floor.
+    marker, found, summary = result.stderr.rpartition("Summary:")
+    if not found:
+        raise ChromaError("audio_loudness", "FFmpeg returned no loudness summary")
+    number = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+|inf))"
+    values: dict[str, float | None] = {}
+    for key, section, label, unit in (
+        ("integrated_lufs", "Integrated loudness", "I", "LUFS"),
+        ("loudness_range_lu", "Loudness range", "LRA", "LU"),
+        ("true_peak_dbtp", "True peak", "Peak", "dBFS"),
+    ):
+        match = re.search(rf"{section}:\s*{label}:\s*{number}\s+{unit}\b", summary)
+        if match is None:
+            raise ChromaError("audio_loudness", f"Missing or invalid {key} in FFmpeg summary")
+        value = float(match[1])
+        if value == math.inf:
+            raise ChromaError("audio_loudness", f"Non-finite {key} in FFmpeg summary")
+        values[key] = value if math.isfinite(value) else None
+    if values["integrated_lufs"] is not None and values["integrated_lufs"] <= -70:
+        values["integrated_lufs"] = None
+    # The true-peak line ends the summary; omit FFmpeg's variable speed/address logs.
+    assert match is not None
+    summary = summary[:match.end()]
+    version = next((line for line in marker.splitlines() if line.startswith("ffmpeg version ")), "unknown")
+    return {
+        **values,
+        "method": "FFmpeg ebur128=peak=true (EBU R128; oversampled true peak)",
+        "ffmpeg_version": version,
+        "scope": "Entire supplied PCM WAV; no normalization",
+        "summary": summary.strip()[:2000],
+        "limitations": "Summary precision is 0.1 LU/dB. Integrated loudness is null at/below the -70 LUFS gate or with no qualifying blocks (including clips under 400 ms); silent true peak is null. Short clips may report LRA=0 without a meaningful loudness range. Measurement is not delivery certification.",
+    }
+
+
 class AudioOperations:
     """The registry exposes these same operations through HTTP, MCP and CLI call."""
 
@@ -378,6 +477,10 @@ class AudioOperations:
                 raise ChromaError("audio_format", "Expected 48 kHz stereo 32-bit PCM")
         if not 1 <= count <= RATE * MAX_SECONDS or stream["codec_name"] != "pcm_s32le":
             raise ChromaError("audio_duration", "Audio must contain 0–600 seconds of decodable PCM")
+        # Music already measures the final gain/fade/saturated WAV. Reuse that
+        # measurement; other asset paths measure here before publishing anything.
+        loudness = metadata.get("generation_report", {}).get("loudness")
+        metadata = {**metadata, "loudness": loudness if loudness is not None else measure_loudness(path)}
         aid = identifier()
         target = self.store.file(f"audio/{aid}.wav")
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -548,7 +651,7 @@ class AudioOperations:
         return inspect_soundfont(soundfont_path, self.store.root)
 
     @operation(
-        "Render a timed MusicScore offline with FluidSynth and a local SF2 SoundFont. Up to 15 tracks / 16384 notes; validates hit points, reading windows and instrumentation. Returns immutable 48 kHz stereo WAV and generation_report; attach separately with set_project_audio."
+        "Render a timed MusicScore offline with FluidSynth and a local SF2 SoundFont, optional reverb/chorus, per-track sends and sustain pedal. Up to 15 tracks / 16384 notes; validates hit points, reading windows and instrumentation. Returns immutable 48 kHz stereo WAV and generation_report with measured LUFS/LRA/true peak; attach separately with set_project_audio."
     )
     def create_music(
         self, project_id: str, name: str, soundfont_path: str, score: MusicScore
