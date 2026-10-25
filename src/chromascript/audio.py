@@ -15,7 +15,7 @@ import wave
 from contextlib import ExitStack
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import numpy as np
 from pydantic import Field, model_validator
@@ -222,6 +222,9 @@ class MusicScore(Model):
 
 
 class AudioClip(Model):
+    # Optional provenance follows the saved clip; audition itself never writes a timeline.
+    audition_id: str | None = Field(default=None, min_length=1, max_length=64)
+    candidate_id: str | None = Field(default=None, min_length=1, max_length=64)
     asset_id: str = Field(min_length=1, max_length=64)
     start_seconds: float = Field(default=0, ge=0, le=86_400)
     source_start_seconds: float = Field(default=0, ge=0, le=MAX_SECONDS)
@@ -482,14 +485,14 @@ class AudioOperations:
         loudness = metadata.get("generation_report", {}).get("loudness")
         metadata = {**metadata, "loudness": loudness if loudness is not None else measure_loudness(path)}
         aid = identifier()
-        target = self.store.file(f"audio/{aid}.wav")
+        target = self.store.project_file(project_id, f"audio/{aid}.wav", name)
         target.parent.mkdir(parents=True, exist_ok=True)
         path.replace(target)
         asset: dict[str, Any] = {
             "id": aid,
             "project_id": project_id,
             "name": name,
-            "relative_path": str(target.relative_to(self.store.root)),
+            "relative_path": self.store.relative_file(target),
             "created_at": now(),
             "sample_rate": RATE,
             "channels": CHANNELS,
@@ -512,7 +515,7 @@ class AudioOperations:
         )
         # Asset discovery and artifact playback become visible atomically.
         try:
-            with self.store.connect() as connection:
+            with self.store.connect(project_id) as connection:
                 connection.executemany(
                     "INSERT INTO records VALUES (?,?,?)",
                     [
@@ -535,6 +538,14 @@ class AudioOperations:
         source_path: str | None = None,
         data_base64: str | None = None,
     ) -> dict[str, Any]:
+        return self._import_audio(project_id, name, source_path, data_base64)
+
+    def _import_audio(
+        self, project_id: str, name: str, source_path: str | None = None,
+        data_base64: str | None = None, metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        # Provider adapters reuse the same restricted decode and measured asset
+        # path; provenance is internal and cannot be forged through import_audio.
         self._audio_project(project_id, True)
         if (source_path is None) == (data_base64 is None):
             raise ChromaError("audio_input", "Supply exactly one of source_path or data_base64")
@@ -620,6 +631,15 @@ class AudioOperations:
             original_info = (
                 json.loads(source_probe.stdout) if source_probe.returncode == 0 else None
             )
+            if metadata and metadata.get("source") in {"openrouter_tts", "openrouter_music"}:
+                # Private scripts and provider ID3 tags must not be replicated
+                # into public artifact manifests; keep only measured audio fields.
+                output.chmod(0o600)
+                if original_info:
+                    original_info = {"streams": [{key: stream[key] for key in (
+                        "codec_type", "codec_name", "sample_rate", "channels", "channel_layout",
+                        "sample_fmt", "bits_per_sample", "bits_per_raw_sample", "duration"
+                    ) if key in stream} for stream in original_info.get("streams", [])]}
             return self._save_audio(
                 project_id,
                 name,
@@ -629,6 +649,7 @@ class AudioOperations:
                     "source_sha256": file_hash(source),
                     "source_probe": original_info,
                     "normalization": "Resampled/downmixed to 48 kHz stereo signed 32-bit PCM; not original source precision",
+                    **(metadata or {}),
                 },
             )
 
@@ -674,15 +695,18 @@ class AudioOperations:
     )
     def get_audio_guidelines(self, project_id: str) -> dict[str, Any]:
         from .audio_review import review_capabilities
+        from .cloud_music import music_configuration
         from .documentation import DOCUMENTS
+        from .media_analysis import analysis_configuration
         from .music import music_environment
+        from .speech import public_configuration
 
         self._audio_project(project_id)
         # Suggested authoring paths are not created by discovery. Only import/
         # synthesis owns immutable managed files and their database/artifact IDs.
         return {
             "project_id": project_id,
-            "source_directory": str(self.store.root / "audio-sources" / project_id),
+            "source_directory": str(self.store.project_file(project_id, "audio-sources/" + project_id)),
             "managed_directory": str(self.store.root / "audio"),
             "managed_filename": "<asset_id>.wav",
             "sample_rate": RATE,
@@ -693,17 +717,52 @@ class AudioOperations:
             "music": music_environment(),
             # Discovery exposes the listening loop without starting model inference.
             "model_review": review_capabilities(self.store),
+            "speech": public_configuration(self.store),
+            "cloud_music": music_configuration(self.store),
+            "cloud_analysis": analysis_configuration(self.store),
             "documentation": DOCUMENTS["audio"],
         }
 
     @operation(
-        "List a project's immutable audio assets and revisioned timeline. Asset IDs also identify playable/exportable WAV artifacts."
+        "List a project's audio asset summaries and revisioned timeline. Default omits probe/score/raw logs; include_metadata=true returns full assets. get_artifact(asset_id) reads one full asset."
     )
-    def get_project_audio(self, project_id: str) -> dict[str, Any]:
+    def get_project_audio(
+        self, project_id: str,
+        include_metadata: Annotated[bool, Field(strict=True)] = False,
+        include_usage: Annotated[bool, Field(strict=True)] = False,
+    ) -> dict[str, Any]:
         self._audio_project(project_id)
+        assets = [a for a in self.store.list("audio_asset") if a["project_id"] == project_id]
+        if not include_metadata:
+            # Listing/polling must not replicate full scores, ffprobe records and
+            # raw loudness logs for every revision. Preserve UI clipping warnings.
+            summary = []
+            for asset in assets:
+                metadata = asset.get("metadata") or {}
+                loudness = metadata.get("loudness") or {}
+                item: dict[str, Any] = {key: asset[key] for key in (
+                    "id", "project_id", "name", "created_at", "duration_seconds",
+                    "sample_rate", "channels", "samples", "sha256", "relative_path",
+                ) if key in asset}
+                item["metadata"] = {key: metadata[key] for key in ("source", "clipped_samples") if key in metadata}
+                item["loudness"] = {key: loudness.get(key) for key in (
+                    "integrated_lufs", "loudness_range_lu", "true_peak_dbtp",
+                )}
+                summary.append(item)
+            assets = summary
+        if include_usage:
+            # Expensive usage discovery is opt-in for the material browser, never
+            # repeated by the two-second saved-track preview poll.
+            rounds = [r for r in self.store.list("audition_round") if r["project_id"] == project_id]
+            clips = read_timeline(self.store, project_id)["timeline"]["clips"]
+            for asset in assets:
+                asset["usage"] = {
+                    "auditions": sum(any(c["asset_id"] == asset["id"] for c in r["candidates"]) for r in rounds),
+                    "timeline_clips": sum(c["asset_id"] == asset["id"] for c in clips),
+                }
         return {
-            **read_timeline(self.store, project_id),
-            "assets": [a for a in self.store.list("audio_asset") if a["project_id"] == project_id],
+            **read_timeline(self.store, project_id), "assets": assets,
+            "includes_metadata": include_metadata,
         }
 
     @operation(
@@ -714,6 +773,12 @@ class AudioOperations:
     ) -> dict[str, Any]:
         self._audio_project(project_id, True)
         for clip in timeline.clips:
+            if bool(clip.audition_id) != bool(clip.candidate_id):
+                raise ChromaError("audition_reference", "试听来源必须同时包含轮次和候选。")
+            if clip.audition_id:
+                audition = self.store.get("audition_round", clip.audition_id)
+                if audition["project_id"] != project_id or not any(c["id"] == clip.candidate_id and c["asset_id"] == clip.asset_id for c in audition["candidates"]):
+                    raise ChromaError("audition_reference", "音轨的试听来源与素材不一致。")
             asset = self.store.get("audio_asset", clip.asset_id)
             if asset["project_id"] != project_id:
                 raise ChromaError("audio_project", "Audio asset belongs to a different project")
@@ -727,7 +792,7 @@ class AudioOperations:
                 raise ChromaError("audio_trim", "Audio clip trim is outside the decoded source")
         # Check and write inside one SQLite transaction, including the absent
         # initial record. Other daemons cannot silently overwrite a user's draft.
-        with self.store.connect() as connection:
+        with self.store.connect(project_id) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT data FROM records WHERE kind='audio_timeline' AND id=?", (project_id,)
@@ -748,4 +813,13 @@ class AudioOperations:
                 "INSERT INTO records VALUES ('audio_timeline',?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
                 (project_id, canonical(record)),
             )
+            # Application receipts commit with the timeline. Subsequent edits can
+            # remove a clip without erasing which revision once used a candidate.
+            for clip in timeline.clips:
+                if clip.audition_id:
+                    receipt_id = identifier()
+                    receipt = {"id": receipt_id, "project_id": project_id, "audition_id": clip.audition_id,
+                               "candidate_id": clip.candidate_id, "timeline_revision_id": record["revision_id"],
+                               "created_at": now()}
+                    connection.execute("INSERT INTO records VALUES ('audition_application',?,?)", (receipt_id, canonical(receipt)))
         return record

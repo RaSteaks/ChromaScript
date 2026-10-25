@@ -1,0 +1,11 @@
+{
+  "project_id": "REPLACE_WITH_PROJECT_ID",
+  "idempotency_key": "analysis-score-v001",
+  "request": {
+    "audio_asset_id": "REPLACE_WITH_AUDIO_ASSET_ID",
+    "prompt": "请基于实际听到的音频，分析乐器、节奏、情绪变化、突兀转场和可能遮挡旁白的部分。区分观察与不确定性，最后给出一段供 Lyria 改进配乐的提示词。没有提供画面，请不要声称已验证视觉同步。",
+    "start_seconds": 0,
+    "duration_seconds": 30,
+    "max_tokens": 2048
+  }
+}

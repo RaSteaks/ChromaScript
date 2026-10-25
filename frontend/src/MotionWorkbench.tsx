@@ -182,6 +182,7 @@ function validate(draft: Draft | null): {
 // Hidden adapters retain drafts without rendering on the WGSL playback clock.
 export const MotionWorkbench = memo(function MotionWorkbench({
   active,
+  projectDirectory,
   projectId,
   step,
   onStepChange,
@@ -192,6 +193,7 @@ export const MotionWorkbench = memo(function MotionWorkbench({
 }: {
   active: boolean;
   projectId: string;
+  projectDirectory?: string;
   step: WorkflowStep;
   onStepChange: (step: WorkflowStep) => void;
   onSelected: () => void;
@@ -261,7 +263,12 @@ export const MotionWorkbench = memo(function MotionWorkbench({
     !!draft &&
     !!saved &&
     JSON.stringify(draft) !== JSON.stringify(fromSpec(saved.scene));
-  const directory = destination ?? destinationOptions?.default_directory ?? "";
+  // Use the project folder only for an untouched default, never replace a chosen export path.
+  const directory =
+    destination ??
+    projectDirectory ??
+    destinationOptions?.default_directory ??
+    "";
   // Remote revisions may remove retained layers; never leave an orphaned editor selection.
   const editingLayer =
     layerIndex !== null && draft?.preserved_layers[layerIndex]
@@ -1318,6 +1325,7 @@ export const MotionWorkbench = memo(function MotionWorkbench({
                       output.master_bit_depth === null
                     }
                     options={destinationOptions}
+                    defaultDirectory={projectDirectory}
                     value={directory}
                     error={destinationError}
                     disabled={!!pending}

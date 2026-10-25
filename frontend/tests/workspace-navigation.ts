@@ -1,3 +1,4 @@
+// Five-stage navigation includes Sound before delivery.
 import type { Page } from "@playwright/test";
 
 /** Examples remain optional and collapsed in the shared library for every engine. */
@@ -9,7 +10,7 @@ export async function openExamples(page: Page) {
 
 /** Navigate through the same common stage controls used by every source adapter. */
 export async function openDelivery(page: Page) {
-  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  await page.getByRole("button", { name: "4. 设置交付", exact: true }).click();
 }
 export async function openPreview(page: Page) {
   await page

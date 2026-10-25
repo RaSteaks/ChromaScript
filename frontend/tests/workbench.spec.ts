@@ -1,3 +1,4 @@
+// Five-stage navigation includes Sound before delivery.
 import { openExamples } from "./workspace-navigation";
 import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
@@ -12,8 +13,8 @@ async function stage(
   const labels = {
     scene: "1. 选择作品",
     preview: "2. 编辑与预览",
-    delivery: "3. 设置交付",
-    jobs: "4. 任务与成果",
+    delivery: "4. 设置交付",
+    jobs: "5. 任务与成果",
   };
   await page
     .getByRole("navigation", { name: "创作流程" })
@@ -763,7 +764,7 @@ test("clearing a project clears its task and results context", async ({
   await expect(
     page
       .getByRole("navigation", { name: "创作流程" })
-      .getByRole("button", { name: "4. 任务与成果", exact: true }),
+      .getByRole("button", { name: "5. 任务与成果", exact: true }),
   ).toContainText("0 个任务");
 });
 

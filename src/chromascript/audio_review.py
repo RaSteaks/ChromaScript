@@ -551,7 +551,7 @@ class AudioReviewOperations:
                     Path(__file__).read_bytes() + Path(__file__).with_name("audio.py").read_bytes()
                 ).hexdigest(),
             }
-            path = self.store.file(f"audio-reviews/{rid}.json")
+            path = self.store.project_file(project_id, f"audio-reviews/{rid}.json")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(canonical(report))
             artifact = Artifact(
@@ -560,7 +560,7 @@ class AudioReviewOperations:
                 job_id="",
                 name=f"Audio review {rid[:8]}.json",
                 kind="audio-review",
-                relative_path=str(path.relative_to(self.store.root)),
+                relative_path=self.store.relative_file(path),
                 mime_type="application/json",
                 size_bytes=path.stat().st_size,
                 created_at=report["created_at"],

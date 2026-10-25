@@ -1,3 +1,4 @@
+// Five-stage navigation includes Sound before delivery.
 import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { execFile } from "node:child_process";
@@ -63,8 +64,8 @@ async function stage(page: Page, step: "preview" | "delivery" | "jobs") {
     .getByRole("button", {
       name: {
         preview: "2. 编辑与预览",
-        delivery: "3. 设置交付",
-        jobs: "4. 任务与成果",
+        delivery: "4. 设置交付",
+        jobs: "5. 任务与成果",
       }[step],
       exact: true,
     })
@@ -439,7 +440,11 @@ test("external animation jobs refresh without navigation and recover progress an
   );
   await work(page).selectOption(`motion:${react.record.id}`);
   const draft = react.scene.code + "\n// retained local draft";
+  // Opening is asynchronous: establish the saved source before editing it, so
+  // this test measures job refresh retention rather than a loading-time fill.
+  await expect(motionCode(page)).toHaveText(react.scene.code, { useInnerText: true });
   await motionCode(page).fill(draft);
+  await expect(motionCode(page)).toHaveText(draft, { useInnerText: true });
   await stage(page, "jobs");
   const results = page.getByRole("region", {
     name: "动画渲染成果",

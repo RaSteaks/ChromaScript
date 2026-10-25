@@ -1,3 +1,4 @@
+// Five-stage navigation includes Sound before delivery.
 import { openDelivery, openPreview } from "./workspace-navigation";
 import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
@@ -85,7 +86,7 @@ test("unchanged animation resumes its retained preview without recompiling", asy
   page.on("request", (request) => {
     if (request.url().endsWith("/compile_motion_preview")) compilations++;
   });
-  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  await page.getByRole("button", { name: "4. 设置交付", exact: true }).click();
   await page
     .getByRole("button", { name: "2. 编辑与预览", exact: true })
     .click();

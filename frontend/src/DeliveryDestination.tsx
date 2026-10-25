@@ -5,6 +5,7 @@ import type { Capability } from "./types";
 
 type Props = {
   options: Capability["delivery_export"];
+  defaultDirectory?: string;
   value: string;
   error: string;
   disabled: boolean;
@@ -17,6 +18,7 @@ type Props = {
 /** One parent directory belongs to the entire delivery, including every output format. */
 export function DeliveryDestination({
   options,
+  defaultDirectory,
   value,
   error,
   disabled,
@@ -28,6 +30,8 @@ export function DeliveryDestination({
   // Both engines share path validation and controls, but their source bundles differ.
   const id =
     variant === "animation" ? "motion-directory" : "delivery-directory";
+  // Initial selection and explicit reset share the selected project's default.
+  const resetDirectory = defaultDirectory ?? options?.default_directory;
   return (
     <section className="delivery-destination" aria-label="交付导出位置">
       <div className="section-heading divider">
@@ -44,8 +48,8 @@ export function DeliveryDestination({
             onPickingChange={onPickingChange}
           />
           <Button
-            disabled={disabled || !options}
-            onClick={() => onChange(options!.default_directory)}
+            disabled={disabled || !resetDirectory}
+            onClick={() => resetDirectory && onChange(resetDirectory)}
           >
             使用默认位置
           </Button>

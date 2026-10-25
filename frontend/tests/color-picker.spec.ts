@@ -1,3 +1,4 @@
+// Five-stage navigation includes Sound before delivery.
 import { openExamples } from "./workspace-navigation";
 import { test, expect, type Page, type Locator } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
@@ -200,7 +201,7 @@ test("cancel, Escape and navigation preserve original negative and HDR floats", 
   await page.keyboard.press("Escape");
   await expect(page.getByLabel("颜色 R", { exact: true })).toHaveValue("");
   await page.getByLabel("颜色 R", { exact: true }).fill("-0.25");
-  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  await page.getByRole("button", { name: "4. 设置交付", exact: true }).click();
   await page
     .getByRole("button", { name: "2. 编辑与预览", exact: true })
     .click();
@@ -219,7 +220,7 @@ test("incomplete RGB drafts survive stage and MCP navigation and guard replaceme
   await page.getByLabel("颜色 R", { exact: true }).fill("");
   // Each view unmounts ColorField. Preserve the raw input and its error rather
   // than rebuilding it from the last valid numeric RGB stored in the scene.
-  for (const name of ["3. 设置交付", "4. 任务与成果", "1. 选择作品"]) {
+  for (const name of ["4. 设置交付", "5. 任务与成果", "1. 选择作品"]) {
     await page.getByRole("button", { name, exact: true }).click();
     await page
       .getByRole("button", { name: "2. 编辑与预览", exact: true })

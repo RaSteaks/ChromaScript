@@ -13,6 +13,8 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
@@ -21,6 +23,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.types import Receive, Scope, Send
 
 from .artifacts import archive_members, artifact_path, stream_zip
+from .cloud_privacy import validation_fields
 from .dispatcher import Dispatcher
 from .errors import ChromaError
 from .job_events import JobEvents
@@ -97,6 +100,14 @@ def create_app(root: Path, port: int = 8765, export_roots: list[Path] | None = N
             close_encoder()
 
     app = FastAPI(title="ChromaScript", version="0.1.0", lifespan=lifespan)
+    @app.exception_handler(RequestValidationError)
+    async def private_cloud_validation(request: Request, exc: RequestValidationError):
+        # FastAPI validates before execute(); redact this boundary too, including
+        # unknown api_key fields and malformed JSON that could contain secrets.
+        if request.url.path in {"/api/operations/generate_speech", "/api/operations/generate_music", "/api/operations/analyze_media"}:
+            return JSONResponse({"error": {"code": "invalid_arguments", "message": "Invalid cloud audio arguments", "fields": validation_fields(exc.errors())}}, status_code=422)
+        return await request_validation_exception_handler(request, exc)
+
     app.state.service = service
     app.state.job_events = job_events
     app.add_middleware(

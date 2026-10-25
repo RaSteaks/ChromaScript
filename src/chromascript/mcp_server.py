@@ -8,8 +8,9 @@ from typing import Any
 
 import httpx
 from mcp.server import MCPServer
+from mcp.server.context import CallNext, HandlerResult, ServerRequestContext
 from mcp.types import CallToolResult, ImageContent, TextContent
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .documentation import DOCUMENTS
 from .operations import REGISTRY, catalogue
@@ -26,12 +27,30 @@ def create_mcp(root: Path) -> MCPServer:
         + " Read chromascript://docs/scene before authoring WGSL or chromascript://docs/motion before authoring Three.js HDR animations. For native wide-gamut authoring or upgrading existing animations, discover chromascript.get_motion_capabilities and read chromascript://docs/motion-color. Use get_motion_scene then upgrade_motion_scene with the actual expected_revision_id to preserve old colors; changing source_color_space alone reinterprets RGB. Retain preserved_layers when saving the returned spec. HDR masters and sRGB preview are separate. Before creating audio, call chromascript.get_audio_guidelines(project_id) and read chromascript://docs/audio for local storage and production rules.",
     )
 
+    async def private_cloud_validation(ctx: ServerRequestContext[Any, Any], call_next: CallNext) -> HandlerResult:
+        params = ctx.params or {}
+        name = params.get("name")
+        if ctx.method == "tools/call" and name in {"chromascript.generate_speech", "chromascript.generate_music", "chromascript.analyze_media"}:
+            # The SDK wraps function arguments in its own Pydantic model, whose
+            # error formatter echoes values even if our nested model hides them.
+            # Validate before that layer and return only a constant error message.
+            arguments = params.get("arguments")
+            try:
+                if not isinstance(arguments, dict) or set(arguments) != {"request"}:
+                    raise ValueError("Invalid wrapper")
+                REGISTRY[name.removeprefix("chromascript.")].input_model.model_validate(arguments["request"])
+            except (ValidationError, ValueError):
+                return CallToolResult(content=[TextContent(type="text", text="Invalid cloud audio arguments; consult the tool schema")], is_error=True)
+        return await call_next(ctx)
+
+    server.middleware.append(private_cloud_validation)
+
     def register(name: str, model: type[BaseModel], description: str) -> None:
         async def invoke(request):
             info = endpoint(root)
-            # Local audio/music rendering, model reviews and explicit exports must not time out while their exclusive
+            # Audition preparation, cloud analysis and audio/music generation, model reviews and exports must not time out while their exclusive
             # destination is still being written by the shared service.
-            timeout = httpx.Timeout(60, read=None) if name in {"export_artifact", "create_audio", "import_audio", "create_music", "inspect_soundfont", "review_audio"} else httpx.Timeout(60)
+            timeout = httpx.Timeout(60, read=None) if name in {"export_artifact", "export_project_folder", "migrate_workspace_storage", "create_audition", "create_audio", "import_audio", "create_music", "inspect_soundfont", "review_audio", "generate_speech", "generate_music", "analyze_media"} else httpx.Timeout(60)
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
                     info["url"] + "/api/operations/" + name,

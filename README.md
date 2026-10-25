@@ -262,6 +262,164 @@ Agent 先调用 `chromascript.get_audio_guidelines(project_id)` 获取项目对�
 
 </details>
 
+## OpenRouter 云端配音（Claude / MCP / CLI）
+
+`generate_speech` 是明确的云端、可能付费的配音操作；原有本地合成、配乐和渲染流程不依赖它。发送内容仅为台词、表演要求、声音和模型参数，不上传视频。Gemini TTS 用于旁白/对白，不生成背景音乐，也不保证台词时长或口型同步。
+
+将仓库的 `.env.example` 复制为 `.env`，在本地填写并执行 `chmod 600 .env`（仅当前用户可读写；拒绝符号链接；不要把密钥发给 agent，也不要提交 Git）：
+
+```dotenv
+OPENROUTER_API_KEY=你的OpenRouter密钥
+OPENROUTER_TTS_MODEL=google/gemini-3.8-flash-tts
+OPENROUTER_TTS_VOICE=Kore
+```
+
+配置每次调用时读取，优先级为 **服务进程环境变量 > `<workspace>/.env` > `<workspace父目录>/.env`**，不依赖 Claude 的启动目录。默认 `workspace` 位于仓库下，因此仓库根目录 `.env` 可直接使用。支持上述配音键及 `OPENROUTER_MUSIC_MODEL`、`OPENROUTER_REQUIRE_ZDR`、`OPENROUTER_MUSIC_REQUIRE_ZDR`、`OPENROUTER_ANALYSIS_MODEL` 的单行字面值，可使用引号、`export` 前缀和行尾注释，不执行 shell、不展开变量。更新 `.env` 不需要重启，但本次代码升级需要重启 ChromaScript 服务并重新连接 MCP。进程已有同名环境变量时，应在服务启动环境中更新或删除它。
+
+先检查配置（仅返回密钥是否存在，不验证账号、余额或模型可用性，不发起网络请求）：
+
+```sh
+.venv/bin/chromascript call get_speech_config
+```
+
+复制 `examples/speech.json` 并替换项目 ID、台词和请求键，然后主动执行以下命令才会调用付费服务：
+
+```sh
+.venv/bin/chromascript call generate_speech --arguments @examples/speech.json
+```
+
+`request` 支持 `text`（1–12000 字符）、`instructions`（最多 4000 字符）、可选 `model`、`voice`、`response_format`。省略模型/声音时读取 `.env`，未设置则使用上面的默认值。模型必须是 OpenRouter 的完整 `provider/model` ID；声音须由所选模型支持，接口不会自动换模型。默认格式 `pcm`；Gemini TTS 仅支持 `pcm`，其他模型可按其文档选择 `mp3`。表演要求放在 `instructions`，不要混进需要逐字朗读的台词。
+
+**同一请求重试必须使用同一个 `idempotency_key`。** 完成后返回同一素材；内容改变需新键。失败或进程中断留下的键不会自动再次请求上游，以免重复付费，超时仍可能产生费用。接口返回 `speech_not_retried` 时先检查返回的源文件目录；如已有 `source.wav` / `source.mp3`，可以用 `import_audio` 恢复。只有明确决定重新生成时才使用新键。每个服务同时运行一项配音，普通编辑不被云端等待阻塞。
+
+源音频与 `generation.json` 保留在 `<workspace>/speech-sources/<request_id>/`；返回的 `asset` 使用现有不可覆盖素材机制，仅公开模型、上游生成 ID、响应哈希、源编码、实际解码属性、响度和隐私路由政策。台词、表演要求与完整制作记录只保留在本地私有目录的 `generation.json`，不放入返回的素材元数据/SQLite 记录。Gemini PCM 默认按其文档的 24 kHz、单声道、16-bit 封装 WAV，优先读取响应头的采样率/声道；其他 PCM 模型必须返回这些头字段。归一存储为 48 kHz 双声道 32-bit PCM **不代表原始精度升级**，也不自动归一化音量。最多接收 128 MiB / 600 秒，网络读取有超时和时限，不自动重试或跟随重定向。
+
+Claude Desktop 使用下节已有的 MCP 配置即可，无需第二个 MCP 服务，也无需在客户端配置中填写 OpenRouter Key。新增工具是 `chromascript.get_speech_config` 和 `chromascript.generate_speech`，HTTP 同步提供 `POST /api/operations/generate_speech`，CLI 同名。给 Claude 的示例指令：
+
+> 先读取 ChromaScript 音频制作规范与配音配置。为项目 PROJECT_ID 制作一段自然、克制的普通话旁白，使用已配置的 OpenRouter TTS。这次允许调用云端配音。台词为“城市渐渐安静下来，而我们的故事才刚刚开始。”使用请求键 narration-intro-v001，失败时不要换键自动重试。生成后给我素材信息；读取当前音轨修订，再保留已有音轨，将旁白放到第 3 秒。
+
+生成操作只创建素材；`get_project_audio` → `set_project_audio(expected_revision_id, timeline)` 才修改项目音轨。通过 `get_artifact(asset.id)` 获取可播放/导出的本地 WAV。精确画面对齐需测量实际生成时长后编辑，现有音轨混音和视频导出流程继续适用。
+
+接口依据：[OpenRouter TTS 文档](https://openrouter.ai/docs/guides/overview/multimodal/tts)、[Gemini 3.8 Flash TTS](https://openrouter.ai/google/gemini-3.8-flash-tts)。仓库测试使用模拟上游响应并实际解码 PCM，不产生真实费用；模型质量、账号权限和实际计费需要用户配置后验证。
+
+## Lyria 配乐与 Gemini 配音同时使用
+
+`generate_music` 使用 OpenRouter 的流式聊天音频接口；`generate_speech` 使用语音接口。它们共用 `.env` 中的 Key，但各自保留模型配置：
+
+```dotenv
+OPENROUTER_API_KEY=你的OpenRouter密钥
+OPENROUTER_TTS_MODEL=google/gemini-3.8-flash-tts
+OPENROUTER_TTS_VOICE=Kore
+OPENROUTER_MUSIC_MODEL=google/lyria-3-pro-preview
+```
+
+新增 `chromascript.get_music_config`（无网络/费用）和 `chromascript.generate_music`，自动通过现有 MCP、HTTP 和 CLI 暴露。无需第二个 MCP 服务；更新后重启 ChromaScript 服务并重新连接 Claude。`create_music` 仍是原有的本地 FluidSynth 乐谱渲染，和新增云端音乐生成是独立操作。
+
+```sh
+.venv/bin/chromascript call get_music_config
+# 替换示例中的项目 ID 后执行；此操作发送云端请求并可能收费。
+.venv/bin/chromascript call generate_music --arguments @examples/cloud-music.json
+```
+
+`request` 字段：
+
+| 字段 | 作用 |
+|---|---|
+| `prompt` | 配乐描述，1–12000 字符；可写情绪、乐器、段落与镜头落点 |
+| `model` | 可选完整 `google/lyria-...` ID；默认读 `OPENROUTER_MUSIC_MODEL` |
+| `instrumental` | 默认 `true`，在提示词追加“纯器乐、无人声”；歌曲设为 `false` 并在 prompt 中写歌词要求 |
+| `target_duration_seconds` | 可选 1–600 秒的**提示词目标**，并非模型硬性时长参数 |
+| `reference_images` | 可选 0–4 张当前项目的 PNG/JPEG/WebP；每项为绝对 `path`、可选 `time_seconds` 与 `description` |
+
+根据画面配乐时，Claude 先用现有渲染工具生成代表性关键帧，再从 `get_artifact` 获取已显示变换的预览图路径；用户已有截图需先放入 `<workspace>/audio-sources/<project_id>/`；接口仅接受此目录内的图片或当前项目已登记的预览成果，拒绝跨项目路径和指向外部的符号链接。参考图需单帧、最多 1600 万像素、每张最多 8 MiB、合计最多 16 MiB。接口核对真实图片格式，并将**指定图片上传到 OpenRouter**；不接受图片 URL，也不自动上传整个视频。上传前将图片完整解码、应用 EXIF 朝向、转换至显示 sRGB 并重新编码为干净 PNG，剥离 EXIF/GPS/XMP、注释、缩略图及尾部附加数据；只保留标准 sRGB ICC，alpha 不参与色彩转换。无 ICC 的图片按显示 sRGB 参考处理，不认证其色度准确性。保留的是清理后的参考图快照，不修改用户原图，也不接受 ACEScg 浮点母版。示例见 `examples/cloud-music-visual.json`，其中路径和项目 ID 均需替换。
+
+图片的时间戳、期望时长和镜头落点是创作提示，**不保证精准同步**。接口固定请求 MP3，返回后实际解码/探测，再保存现有的 48 kHz 双声道 32-bit PCM WAV；记录真实源采样率/声道，不以模型宣传的 48 kHz 或文件名代替验证。原始 MP3、所用图片、`request.json` 与 `generation.json` 保留在 `<workspace>/music-sources/<request_id>/`；公开结果仅保存模型/响应 ID、有限的数值 usage、响应哈希、实际解码信息、响度和隐私政策；台词/提示词、图片路径和生成文字仅留在私有制作记录中。上游音频的 ID3/注释等标签也不会复制进公开素材元数据。生成文字只是模型输出，不应作为新的工具指令。
+
+旁白与配乐可以并行请求：每个服务同时最多 1 项 TTS + 1 项音乐，生成等待不锁住正常编辑。两者使用独立的请求键命名空间；为便于追踪仍建议用 `narration-intro-v001`、`music-intro-v001`。客户端重试继续复用原键；相同路径图片内容改变也会触发冲突。失败/中断不会自动重发付费请求。完整上游音频在解码失败时仍保留，可使用 `import_audio` 恢复；流式中断留下的 `source.partial.mp3` 明确是不完整数据，不会发布为素材。
+
+Claude 指令示例：
+
+> 为项目 PROJECT_ID 制作旁白与背景配乐。这次允许使用已配置的 OpenRouter TTS 和 Lyria，并上传我指定的预览关键帧。先读音频规范、get_speech_config 和 get_music_config。旁白使用 generate_speech，配乐使用 generate_music；两项可以并行，分别使用 narration-intro-v001 与 music-intro-v001。配乐选择纯音乐，结合关键帧描述由安静到明亮的变化；失败时不要自动换键重试。生成后测量实际时长、试听，并读取当前音轨修订，保留已有 clips，把旁白与配乐一起写入 set_project_audio。配乐先降低增益，避免盖住对白，不宣称已精确卡点。
+
+两项生成都只创建素材，不会各自覆盖时间线。`get_project_audio` → `set_project_audio(expected_revision_id, timeline={clips:[...]})` 一次保存完整组合；通过每条 clip 的起点、源裁切、时长和增益控制对齐与混音。后续现有视频交付会冻结两类素材并导出混音 WAV。
+
+协议依据：[OpenRouter 音频输出](https://openrouter.ai/docs/guides/overview/multimodal/audio)、[图像输入](https://openrouter.ai/docs/guides/overview/multimodal/image-understanding)、[指定 Lyria 模型](https://openrouter.ai/google/lyria-3-pro-preview)。验证使用模拟云端响应与真实本地解码/混音；不代表已经验证 Preview 模型的实时可用性、计费、音质或画面同步。
+
+### 云端音频隐私边界
+
+- 默认请求 `provider={data_collection:"deny", zdr:true}`。`.env` 中 `OPENROUTER_REQUIRE_ZDR` 默认 `true`；配乐优先使用 `OPENROUTER_MUSIC_REQUIRE_ZDR`，未设置时才继承全局值。分析接口固定要求 ZDR，不受这两个开关降低。不能通过工具调用参数降低要求；无合规提供商时失败，不自动重试或降级。**Lyria Preview 若只有不符合 ZDR 的路由，将无法生成。** 只有用户明确接受供应商的数据保留政策后，才应在本地设置 `OPENROUTER_MUSIC_REQUIRE_ZDR=false`（保持 `OPENROUTER_REQUIRE_ZDR=true` 以保护配音）；`data_collection:"deny"` 仍然保持。ZDR 是 OpenRouter 的路由约束，不是本项目对第三方的独立审计，也不会关闭用户在 OpenRouter 账号中主动启用的提示词日志。
+- 密钥仅从本地权限为 0600 的常规 `.env` 文件或服务进程环境读取，并只放在固定 HTTPS 请求的 Authorization 头中；不跟随重定向、不使用环境代理、不执行 dotenv 内容。检测到生成参数中出现已配置 Key 或 OpenRouter Key 格式时，在请求前拒绝。HTTP、CLI、MCP 参数验证错误均不会回显误填的密钥值。
+- 台词、提示词和明确选择的参考图仍需发送给 OpenRouter 及其提供商才能生成。图片清理只去掉隐藏元数据，**不会自动遮挡画面里的人脸、姓名、地址或屏幕文字**。授权的 Claude/MCP 客户端仍可访问该工作区；这不是针对同一系统用户下恶意进程的隔离沙箱。
+- 新建 `speech-sources` / `music-sources` 及请求目录为 0700，保留的源音频、图片和 JSON 为 0600，云端生成的托管 WAV 也为 0600。完整制作记录不再自动进入 MCP 返回、项目列表和公开素材元数据；本地私有文件仍保存原始台词/提示词以支持恢复，未加密，不自动到期删除。共享、备份或导出这些私有目录之前需自行决定是否保留。此修复不追溯删除旧数据库、旧文件或已有备份中的内容。
+
+政策参考：[OpenRouter ZDR](https://openrouter.ai/docs/guides/features/zdr)、[提供商数据政策](https://openrouter.ai/docs/guides/routing/provider-selection)。
+
+## Gemini 文本／音频分析（analyze_media）
+
+`chromascript.analyze_media` 通过 OpenRouter `/chat/completions` 调用 `google/gemini-3.8-flash`，返回分析文字，供 Claude 做听审、拟定配乐提示词或分析节奏/情绪。它与生成语音的 `generate_speech`、生成音乐的 `generate_music` 是三条独立通路；原来的 `review_audio` 仍只连接本地模型。
+
+本版输入支持**文本及当前项目中已登记的音频素材**。图片、视频直接输入尚未实现；不应据此声称已经分析画面能量或验证视听同步。外部音频先用 `import_audio` 导入，再传 `audio_asset_id`，不接受任意文件路径或 URL。
+
+```dotenv
+OPENROUTER_REQUIRE_ZDR=true
+# 仅当用户接受配乐上游的常规保留政策时设 false：
+OPENROUTER_MUSIC_REQUIRE_ZDR=false
+OPENROUTER_ANALYSIS_MODEL=google/gemini-3.8-flash
+```
+
+分析使用同一个 `OPENROUTER_API_KEY`，始终发送 `provider={data_collection:"deny",zdr:true}`，即使全局开关为 false 也不放宽分析。配乐的局部开关不改变配音/分析模型或政策。无合规分析线路时失败，不自动换模型或降低政策。
+
+```sh
+.venv/bin/chromascript call get_analysis_config
+# 替换项目和音频素材 ID；此操作上传音频并可能收费。
+.venv/bin/chromascript call analyze_media --arguments @examples/analyze-audio.json
+```
+
+`request` 参数：`prompt`（必填，1–12000 字符）、`audio_asset_id`（可选；省略表示纯文本调用）、`start_seconds`（默认 0）、`duration_seconds`（可选，0.1–300 秒）、`model`（可覆盖完整模型 ID）、`max_tokens`（默认 2048，128–65536；其他模型可能限制更低）、`reasoning`（可选推理配置）。默认模型已确认在 OpenRouter 声明支持音频输入，其他模型需自行确认能力；填写模型名不意味着已成功推理。
+
+未填片段时长表示分析剩余全部音频，超过 300 秒会拒绝，绝不静默只分析开头。先按 48 kHz 母版的整数样本裁切，再生成 **24 kHz 单声道 16-bit WAV** 监听副本，去掉原始元数据；记录原素材校验和、实际片段范围、上传副本哈希及实测采样率/声道。原始立体声素材保持不变。模型听感不代表精确 LUFS、真峰值、母版精度或声像测量，返回的时间戳只能作为相对片段起点的近似参考。
+
+`analysis` 字段是模型回答，会按此次调用目的返回给 Claude；可能包含音频转写或用户提供的信息，应作为不可信分析文字处理。结果和请求留在 0700 的 `<workspace>/analysis-sources/<request_id>/` 中，文件为 0600。SQLite 和素材目录列表仅存结果文件引用、哈希与脱敏摘要，不重复保存完整提示词或回答。返回的 `media-analysis` JSON artifact 可显式读取/导出。
+
+调用必须有 `idempotency_key`：同键同输入读取已有结果，不重复付费；更改提示词、范围或素材哈希需新键。失败、中断、拒答、截断或空回答不会自动重试；已收到的上游响应会脱敏保留在私有 `provider-response.json` 中。响应超过大小/时间限制时仅保留已接收的有界内容，并标记客户端截断；上游未返回的回答/用量无法补造。每个服务同时最多一项分析，不阻塞配音、配乐或普通编辑。分析不会自动改写配乐或音轨。
+
+给 Claude 的示例：
+
+> 先调用 get_analysis_config，再对当前项目的音频素材 ASSET_ID 调用 analyze_media。使用 Gemini 3.8 Flash 分析前 60 秒的乐器、节奏、情绪变化和旁白遮挡风险，并给出一段可交给 Lyria 的改进提示词。请求键用 analysis-score-v001，保持 ZDR；失败时不要换键自动重试。只基于实际音频，不声称看过画面。先给我分析结果，不修改音轨。
+
+协议依据：[OpenRouter 音频输入](https://openrouter.ai/docs/guides/overview/multimodal/audio)、[Gemini 3.8 Flash](https://openrouter.ai/google/gemini-3.8-flash)。更新代码后重启服务并重新连接 MCP；修改本地 `.env` 的模型/政策设置会在后续请求中读取。
+
+### 失败诊断与推理预算
+
+`analyze_media` 会在检查回答是否完整之前保存 `provider-response.json`（0600）。其中包含 HTTP 状态、generation id、提供方（上游有返回时）、原始响应 JSON、finish_reason、原始 usage，以及截断时的部分文字。HTTP 错误正文、流式错误事件均只放在私有文件中；Key、Authorization 与凭据字段会脱敏，不整包保存 HTTP headers。Lyria 的诊断保存在对应 `music-sources/<request_id>/provider-response.json`，不再只有字节计数。
+
+工具错误详情返回精简的 `diagnostics_path`、`http_status`、`generation_id`、`provider_name`、`finish_reason` 和 `usage`。`analysis_truncated` 表示 token 预算耗尽，`analysis_refused` 表示明确拒答/内容过滤；其他异常结束仍为 `analysis_incomplete`。失败键重试仍不发请求，但会再次返回已保存的诊断摘要。**不会自动换键、扩大预算或重试付费请求。**
+
+当上游提供 `completion_tokens_details.reasoning_tokens` 时，返回的 `usage` 区分总 `completion_tokens`、`reasoning_tokens` 和由两者相减得到的 `output_tokens`；缺少推理统计时不猜测，统计矛盾时输出 token 数为 null。上游返回的 `usage.cost` 会保留，缺少费用时保持未知，不当作零。目前尚未自动查询 `/generation` 的最终结算金额；旧版本已丢弃的回答与 generation id 无法从本地恢复。
+
+作曲类请求可显式使用：
+
+```json
+{
+  "prompt": "根据已确认的乐器、时间点和情绪要求编写乐谱。",
+  "max_tokens": 16384,
+  "reasoning": {"effort": "low", "exclude": true}
+}
+```
+
+`reasoning.effort` 支持 `none/minimal/low/medium/high/xhigh`，由实际模型决定接受程度；也可改用 `reasoning.max_tokens`，必须小于总 `max_tokens`，并与 effort 二选一。`exclude=true` 只要求不返回推理文字，**不会关闭推理或免除推理计费**。Gemini 3 对数字推理预算可能映射为思考等级，不能保证精确 token 数；优先使用 `effort:low` 控制。上限 65536 对应当前 Gemini 3.8 Flash 的公开端点限制，不代表任意其他模型都接受此数值。
+
+[OpenRouter 推理参数说明](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)。JSON Schema、temperature、seed、费用回查等本轮未增加。
+
+### 大项目音频查询
+
+`get_project_audio(project_id)` 默认返回资产摘要（ID、名称、时长、采样格式、哈希、精简响度与削波标记）及完整时间线和修订号，不再复制每项素材的 ffprobe、完整乐谱和原始响度日志。前端播放/编辑不需要修改；项目复制内部明确读取完整元数据，避免丢失来源信息。
+
+- 查询所有完整数据：`get_project_audio(project_id, include_metadata=true)`，可能很大。
+- 只查一项完整数据：`get_artifact(asset_id)`，素材信息在 `artifact.metadata` 中。
+
+建议模型先读摘要选择素材，再按 ID 查详情。`import_audio` 的生成返回结构本轮未改动。
+
 ## MCP 接入
 
 在 MCP 客户端中添加以下配置，将两处占位路径替换为实际绝对路径：
@@ -332,3 +490,39 @@ CHROMASCRIPT_URL=http://127.0.0.1:8875 npm --prefix frontend run test:e2e -- tes
 ```
 
 截图、日志和报告保存在 `reports/`、`frontend/test-results/` 与 `frontend/playwright-report/`。动画离线导出所需的浏览器运行时与网页测试引擎是不同路径；执行测试前检查用例是否会触发离线导出。
+
+
+### 声音工作区与 Agent 试听协作
+
+顶部“声音”阶段包含“方向试听”“时间线”“音频素材”。Agent 先导入或生成素材，再使用 `create_audition` 提供 1–8 个、0.5–30 秒的候选片段。用户可普通试听或盲听，保存偏好、文字反馈及可选五项评分，确认单一方向、结合多个参考或重新探索。确认方向不会自动生成音频或修改时间线。
+
+轮次冻结画面版本、素材片段、原配乐和片段响度；切换候选只切换声音增益。反馈、方向、揭晓和归档都带修订检查，并保留历史。草稿在当前会话内跨候选、轮次、分页和阶段保留，刷新页面不保证恢复。新候选请创建新轮次；可关联上一轮已确认的方向版本。
+
+选择“添加候选到时间线…”会追加到现有音轨草稿，保留其他编辑，核对起点、裁剪和增益后才通过“保存音轨”生效。素材可以同时被试听轮次和时间线引用。所有能力均由同一注册表提供 HTTP、MCP 与 CLI；详见 MCP 资源 `chromascript://docs/auditions`。
+
+```sh
+.venv/bin/chromascript call create_audition --arguments @examples/audition.json
+.venv/bin/chromascript call get_audition --arguments '{"project_id":"PROJECT_ID","audition_id":"AUDITION_ID"}'
+```
+
+盲听用于避免界面中的来源暗示，不是针对项目拥有者的权限隔离。暂无手机访问或自动付费生成。
+
+### Finder 项目目录与两级数据库
+
+执行 `migrate_workspace_storage` 后，当前工作区启用 `project-folders-v1`：
+
+- `workspace/state.sqlite3`：项目位置、记录路由、跨项目请求去重索引、全局配置，以及无法确定归属的旧请求记录。
+- `workspace/项目/项目名称__短ID/project.sqlite3`：该项目的真实数据源，包含项目、作品、全部修订、音频、试听、任务、快照、请求记录和文件路径映射。
+- 已归档项目位于 `workspace/已归档/`。新建和复制的项目自动使用独立文件夹；项目改名和归档在空闲时同步移动文件夹。
+- 每个项目生成 `项目说明.md`、当前作品源码/配置、时间线及试听轮次 JSON。它们是便于查看的导出，数据库是修订来源；手动编辑导出文件后，同步会报告冲突并保留文本。
+
+```sh
+.venv/bin/chromascript call get_project_storage
+.venv/bin/chromascript call open_project_folder --arguments '{"project_id":"PROJECT_ID"}'
+.venv/bin/chromascript call sync_project_folder --arguments '{"project_id":"PROJECT_ID"}'
+.venv/bin/chromascript call export_project_folder --arguments '{"project_id":"PROJECT_ID","destination":"/absolute/path/项目备份"}'
+```
+
+这些操作同样提供 HTTP 和 MCP。整体备份请使用 `export_project_folder`，或先停止服务再复制完整项目文件夹，不要只复制运行中的 SQLite 主文件。备份目标必须不存在。恢复时将完整文件夹放入新工作区的“项目”目录，项目身份由 `project.json` 与项目数据库共同确认；缺失的全局索引可以重建。相同项目 ID 的两份副本不能同时放在“项目”/“已归档”内，创建独立副本使用 `clone_project`。
+
+迁移不改写历史快照或修订内容。旧逻辑路径通过项目库的路径表解析到新文件夹，迁移清单记录校验值与缺失项。外部交付仍使用原位置；项目内的新交付可以随完整目录搬移后读取。已冻结的未完成任务若目标目录搬移，应新提交交付。旧数据库及已移动源文件保留在 `workspace/迁移备份/`，未归属资料保留原位。

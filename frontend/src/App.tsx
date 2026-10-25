@@ -38,7 +38,7 @@ import {
 import { CodeEditor } from "./CodeEditor";
 import { PreviewTimeline } from "./PreviewTimeline";
 import { PreviewAudio, type PreviewAudioHandle } from "./PreviewAudio";
-import { ProjectAudio } from "./ProjectAudio";
+import { SoundWorkspace } from "./SoundWorkspace";
 import { WorkflowNav, WORKFLOW, type WorkflowStep } from "./WorkflowNav";
 import { DeliveryEditor } from "./DeliveryEditor";
 import { DeliveryDestination } from "./DeliveryDestination";
@@ -130,6 +130,7 @@ export default function App() {
   }, []);
   // Steps are views over the same drafts, not destructive wizard transitions.
   const [step, setStep] = useState<WorkflowStep>("scene");
+  const [soundDirty, setSoundDirty] = useState(false);
   const stepHeading = useRef<HTMLHeadingElement>(null);
   const previousStep = useRef(step);
   useEffect(() => {
@@ -160,8 +161,20 @@ export default function App() {
   );
   const [deliveryDirectoryError, setDeliveryDirectoryError] = useState("");
   const [directoryPicking, setDirectoryPicking] = useState(false);
+  // Defaults follow the selected on-disk project; explicit destination drafts stay intact.
+  const [projectStorage, setProjectStorage] = useState<{
+    projectId: string;
+    directory: string;
+  } | null>(null);
+  const projectDirectory =
+    projectStorage?.projectId === projectId
+      ? projectStorage.directory
+      : undefined;
   const destination =
-    deliveryDirectory ?? caps?.delivery_export?.default_directory ?? "";
+    deliveryDirectory ??
+    projectDirectory ??
+    caps?.delivery_export?.default_directory ??
+    "";
   const [jobs, setJobs] = useState<Job[]>([]);
   const [jobPage, setJobPage] = useState(0);
   const [jobTotal, setJobTotal] = useState(0);
@@ -414,13 +427,17 @@ export default function App() {
     setArtifacts([]);
     setProjectLoading(true);
     const controller = new AbortController();
-    call<{ scenes: SceneRecord[] }>(
-      "get_project",
-      { project_id: projectId },
-      controller.signal,
-    )
+    call<{
+      scenes: SceneRecord[];
+      storage?: { default_delivery_directory: string } | null;
+    }>("get_project", { project_id: projectId }, controller.signal)
       .then((v) => {
         if (controller.signal.aborted) return;
+        setProjectStorage(
+          v.storage
+            ? { projectId, directory: v.storage.default_delivery_directory }
+            : null,
+        );
         setScenes(v.scenes);
         setSceneId(v.scenes[0]?.id || "");
         setActiveJobId("");
@@ -960,15 +977,31 @@ export default function App() {
   const currentDirty = family === "wgsl" ? dirty : motionSession.dirty;
   const currentRevision =
     family === "wgsl" ? saved?.revision_id : motionSession.record?.revision_id;
+  // Stable saved-work identity keeps creation forms independent of unrelated UI updates.
+  const soundWork = useMemo(
+    () =>
+      currentRevision &&
+      (family === "motion" ? motionSession.record?.id : sceneId)
+        ? {
+            work_kind: family,
+            scene_id: family === "motion" ? motionSession.record!.id : sceneId,
+            revision_id: currentRevision,
+          }
+        : null,
+    [family, sceneId, currentRevision, motionSession.record],
+  );
   const currentName =
     family === "wgsl" ? draft?.name : motionSession.record?.name;
   function changeProject(id: string) {
     if (id === projectId || sharedBusy) return;
-    guardProject(() => setProjectId(id));
+    guardProject(() => {
+      setSoundDirty(false);
+      setProjectId(id);
+    });
   }
   function guardProject(action: () => void) {
     // A project transition affects both retained engines, including the hidden draft.
-    if (dirty || motionSession.dirty) setDiscard(() => action);
+    if (dirty || motionSession.dirty || soundDirty) setDiscard(() => action);
     else action();
   }
   function selectWork(value: string) {
@@ -1060,11 +1093,12 @@ export default function App() {
             <h1>{currentName || "创作工作区"}</h1>
           </div>
           <div className="context-actions">
-            <ProjectAudio
-              key={projectId}
-              projectId={projectId}
-              disabled={!!pending}
-            />
+            <Button
+              disabled={!projectId || !!pending}
+              onClick={() => setStep("sound")}
+            >
+              项目音频
+            </Button>
             <span className={"save-state " + (currentDirty ? "unsaved" : "")}>
               {currentDirty
                 ? "未保存"
@@ -1126,6 +1160,7 @@ export default function App() {
               : family === "wgsl" && preview
                 ? "已有画面预览"
                 : "代码与画面同屏",
+            "试听方向与项目音轨",
             family === "wgsl"
               ? `${delivery.targets.length} 个交付目标`
               : "按源类型选择输出",
@@ -1175,6 +1210,25 @@ export default function App() {
                   继续编辑与预览
                 </Button>
               )}
+            </div>
+          )}
+          {projectId ? (
+            <SoundWorkspace
+              key={projectId}
+              projectId={projectId}
+              active={tab === "workspace" && step === "sound"}
+              work={soundWork}
+              onDirty={setSoundDirty}
+            />
+          ) : (
+            step === "sound" && <p>请先选择项目，再添加音频或开始试听。</p>
+          )}
+          {step === "sound" && (
+            <div className="step-actions">
+              <Button onClick={() => setStep("preview")}>返回编辑与预览</Button>
+              <Button onClick={() => setStep("delivery")}>
+                下一步：设置交付
+              </Button>
             </div>
           )}
           <div hidden={family !== "wgsl"}>
@@ -1806,11 +1860,8 @@ export default function App() {
                 </div>
                 <div className="step-actions">
                   <Button onClick={() => setStep("scene")}>返回选择场景</Button>
-                  <Button
-                    className="outline"
-                    onClick={() => setStep("delivery")}
-                  >
-                    下一步：设置交付
+                  <Button className="outline" onClick={() => setStep("sound")}>
+                    下一步：声音
                     <ChevronRight size={15} />
                   </Button>
                 </div>
@@ -1870,6 +1921,7 @@ export default function App() {
                     <DeliveryDestination
                       onPickingChange={setDirectoryPicking}
                       options={caps?.delivery_export}
+                      defaultDirectory={projectDirectory}
                       value={destination}
                       error={deliveryDirectoryError}
                       disabled={!!pending}
@@ -2232,6 +2284,7 @@ export default function App() {
             )}
           </div>
           <MotionWorkbench
+            projectDirectory={projectDirectory}
             ref={motionEditor}
             projectId={projectId}
             active={tab === "workspace" && family === "motion"}

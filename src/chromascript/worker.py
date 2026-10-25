@@ -81,7 +81,7 @@ def run(root: Path, job_id: str) -> None:
         store.update("job", job_id, change)
 
     def artifact(path: Path, kind: str, mime: str, metadata: dict[str, Any] | None = None) -> str:
-        relative = str(path.relative_to(store.root))
+        relative = store.relative_file(path)
         id = hashlib.sha256((job_id + relative).encode()).hexdigest()[:32]
         size = (
             path.stat().st_size

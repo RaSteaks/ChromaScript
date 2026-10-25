@@ -76,7 +76,8 @@ def test_clone_preserves_current_sources_and_remaps_audio(tmp_path):
         key=lambda s: s["engine"],
     )
     assert cloned_motion == original_motion
-    old_audio, new_audio = service.get_project_audio(pid), result["audio"]
+    old_audio = service.get_project_audio(pid)
+    new_audio = service.get_project_audio(clone, include_metadata=True)
     assert old_audio["revision_id"] != new_audio["revision_id"]
     new_assets = {asset["name"]: asset for asset in new_audio["assets"]}
     assert set(new_assets) == {"attached", "unused"}

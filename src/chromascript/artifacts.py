@@ -25,6 +25,11 @@ def artifact_path(store: Store, artifact: dict[str, Any]) -> Path:
     if artifact.get("storage") != "delivery":
         raise ChromaError("artifact_storage", "成果存储位置无效。")
     job = store.get("job", artifact["job_id"])
+    # Restored in-project deliveries resolve relatively; frozen render JSON is unchanged.
+    from .project_storage import delivery_root
+    relocated = delivery_root(store, job['id'])
+    if relocated is not None and job.get('export_completed'):
+        return contained_path(relocated, artifact['relative_path'])
     bundle = motion_bundle(job, store.get("snapshot", job["id"]))
     return contained_path(bundle.artifact_root(), artifact["relative_path"])
 
@@ -39,10 +44,15 @@ def archive_members(store: Store, artifact: dict[str, Any]) -> list[ArchiveMembe
         raise ChromaError("artifact_archive", "请选择已完成的浮点母版归档。")
     job = store.get("job", artifact["job_id"])
     snapshot = store.get("snapshot", job["id"])
-    bundle = motion_bundle(job, snapshot)
-    base = bundle.artifact_root()
-    if base != bundle.target:
-        raise ChromaError("archive_pending", "母版尚未发布，请等待动画导出完成。")
+    from .project_storage import delivery_root
+    relocated = delivery_root(store, job['id'])
+    if relocated is not None and job.get('export_completed'):
+        base = relocated
+    else:
+        bundle = motion_bundle(job, snapshot)
+        base = bundle.artifact_root()
+        if base != bundle.target:
+            raise ChromaError("archive_pending", "母版尚未发布，请等待动画导出完成。")
     try:
         delivery = json.loads(contained_path(base, MANIFEST).read_text())
         sequence = contained_path(base, "masters/sequence.json")

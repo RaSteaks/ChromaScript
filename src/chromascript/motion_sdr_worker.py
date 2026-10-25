@@ -87,7 +87,7 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
 
     def artifact(path: Path, kind: str, mime: str, metadata: dict[str, Any] | None = None) -> None:
         # Store resolves symlinked macOS temporary/workspace roots once.
-        relative = str(path.relative_to(directory if direct else store.root))
+        relative = str(path.relative_to(directory)) if direct else store.relative_file(path)
         aid = hashlib.sha256((job_id + relative).encode()).hexdigest()[:32]
         value = Artifact(
             id=aid,

@@ -1,0 +1,10 @@
+{
+  "project_id": "REPLACE_WITH_PROJECT_ID",
+  "name": "开场配乐 v001",
+  "idempotency_key": "music-intro-v001",
+  "request": {
+    "prompt": "为城市日出镜头制作温暖克制的配乐。稀疏钢琴开场，逐渐加入柔和弦乐，结尾自然收束，为普通话旁白留出空间。",
+    "instrumental": true,
+    "target_duration_seconds": 30
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "project_id": "REPLACE_WITH_PROJECT_ID",
+  "name": "画面配乐 v001",
+  "idempotency_key": "music-visual-v001",
+  "request": {
+    "prompt": "根据参考画面制作由安静到明亮的电影配乐。钢琴与弦乐，不要盖住旁白，最后自然收束。",
+    "instrumental": true,
+    "target_duration_seconds": 30,
+    "reference_images": [
+      {"path": "/absolute/path/to/workspace/audio-sources/REPLACE_WITH_PROJECT_ID/display-preview-001.png", "time_seconds": 0, "description": "夜色中的城市，情绪克制"},
+      {"path": "/absolute/path/to/workspace/audio-sources/REPLACE_WITH_PROJECT_ID/display-preview-002.png", "time_seconds": 15, "description": "日出远景，逐渐转向希望"}
+    ]
+  }
+}

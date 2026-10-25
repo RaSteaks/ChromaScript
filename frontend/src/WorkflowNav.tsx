@@ -3,6 +3,8 @@ import { Button } from "./components";
 export const WORKFLOW = [
   { id: "scene", label: "选择作品" },
   { id: "preview", label: "编辑与预览" },
+  // Project-level sound decisions precede freezing delivery snapshots.
+  { id: "sound", label: "声音" },
   { id: "delivery", label: "设置交付" },
   { id: "jobs", label: "任务与成果" },
 ] as const;

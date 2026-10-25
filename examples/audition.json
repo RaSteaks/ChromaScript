@@ -1,0 +1,13 @@
+{
+  "project_id": "PROJECT_ID",
+  "title": "第 4 章 · 配乐方向第 1 轮",
+  "purpose": "阅读字幕时保持安静，保留探索感",
+  "duration_seconds": 20,
+  "candidates": [
+    {"asset_id": "ASSET_A", "source_start_seconds": 0},
+    {"asset_id": "ASSET_B", "source_start_seconds": 5}
+  ],
+  "blind": true,
+  "loudness_target_lufs": -23,
+  "idempotency_key": "chapter-4-direction-round-1"
+}

@@ -37,12 +37,14 @@ export const MotionPreview = memo(function MotionPreview({
   projectId,
   active,
   composing,
+  externalFrame,
 }: {
   spec: MotionSpec | null;
   sceneId: string;
   projectId: string;
   active: boolean;
   composing: boolean;
+  externalFrame?: number;
 }) {
   const audio = useRef<PreviewAudioHandle>(null);
   const activeView = useRef(active);
@@ -71,7 +73,7 @@ export const MotionPreview = memo(function MotionPreview({
     [requestFrame],
   );
   const [playing, setPlaying] = useState(false);
-  const [hdrPreview, setHdrPreview] = useState(true);
+  const [hdrPreview, setHdrPreview] = useState(externalFrame === undefined);
   const windows = useRef(new Map<string, HTMLIFrameElement>());
   const panel = useRef<PreviewPanelHandle>(null);
   const current = useRef(pictures);
@@ -118,6 +120,12 @@ export const MotionPreview = memo(function MotionPreview({
     },
     [requestFrame],
   );
+
+  useEffect(() => {
+    // Audition owns one device clock. Drive this retained picture by explicit
+    // frames and leave its ordinary player/audio disabled; no candidate remounts.
+    if (externalFrame !== undefined && accepted) command("seek", externalFrame);
+  }, [externalFrame, accepted, command]);
 
   useEffect(() => {
     setPictures([]);
@@ -531,11 +539,11 @@ export const MotionPreview = memo(function MotionPreview({
     <PreviewPanel
       ref={panel}
       className="motion-preview-panel"
-      label="动画实时预览"
+      label={externalFrame === undefined ? "动画实时预览" : "固定版本试听画面"}
       active={active}
       toolbar={
         <div className="section-heading">
-          <h2>实时预览</h2>
+          <h2>{externalFrame === undefined ? "实时预览" : "试听画面"}</h2>
           <span className="tiny-label">
             {spec?.engine === "remotion-sdr-v1"
               ? "Remotion · SDR"
@@ -588,67 +596,73 @@ export const MotionPreview = memo(function MotionPreview({
             : stale
               ? "显示上一版画面，等待当前草稿编译。"
               : accepted
-                ? accepted.hdr?.message || "当前草稿 · 网页 sRGB 预览"
+                ? externalFrame !== undefined
+                  ? "固定作品版本 · 网页 sRGB 预览"
+                  : accepted.hdr?.message || "当前草稿 · 网页 sRGB 预览"
                 : "等待代码预览"}
       </div>
-      <PreviewTimeline
-        animation
-        frame={requestedFrame ?? frame}
-        maxFrame={maxFrame}
-        playing={playing}
-        disabled={!accepted}
-        onPlay={() => {
-          if (!playing) audio.current?.unlock();
-          command(playing ? "pause" : "play");
-        }}
-        onScrubbingChange={(value) => hdr.current?.setScrubbing(value)}
-        onSeek={(value) => {
-          command("pause");
-          command("seek", value);
-        }}
-        tools={
-          <>
-            {spec?.engine === "three-float-v1" && (
-              <Field label="预览显示" id="motion-preview-display">
-                <select
-                  id="motion-preview-display"
-                  value={hdrPreview ? "auto" : "srgb"}
-                  onChange={(event) =>
-                    setHdrPreview(event.target.value === "auto")
-                  }
-                >
-                  <option value="auto">自动 HDR</option>
-                  <option value="srgb">sRGB SDR</option>
-                </select>
-              </Field>
-            )}
-            <Button
-              onClick={() => setRetry((old) => old + 1)}
-              disabled={pending || !spec}
-              aria-label="重新编译动画"
-              title="重新编译动画"
-            >
-              <RefreshCw size={15} />
-            </Button>
-          </>
-        }
-      />
-      <PreviewAudio
-        key={`${projectId}:${sceneId}`}
-        ref={audio}
-        projectId={projectId}
-        active={active}
-        playing={
-          playing &&
-          !!accepted &&
-          !error?.channel &&
-          accepted.hdr?.mode !== "buffering"
-        }
-        frameDuration={1 / rate}
-        seconds={frame / rate}
-        duration={(maxFrame + 1) / rate}
-        clockKey={`${sceneId}:${accepted?.channel}`}
-      />
+      {externalFrame === undefined && (
+        <PreviewTimeline
+          animation
+          frame={requestedFrame ?? frame}
+          maxFrame={maxFrame}
+          playing={playing}
+          disabled={!accepted}
+          onPlay={() => {
+            if (!playing) audio.current?.unlock();
+            command(playing ? "pause" : "play");
+          }}
+          onScrubbingChange={(value) => hdr.current?.setScrubbing(value)}
+          onSeek={(value) => {
+            command("pause");
+            command("seek", value);
+          }}
+          tools={
+            <>
+              {spec?.engine === "three-float-v1" && (
+                <Field label="预览显示" id="motion-preview-display">
+                  <select
+                    id="motion-preview-display"
+                    value={hdrPreview ? "auto" : "srgb"}
+                    onChange={(event) =>
+                      setHdrPreview(event.target.value === "auto")
+                    }
+                  >
+                    <option value="auto">自动 HDR</option>
+                    <option value="srgb">sRGB SDR</option>
+                  </select>
+                </Field>
+              )}
+              <Button
+                onClick={() => setRetry((old) => old + 1)}
+                disabled={pending || !spec}
+                aria-label="重新编译动画"
+                title="重新编译动画"
+              >
+                <RefreshCw size={15} />
+              </Button>
+            </>
+          }
+        />
+      )}
+      {externalFrame === undefined && (
+        <PreviewAudio
+          key={`${projectId}:${sceneId}`}
+          ref={audio}
+          projectId={projectId}
+          active={active}
+          playing={
+            playing &&
+            !!accepted &&
+            !error?.channel &&
+            accepted.hdr?.mode !== "buffering"
+          }
+          frameDuration={1 / rate}
+          seconds={frame / rate}
+          duration={(maxFrame + 1) / rate}
+          clockKey={`${sceneId}:${accepted?.channel}`}
+        />
+      )}
       <Notice text={error?.message || ""} error />
       {/* Keep color/precision guidance available without reserving a paragraph of viewing space. */}
       <details className="technical-note preview-notes">

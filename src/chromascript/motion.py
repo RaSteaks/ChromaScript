@@ -834,7 +834,7 @@ class MotionOperations:
     ) -> dict[str, Any]:
         output = resolve_motion_output(engine, output)
         destination = resolve_export_directory(
-            export_directory if export_directory is not None else str(self.store.root / "exports")
+            export_directory if export_directory is not None else str(self.store.project_directory(project_id) / "交付") if project_id and self.store.partitioned else str(self.store.root / "exports")
         )
         from .motion_storage import estimate_storage
 
@@ -886,7 +886,7 @@ class MotionOperations:
             if encoder not in available_encoders():
                 raise ChromaError("motion_encoder", f"本机 FFmpeg 缺少 {encoder}。")
         destination = resolve_export_directory(
-            export_directory if export_directory is not None else str(self.store.root / "exports")
+            export_directory if export_directory is not None else str(self.store.project_directory(record["project_id"]) / "交付") if self.store.partitioned else str(self.store.root / "exports")
         )
         pixels = spec.width * spec.height
         # Budget all simultaneous CPU copies plus GPU targets before allocating. The

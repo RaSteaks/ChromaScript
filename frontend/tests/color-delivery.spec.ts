@@ -1,3 +1,4 @@
+// Five-stage navigation includes Sound before delivery.
 import { expect, test } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import type { Artifact, Job, SceneReply } from "../src/types";
@@ -109,7 +110,7 @@ test("motion preview requires verified sRGB pixels and tags regardless of filena
     await page.goto("/");
     await page.getByLabel("当前项目", { exact: true }).selectOption(project.id);
     await page
-      .getByRole("button", { name: "4. 任务与成果", exact: true })
+      .getByRole("button", { name: "5. 任务与成果", exact: true })
       .click();
     await page
       .getByRole("button", { name: "查看画面预览", exact: true })
@@ -143,7 +144,7 @@ test("output color space and gamma stay linked through HDR, narrow layout and re
   await page.goto("/");
   await page
     .getByRole("navigation", { name: "创作流程" })
-    .getByRole("button", { name: "3. 设置交付", exact: true })
+    .getByRole("button", { name: "4. 设置交付", exact: true })
     .click();
   const target = page.getByRole("group", { name: "交付目标 1", exact: true });
   const space = target.getByLabel("输出色彩空间", { exact: true });
@@ -249,7 +250,7 @@ test("linear EXR uses no display luminance while image formats retain their enco
   page,
 }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  await page.getByRole("button", { name: "4. 设置交付", exact: true }).click();
   const target = page.getByRole("group", { name: "交付目标 1", exact: true });
   const container = target.getByLabel("封装 / 图像格式", { exact: true });
   await container.selectOption("exr");
@@ -274,7 +275,7 @@ test("image gamut menus keep unavailable choices discoverable", async ({
   page,
 }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  await page.getByRole("button", { name: "4. 设置交付", exact: true }).click();
   const target = page.getByRole("group", { name: "交付目标 1", exact: true });
   for (const viewport of [
     { width: 1440, height: 1000 },
@@ -321,7 +322,7 @@ test("requested gamuts and Auto Video Full levels are real linked choices", asyn
   page,
 }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  await page.getByRole("button", { name: "4. 设置交付", exact: true }).click();
   const target = page.getByRole("group", { name: "交付目标 1", exact: true });
   const space = target.getByLabel("输出色彩空间", { exact: true });
   const range = target.getByLabel("数据级别", { exact: true });
@@ -406,7 +407,7 @@ test("wide gamut delivery retains a separate sRGB browser preview", async ({
   await page.getByLabel("宽度", { exact: true }).fill("64");
   await page.getByLabel("高度", { exact: true }).fill("64");
   await page.getByLabel("总帧数", { exact: true }).fill("2");
-  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  await page.getByRole("button", { name: "4. 设置交付", exact: true }).click();
   await page.getByLabel("输出色彩空间", { exact: true }).selectOption("P3-D65");
   await page.getByRole("button", { name: /^提交交付/ }).click();
   await page
@@ -436,7 +437,7 @@ test("Resolve-style ProRes delivery keeps P3 gamma independent and freezes Auto 
   expect(scene.ok()).toBe(true);
   await page.goto("/");
   await page.getByLabel("当前项目", { exact: true }).selectOption(project.id);
-  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  await page.getByRole("button", { name: "4. 设置交付", exact: true }).click();
   const target = page.getByRole("group", { name: "交付目标 1", exact: true });
   const field = (name: string) => target.getByLabel(name, { exact: true });
   await field("封装 / 图像格式").selectOption("mov");

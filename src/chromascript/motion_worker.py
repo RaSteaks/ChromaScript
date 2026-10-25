@@ -80,7 +80,7 @@ def run_motion(root: Path, job_id: str) -> None:
         *, representation: Literal["file", "zip-stream"] = "file",
     ) -> None:
         # Bundle-relative IDs survive the staging-directory rename unchanged.
-        relative = str(path.relative_to(directory if direct else store.root))
+        relative = str(path.relative_to(directory)) if direct else store.relative_file(path)
         suffix = representation if representation != "file" else ""
         aid = hashlib.sha256((job_id + relative + suffix).encode()).hexdigest()[:32]
         value = Artifact(

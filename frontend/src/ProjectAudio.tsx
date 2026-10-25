@@ -7,8 +7,11 @@ type Asset = {
   name: string;
   duration_seconds: number;
   metadata?: { clipped_samples?: number };
+  usage?: { auditions: number; timeline_clips: number };
 };
-type Clip = {
+export type AudioClip = {
+  audition_id?: string | null;
+  candidate_id?: string | null;
   asset_id: string;
   start_seconds: number;
   source_start_seconds: number;
@@ -16,6 +19,8 @@ type Clip = {
   gain_db: number;
 };
 type ClipDraft = {
+  audition_id?: string | null;
+  candidate_id?: string | null;
   asset_id: string;
   start_seconds: string;
   source_start_seconds: string;
@@ -25,9 +30,11 @@ type ClipDraft = {
 type Reply = {
   revision_id: string;
   assets: Asset[];
-  timeline: { clips: Clip[] };
+  timeline: { clips: AudioClip[] };
 };
-const toDraft = (clip: Clip): ClipDraft => ({
+const toDraft = (clip: AudioClip): ClipDraft => ({
+  audition_id: clip.audition_id,
+  candidate_id: clip.candidate_id,
   asset_id: clip.asset_id,
   start_seconds: String(clip.start_seconds),
   source_start_seconds: String(clip.source_start_seconds),
@@ -43,12 +50,24 @@ const message = (error: unknown) =>
 export function ProjectAudio({
   projectId,
   disabled = false,
+  embedded = false,
+  section = "timeline",
+  active = true,
+  addition,
+  onAdded,
+  onDirty,
 }: {
   projectId: string;
   disabled?: boolean;
+  embedded?: boolean;
+  section?: "timeline" | "assets";
+  active?: boolean;
+  addition?: AudioClip | null;
+  onAdded?: () => void;
+  onDirty?: (dirty: boolean) => void;
 }) {
   const prefix = useId();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(embedded && active);
   const [discard, setDiscard] = useState(false);
   const [reload, setReload] = useState(0);
   const [loaded, setLoaded] = useState<Reply | null>(null);
@@ -68,9 +87,51 @@ export function ProjectAudio({
   const dirty = JSON.stringify(clips) !== baseline;
 
   useEffect(() => {
+    if (embedded && active) setOpen(true);
+  }, [embedded, active]);
+
+  useEffect(() => {
+    onDirty?.(dirty || !!pending);
+  }, [dirty, pending, onDirty]);
+
+  const applying = useRef<AudioClip | null>(null);
+  useEffect(() => {
+    if (!addition || !loaded || !active || applying.current === addition)
+      return;
+    applying.current = addition;
+    if (clips.length >= 32) {
+      setError("音轨最多 32 个片段，请先移除片段。");
+      onAdded?.();
+      return;
+    }
+    // Refresh only assets, never the baseline or clips: an agent may have imported
+    // the selected candidate while the user was editing an older timeline draft.
+    void call<Reply>("get_project_audio", { project_id: projectId })
+      .then((reply) => {
+        setLoaded((old) => (old ? { ...old, assets: reply.assets } : old));
+        setClips((old) => [...old, toDraft(addition)]);
+        onAdded?.();
+      })
+      .catch((cause) => {
+        setError(message(cause));
+        onAdded?.();
+      });
+  }, [addition, loaded, active, clips.length, onAdded, projectId]);
+
+  useEffect(() => {
+    document
+      .querySelectorAll<HTMLAudioElement>(".project-audio audio")
+      .forEach((node) => node.pause());
+  }, [active, section]);
+
+  useEffect(() => {
     if (!open) return;
     const abort = new AbortController();
-    call<Reply>("get_project_audio", { project_id: projectId }, abort.signal)
+    call<Reply>(
+      "get_project_audio",
+      { project_id: projectId, include_usage: true },
+      abort.signal,
+    )
       .then((reply) => {
         const next = reply.timeline.clips.map(toDraft);
         setLoaded(reply);
@@ -155,6 +216,8 @@ export function ProjectAudio({
         if (source >= asset.duration_seconds)
           throw new Error("素材起点必须小于素材时长。");
         return {
+          audition_id: clip.audition_id,
+          candidate_id: clip.candidate_id,
           asset_id: clip.asset_id,
           start_seconds: validate(
             `${prefix}-start-${index}`,
@@ -230,278 +293,292 @@ export function ProjectAudio({
     </Field>
   );
 
-  return (
-    <>
-      <Button
-        className="outline"
-        disabled={!projectId || disabled}
-        onClick={() => {
-          setLoaded(null);
-          setError("");
-          setStatus("");
-          setConflict(false);
-          setOpen(true);
-        }}
-      >
-        项目音频
-      </Button>
-      <Modal open={open} title="项目音频" onClose={close}>
-        {open && (
-          <div className="project-audio">
-            <p className="panel-description">
-              音轨用于此项目的所有新交付任务。视频包含混音，图像序列附带
-              WAV；保存音轨后，点击预览播放即可同步听见声音。
-            </p>
-            <div className="status-line" aria-live="polite">
-              {pending || (!loaded && !error ? "正在读取音频…" : status)}
+  const content = open && (
+    <div className="project-audio">
+      <p className="panel-description">
+        音轨用于此项目的所有新交付任务。视频包含混音，图像序列附带
+        WAV；保存音轨后，点击预览播放即可同步听见声音。
+      </p>
+      <div className="status-line" aria-live="polite">
+        {pending || (!loaded && !error ? "正在读取音频…" : status)}
+      </div>
+      <Notice text={error} error />
+      {!loaded && error && (
+        <Button
+          onClick={() => {
+            setError("");
+            setReload((n) => n + 1);
+          }}
+        >
+          重新读取音频
+        </Button>
+      )}
+      {loaded && (
+        <fieldset disabled={!!pending} className="audio-editor-fields">
+          <section
+            aria-label="创建音频素材"
+            hidden={embedded && section !== "assets"}
+          >
+            <h3>创建音频素材</h3>
+            <Field label="音频名称" id={prefix + "-name"}>
+              <input
+                id={prefix + "-name"}
+                value={name}
+                maxLength={120}
+                onChange={(e) => setName(e.target.value)}
+              />
+            </Field>
+            <div className="audio-fields">
+              <Field label="波形" id={prefix + "-wave"}>
+                <select
+                  id={prefix + "-wave"}
+                  value={waveform}
+                  onChange={(e) => setWaveform(e.target.value)}
+                >
+                  <option value="sine">正弦波</option>
+                  <option value="triangle">三角波</option>
+                  <option value="noise">噪声</option>
+                </select>
+              </Field>
+              {input(
+                "频率（Hz）",
+                prefix + "-frequency",
+                frequency,
+                setFrequency,
+              )}
+              {input("时长（秒）", prefix + "-duration", duration, setDuration)}
             </div>
-            <Notice text={error} error />
-            {!loaded && error && (
-              <Button
-                onClick={() => {
-                  setError("");
-                  setReload((n) => n + 1);
-                }}
-              >
-                重新读取音频
-              </Button>
+            <Button
+              onClick={() =>
+                void act("正在生成音频…", async () => {
+                  if (!name.trim()) {
+                    document.getElementById(prefix + "-name")?.focus();
+                    throw new Error("请输入音频名称。");
+                  }
+                  const seconds = validate(
+                    prefix + "-duration",
+                    duration,
+                    0.001,
+                    600,
+                  );
+                  const hz = validate(
+                    prefix + "-frequency",
+                    frequency,
+                    20,
+                    20000,
+                  );
+                  const reply = await call<{ asset: Asset }>("create_audio", {
+                    project_id: projectId,
+                    name,
+                    spec: {
+                      duration_seconds: seconds,
+                      events: [
+                        {
+                          waveform,
+                          duration_seconds: seconds,
+                          frequency_hz: hz,
+                          gain_db: -18,
+                        },
+                      ],
+                    },
+                  });
+                  addAsset(reply.asset);
+                })
+              }
+            >
+              生成音频
+            </Button>
+            <Field
+              label="导入本地音频"
+              id={prefix + "-file"}
+              hint="单个文件最多 128 MiB、10 分钟。支持 WAV、MP3、FLAC、AIFF、OGG、M4A 等可解码音频。"
+            >
+              <input
+                ref={file}
+                id={prefix + "-file"}
+                type="file"
+                accept="audio/*,.m4a,.flac,.aiff"
+                aria-describedby={prefix + "-file-help"}
+              />
+            </Field>
+            <Button
+              onClick={() =>
+                void act("正在导入音频…", async () => {
+                  const selected = file.current?.files?.[0];
+                  if (!selected || selected.size > 128 * 1024 ** 2)
+                    throw new Error("请选择不超过 128 MiB 的音频文件。");
+                  const data = await new Promise<string>((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () =>
+                      resolve(String(reader.result).split(",")[1]);
+                    reader.onerror = () =>
+                      reject(new Error("读取文件失败，请重新选择。"));
+                    reader.readAsDataURL(selected);
+                  });
+                  const reply = await call<{ asset: Asset }>("import_audio", {
+                    project_id: projectId,
+                    name: selected.name.slice(0, 120),
+                    data_base64: data,
+                  });
+                  addAsset(reply.asset);
+                  if (file.current) file.current.value = "";
+                })
+              }
+            >
+              导入音频
+            </Button>
+          </section>
+          <Button
+            onClick={() =>
+              void act("正在刷新素材…", async () => {
+                const reply = await call<Reply>("get_project_audio", {
+                  project_id: projectId,
+                  include_usage: true,
+                });
+                setLoaded((old) =>
+                  old ? { ...old, assets: reply.assets } : old,
+                );
+              })
+            }
+          >
+            刷新音频素材
+          </Button>
+          <section
+            aria-label="音频素材"
+            hidden={embedded && section !== "assets"}
+          >
+            <h3>素材（{loaded.assets.length}）</h3>
+            {!loaded.assets.length ? (
+              <p>导入音频或生成音效，然后添加到音轨。</p>
+            ) : (
+              <AssetList
+                assets={loaded.assets}
+                full={clips.length >= 32}
+                onAdd={(asset) =>
+                  setClips((current) => [
+                    ...current,
+                    {
+                      asset_id: asset.id,
+                      start_seconds: "0",
+                      source_start_seconds: "0",
+                      duration_seconds: "",
+                      gain_db: "0",
+                    },
+                  ])
+                }
+              />
             )}
-            {loaded && (
-              <fieldset disabled={!!pending} className="audio-editor-fields">
-                <section aria-label="创建音频素材">
-                  <h3>创建音频素材</h3>
-                  <Field label="音频名称" id={prefix + "-name"}>
-                    <input
-                      id={prefix + "-name"}
-                      value={name}
-                      maxLength={120}
-                      onChange={(e) => setName(e.target.value)}
-                    />
-                  </Field>
-                  <div className="audio-fields">
-                    <Field label="波形" id={prefix + "-wave"}>
-                      <select
-                        id={prefix + "-wave"}
-                        value={waveform}
-                        onChange={(e) => setWaveform(e.target.value)}
-                      >
-                        <option value="sine">正弦波</option>
-                        <option value="triangle">三角波</option>
-                        <option value="noise">噪声</option>
-                      </select>
-                    </Field>
-                    {input(
-                      "频率（Hz）",
-                      prefix + "-frequency",
-                      frequency,
-                      setFrequency,
-                    )}
-                    {input(
-                      "时长（秒）",
-                      prefix + "-duration",
-                      duration,
-                      setDuration,
-                    )}
-                  </div>
+          </section>
+          <section
+            aria-label="项目音轨"
+            hidden={embedded && section !== "timeline"}
+          >
+            <h3>
+              音轨（{clips.length}/32）{dirty ? " · 未保存" : ""}
+            </h3>
+            {!clips.length && <p>当前没有音轨，交付将保持静音。</p>}
+            {clips.map((clip, index) => (
+              <div className="audio-clip" key={index}>
+                <div className="section-heading">
+                  <h4>
+                    {index + 1}.{" "}
+                    {loaded.assets.find((a) => a.id === clip.asset_id)?.name ||
+                      "素材不可用"}
+                  </h4>
                   <Button
+                    aria-label={`移除音轨 ${index + 1}`}
                     onClick={() =>
-                      void act("正在生成音频…", async () => {
-                        if (!name.trim()) {
-                          document.getElementById(prefix + "-name")?.focus();
-                          throw new Error("请输入音频名称。");
-                        }
-                        const seconds = validate(
-                          prefix + "-duration",
-                          duration,
-                          0.001,
-                          600,
-                        );
-                        const hz = validate(
-                          prefix + "-frequency",
-                          frequency,
-                          20,
-                          20000,
-                        );
-                        const reply = await call<{ asset: Asset }>(
-                          "create_audio",
-                          {
-                            project_id: projectId,
-                            name,
-                            spec: {
-                              duration_seconds: seconds,
-                              events: [
-                                {
-                                  waveform,
-                                  duration_seconds: seconds,
-                                  frequency_hz: hz,
-                                  gain_db: -18,
-                                },
-                              ],
-                            },
-                          },
-                        );
-                        addAsset(reply.asset);
-                      })
+                      setClips((current) =>
+                        current.filter((_, i) => i !== index),
+                      )
                     }
                   >
-                    生成音频
-                  </Button>
-                  <Field
-                    label="导入本地音频"
-                    id={prefix + "-file"}
-                    hint="单个文件最多 128 MiB、10 分钟。支持 WAV、MP3、FLAC、AIFF、OGG、M4A 等可解码音频。"
-                  >
-                    <input
-                      ref={file}
-                      id={prefix + "-file"}
-                      type="file"
-                      accept="audio/*,.m4a,.flac,.aiff"
-                      aria-describedby={prefix + "-file-help"}
-                    />
-                  </Field>
-                  <Button
-                    onClick={() =>
-                      void act("正在导入音频…", async () => {
-                        const selected = file.current?.files?.[0];
-                        if (!selected || selected.size > 128 * 1024 ** 2)
-                          throw new Error("请选择不超过 128 MiB 的音频文件。");
-                        const data = await new Promise<string>(
-                          (resolve, reject) => {
-                            const reader = new FileReader();
-                            reader.onload = () =>
-                              resolve(String(reader.result).split(",")[1]);
-                            reader.onerror = () =>
-                              reject(new Error("读取文件失败，请重新选择。"));
-                            reader.readAsDataURL(selected);
-                          },
-                        );
-                        const reply = await call<{ asset: Asset }>(
-                          "import_audio",
-                          {
-                            project_id: projectId,
-                            name: selected.name.slice(0, 120),
-                            data_base64: data,
-                          },
-                        );
-                        addAsset(reply.asset);
-                        if (file.current) file.current.value = "";
-                      })
-                    }
-                  >
-                    导入音频
-                  </Button>
-                </section>
-                <section aria-label="音频素材">
-                  <h3>素材（{loaded.assets.length}）</h3>
-                  {!loaded.assets.length ? (
-                    <p>导入音频或生成音效，然后添加到音轨。</p>
-                  ) : (
-                    <AssetList
-                      assets={loaded.assets}
-                      full={clips.length >= 32}
-                      onAdd={(asset) =>
-                        setClips((current) => [
-                          ...current,
-                          {
-                            asset_id: asset.id,
-                            start_seconds: "0",
-                            source_start_seconds: "0",
-                            duration_seconds: "",
-                            gain_db: "0",
-                          },
-                        ])
-                      }
-                    />
-                  )}
-                </section>
-                <section aria-label="项目音轨">
-                  <h3>
-                    音轨（{clips.length}/32）{dirty ? " · 未保存" : ""}
-                  </h3>
-                  {!clips.length && <p>当前没有音轨，交付将保持静音。</p>}
-                  {clips.map((clip, index) => (
-                    <div className="audio-clip" key={index}>
-                      <div className="section-heading">
-                        <h4>
-                          {index + 1}.{" "}
-                          {loaded.assets.find((a) => a.id === clip.asset_id)
-                            ?.name || "素材不可用"}
-                        </h4>
-                        <Button
-                          aria-label={`移除音轨 ${index + 1}`}
-                          onClick={() =>
-                            setClips((current) =>
-                              current.filter((_, i) => i !== index),
-                            )
-                          }
-                        >
-                          移除
-                        </Button>
-                      </div>
-                      <div className="audio-fields">
-                        {input(
-                          "时间线起点（秒）",
-                          `${prefix}-start-${index}`,
-                          clip.start_seconds,
-                          (v) => patch(index, "start_seconds", v),
-                        )}
-                        {input(
-                          "素材起点（秒）",
-                          `${prefix}-source-${index}`,
-                          clip.source_start_seconds,
-                          (v) => patch(index, "source_start_seconds", v),
-                        )}
-                        {input(
-                          "播放时长（秒）",
-                          `${prefix}-length-${index}`,
-                          clip.duration_seconds,
-                          (v) => patch(index, "duration_seconds", v),
-                          "留空播放到素材末尾",
-                        )}
-                        {input(
-                          "增益（dB）",
-                          `${prefix}-gain-${index}`,
-                          clip.gain_db,
-                          (v) => patch(index, "gain_db", v),
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </section>
-                {conflict && (
-                  <div className="modal-actions">
-                    <Button
-                      onClick={() =>
-                        void act("正在复制草稿…", async () => {
-                          await navigator.clipboard.writeText(
-                            JSON.stringify(clips, null, 2),
-                          );
-                          setStatus("音轨草稿已复制。");
-                        })
-                      }
-                    >
-                      复制音轨草稿
-                    </Button>
-                    <Button onClick={() => setDiscard(true)}>
-                      重新读取最新音轨
-                    </Button>
-                  </div>
-                )}
-                <div className="modal-actions">
-                  <Button onClick={close}>关闭</Button>
-                  <Button
-                    className="primary"
-                    disabled={!dirty || conflict}
-                    onClick={() => void save()}
-                  >
-                    保存音轨
+                    移除
                   </Button>
                 </div>
-              </fieldset>
-            )}
+                <div className="audio-fields">
+                  {input(
+                    "时间线起点（秒）",
+                    `${prefix}-start-${index}`,
+                    clip.start_seconds,
+                    (v) => patch(index, "start_seconds", v),
+                  )}
+                  {input(
+                    "素材起点（秒）",
+                    `${prefix}-source-${index}`,
+                    clip.source_start_seconds,
+                    (v) => patch(index, "source_start_seconds", v),
+                  )}
+                  {input(
+                    "播放时长（秒）",
+                    `${prefix}-length-${index}`,
+                    clip.duration_seconds,
+                    (v) => patch(index, "duration_seconds", v),
+                    "留空播放到素材末尾",
+                  )}
+                  {input(
+                    "增益（dB）",
+                    `${prefix}-gain-${index}`,
+                    clip.gain_db,
+                    (v) => patch(index, "gain_db", v),
+                  )}
+                </div>
+              </div>
+            ))}
+          </section>
+          {conflict && (
+            <div className="modal-actions">
+              <Button
+                onClick={() =>
+                  void act("正在复制草稿…", async () => {
+                    await navigator.clipboard.writeText(
+                      JSON.stringify(clips, null, 2),
+                    );
+                    setStatus("音轨草稿已复制。");
+                  })
+                }
+              >
+                复制音轨草稿
+              </Button>
+              <Button onClick={() => setDiscard(true)}>重新读取最新音轨</Button>
+            </div>
+          )}
+          <div
+            className="modal-actions"
+            hidden={embedded && section !== "timeline"}
+          >
+            {!embedded && <Button onClick={close}>关闭</Button>}
+            <Button
+              className="primary"
+              disabled={!dirty || conflict}
+              onClick={() => void save()}
+            >
+              保存音轨
+            </Button>
           </div>
-        )}
-      </Modal>
+        </fieldset>
+      )}
+    </div>
+  );
+  return (
+    <>
+      {!embedded && (
+        <Button
+          className="outline"
+          disabled={!projectId || disabled}
+          onClick={() => setOpen(true)}
+        >
+          项目音频
+        </Button>
+      )}
+      {embedded ? (
+        content
+      ) : (
+        <Modal open={open} title="项目音频" onClose={close}>
+          {content}
+        </Modal>
+      )}
+
       <Modal
         open={discard}
         title="放弃音轨草稿？"
@@ -548,6 +625,8 @@ function AssetList({
           <div className="section-heading">
             <span>
               {asset.name} · {asset.duration_seconds.toFixed(2)} 秒
+              {asset.usage &&
+                ` · 用于 ${asset.usage.auditions} 轮试听 · 已挂载 ${asset.usage.timeline_clips} 处`}
             </span>
             <Button
               disabled={full}
@@ -559,6 +638,13 @@ function AssetList({
           </div>
           <audio
             controls
+            onPlay={(event) => {
+              document
+                .querySelectorAll<HTMLAudioElement>(".project-audio audio")
+                .forEach((node) => {
+                  if (node !== event.currentTarget) node.pause();
+                });
+            }}
             preload="none"
             aria-label={`试听 ${asset.name}`}
             src={artifactUrl(asset.id)}

@@ -1,3 +1,4 @@
+// Five-stage navigation includes Sound before delivery.
 import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { mkdirSync } from "node:fs";
@@ -127,7 +128,7 @@ test("fixed ACEScg generation and sRGB preview remain independent of delivery", 
   await expect(workflow).toContainText("ACEScg · AP1 · 线性（固定）");
   await expect(workflow).toContainText("sRGB · ACES 2.0 显示变换");
   await expect(workflow.locator("select, input")).toHaveCount(0);
-  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  await page.getByRole("button", { name: "4. 设置交付", exact: true }).click();
   await expect(workflow).toBeVisible();
   const target = page.getByRole("group", { name: "交付目标 1", exact: true });
   await target
@@ -206,7 +207,7 @@ test("canvas specifications are edited in preview and shared with delivery", asy
     "custom",
   );
 
-  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  await page.getByRole("button", { name: "4. 设置交付", exact: true }).click();
   const summary = page.getByRole("region", {
     name: "交付画面规格",
     exact: true,
@@ -234,7 +235,7 @@ test("canvas specifications are edited in preview and shared with delivery", asy
   ).toBeDisabled();
   await settings.getByLabel("宽度", { exact: true }).fill("320");
   await expect(settings.getByRole("alert")).not.toBeVisible();
-  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  await page.getByRole("button", { name: "4. 设置交付", exact: true }).click();
   // Inspect the exact shared submission without starting an unnecessary 48-frame render.
   await page.route("**/api/operations/submit_configured_delivery", (route) =>
     route.fulfill({
@@ -375,7 +376,7 @@ test("slow live playback completes frames with no backlog and stops outside the 
   expect(maximum).toBe(1);
   await page.getByRole("button", { name: "暂停实时预览", exact: true }).click();
   await expect(page.getByText("实时预览已更新", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  await page.getByRole("button", { name: "4. 设置交付", exact: true }).click();
   const count = frames.length;
   await page.waitForTimeout(450);
   expect(frames).toHaveLength(count);

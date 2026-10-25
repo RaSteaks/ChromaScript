@@ -1,3 +1,4 @@
+// Five-stage navigation includes Sound before delivery.
 import { expect, test, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -33,7 +34,7 @@ async function setup(page: Page) {
   await page.getByLabel("宽度", { exact: true }).fill("64");
   await page.getByLabel("高度", { exact: true }).fill("36");
   await page.getByLabel("总帧数", { exact: true }).fill("2");
-  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  await page.getByRole("button", { name: "4. 设置交付", exact: true }).click();
   return { call, caps, scene, project };
 }
 
@@ -84,7 +85,7 @@ test("delivery destination validates paths, preserves drafts and exports a compl
   await page
     .getByRole("button", { name: "2. 编辑与预览", exact: true })
     .click();
-  await page.getByRole("button", { name: "3. 设置交付", exact: true }).click();
+  await page.getByRole("button", { name: "4. 设置交付", exact: true }).click();
   await expect(directory).toHaveValue(parent);
   mkdirSync("../reports", { recursive: true });
   await page.screenshot({

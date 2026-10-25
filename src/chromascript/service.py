@@ -21,8 +21,10 @@ from pydantic import ValidationError
 
 from .appearance import ColorAppearanceRequest, resolve_color
 from .artifacts import archive_members, artifact_path, stream_zip
-from .audio import AudioOperations, AudioTimeline, freeze_audio
+from .audio import AudioTimeline, freeze_audio
 from .audio_review import AudioReviewOperations, review_capabilities
+from .auditions import AuditionOperations
+from .cloud_music import CloudMusicOperations, music_configuration
 from .color import color_info, transform, video_tag_issue
 from .desktop import choose_directory, directory_picker_available, open_directory
 from .encoding import available_encoders, pixel_format_info, probe
@@ -32,6 +34,7 @@ from .exports import bundle_name
 from .exports import export_directory as resolve_export_directory
 from .gpu import Renderer
 from .images import file_hash, read_image
+from .media_analysis import MediaAnalysisOperations, analysis_configuration
 from .models import (
     Artifact,
     ColorPipeline,
@@ -50,15 +53,24 @@ from .music import music_environment
 from .operations import catalogue, operation
 from .presets import FRAME_RATES, RESOLUTIONS, builtins
 from .preview import LivePreviewRequest, preview_image
+from .project_storage import ProjectStorageOperations
+from .speech import public_configuration
 from .store import Store, canonical, identifier, now
 from .templates import TEMPLATES, blank_scene, template_list
 
 
-class Service(MotionOperations, MotionSamplingOperations, AudioOperations, AudioReviewOperations):
+# Listening rounds share the registry but never own timeline mutations.
+class Service(ProjectStorageOperations, AuditionOperations, MotionOperations, MotionSamplingOperations, CloudMusicOperations, AudioReviewOperations, MediaAnalysisOperations):
     def __init__(self, root: Path, export_roots: list[Path] | None = None):
         self.operation_lock = threading.RLock()
         # Slow local listening reviews run independently of project editing/preview requests.
         self.audio_review_lock = threading.Lock()
+        # Billable speech runs separately, so cloud latency never locks project edits.
+        self.speech_lock = threading.Lock()
+        # Independent generation lanes allow narration and score to overlap.
+        self.music_generation_lock = threading.Lock()
+        # Analysis is an independent cloud lane and always retains ZDR routing.
+        self.media_analysis_lock = threading.Lock()
         self.store = Store(root)
         recover_samples(self.store)
         self.export_roots = [self.store.root, *[p.resolve() for p in export_roots or []]]
@@ -125,6 +137,9 @@ class Service(MotionOperations, MotionSamplingOperations, AudioOperations, Audio
                       # Discovery reports the real local runtime, without downloading instruments.
                       "music": music_environment(),
                       "model_review": review_capabilities(self.store),
+                      "speech": public_configuration(self.store),
+                      "cloud_music": music_configuration(self.store),
+                      "cloud_analysis": analysis_configuration(self.store),
                       "timeline": "project-wide; frozen by each delivery; web previews synchronize saved tracks",
                       "guidelines_operation": "chromascript.get_audio_guidelines",
                       "documentation_resource": "chromascript://docs/audio",
@@ -201,8 +216,19 @@ class Service(MotionOperations, MotionSamplingOperations, AudioOperations, Audio
         )
         # Persist the new-project default explicitly; implicit legacy pipelines
         # and built-in presets retain their original Gamma 2.4 interpretation.
-        self.store.put("pipeline", p.id, ColorPipeline(output="sRGB").model_dump())
-        return {"project": self.store.put("project", p.id, p.model_dump())}
+        # One project database owns its record and pipeline from the first commit.
+        self.store.prepare_project(p.model_dump())
+        try:
+            with self.store.connect(p.id) as db:
+                db.executemany("INSERT INTO records VALUES (?,?,?)", [
+                    ("pipeline", p.id, canonical(ColorPipeline(output="sRGB").model_dump())),
+                    ("project", p.id, canonical(p.model_dump())),
+                ])
+        except BaseException:
+            from .project_storage import remove_empty_project
+            remove_empty_project(self.store, p.id)
+            raise
+        return {"project": p.model_dump()}
 
     @operation("List projects with bounded pagination.")
     def list_projects(
@@ -225,6 +251,7 @@ class Service(MotionOperations, MotionSamplingOperations, AudioOperations, Audio
             "scenes": [s for s in self.store.list("scene") if s["project_id"] == project_id],
             "color_pipeline": pipeline,
             "audio": self.get_project_audio(project_id),
+            "storage": {"directory": str(self.store.project_directory(project_id)), "default_delivery_directory": str(self.store.project_directory(project_id) / "交付")} if self.store.partitioned else None,
         }
 
     @operation("Update project name and description.")
@@ -243,7 +270,12 @@ class Service(MotionOperations, MotionSamplingOperations, AudioOperations, Audio
                 "updated_at": now(),
             }
 
-        return {"project": self.store.update("project", project_id, change)}
+        if self.store.partitioned and name is not None:
+            from .project_storage import update_project_record
+            project = update_project_record(self.store, project_id, change)
+        else:
+            project = self.store.update("project", project_id, change)
+        return {"project": project}
 
     @operation(
         "Clone current WGSL/animation scenes, audio assets and timeline into a new project, without render jobs or revision history."
@@ -256,6 +288,7 @@ class Service(MotionOperations, MotionSamplingOperations, AudioOperations, Audio
         clone = Project(
             id=pid, name=name, description=original["description"], created_at=stamp, updated_at=stamp
         )
+        self.store.prepare_project(clone.model_dump())
         rows = [
             ("project", pid, canonical(clone.model_dump())),
             ("pipeline", pid, canonical(self.get_project(project_id)["color_pipeline"])),
@@ -301,13 +334,14 @@ class Service(MotionOperations, MotionSamplingOperations, AudioOperations, Audio
                         ),
                     ]
                 )
-        audio = self.get_project_audio(project_id)
+        # Copy complete asset provenance; ordinary clients receive summaries.
+        audio = self.get_project_audio(project_id, include_metadata=True)
         asset_ids: dict[str, str] = {}
         copied: list[Path] = []
         try:
             for asset in audio["assets"]:
                 aid = identifier()
-                target = self.store.file(f"audio/{aid}.wav")
+                target = self.store.project_file(pid, f"audio/{aid}.wav", asset["name"])
                 target.parent.mkdir(parents=True, exist_ok=True)
                 # Independent bytes prevent either project from losing its sources
                 # when the other's files change. Verify the copy against saved content.
@@ -327,7 +361,7 @@ class Service(MotionOperations, MotionSamplingOperations, AudioOperations, Audio
                     **copy.deepcopy(asset),
                     "id": aid,
                     "project_id": pid,
-                    "relative_path": str(target.relative_to(self.store.root)),
+                    "relative_path": self.store.relative_file(target),
                     "created_at": stamp,
                 }
                 artifact = Artifact(
@@ -352,6 +386,10 @@ class Service(MotionOperations, MotionSamplingOperations, AudioOperations, Audio
             timeline = AudioTimeline.model_validate(audio["timeline"])
             for clip in timeline.clips:
                 clip.asset_id = asset_ids[clip.asset_id]
+                # A cloned project has no copied listening rounds; do not retain
+                # provenance that points back across the project boundary.
+                clip.audition_id = None
+                clip.candidate_id = None
             rows.append(
                 (
                     "audio_timeline",
@@ -367,11 +405,13 @@ class Service(MotionOperations, MotionSamplingOperations, AudioOperations, Audio
             )
             # Publish all cloned records together; failures leave no partial project
             # or orphaned audio copies, and never delete or move original files.
-            with self.store.connect() as connection:
+            with self.store.connect(pid) as connection:
                 connection.executemany("INSERT INTO records VALUES (?,?,?)", rows)
         except Exception as exc:
             for path in copied:
                 path.unlink(missing_ok=True)
+            from .project_storage import remove_empty_project
+            remove_empty_project(self.store, pid)
             if isinstance(exc, (OSError, KeyError)):
                 raise ChromaError(
                     "project_clone_failed", "Project copy failed; check audio sources and disk space"
@@ -387,11 +427,14 @@ class Service(MotionOperations, MotionSamplingOperations, AudioOperations, Audio
             for j in self.store.list("job")
         ):
             raise ChromaError("active_jobs", "Finish or cancel active jobs first")
-        return {
-            "project": self.store.update(
-                "project", project_id, lambda p: {**p, "archived": archived, "updated_at": now()}
-            )
-        }
+        def change(p: dict[str, Any]) -> dict[str, Any]:
+            return {**p, "archived": archived, "updated_at": now()}
+        if self.store.partitioned:
+            from .project_storage import update_project_record
+            project = update_project_record(self.store, project_id, change)
+        else:
+            project = self.store.update("project", project_id, change)
+        return {"project": project}
 
     @operation("List auditable built-in scene templates.")
     def list_templates(self) -> dict[str, Any]:
@@ -755,7 +798,7 @@ class Service(MotionOperations, MotionSamplingOperations, AudioOperations, Audio
         if kind == "delivery":
             # Freeze the user-selected parent in the same identity
             # as the scene/outputs. Changing a destination requires a new request key.
-            destination = self.get_delivery_export_options(export_directory)["directory"]
+            destination = self.get_delivery_export_options(export_directory, record["project_id"])["directory"]
             snapshot.update(export_directory=destination, export_root=destination)
             # Freeze audio content and edit revision alongside the visual recipe.
             if audio := freeze_audio(self.store, record["project_id"], settings):
@@ -892,8 +935,9 @@ class Service(MotionOperations, MotionSamplingOperations, AudioOperations, Audio
     @operation(
         "Read native folder-selection capabilities and validate any writable export directory without writing."
     )
-    def get_delivery_export_options(self, export_directory: str | None = None) -> dict[str, Any]:
-        default = str(self.store.root / "exports")
+    def get_delivery_export_options(self, export_directory: str | None = None, project_id: str | None = None) -> dict[str, Any]:
+        # Explicit external destinations remain untouched; only the default follows the project.
+        default = str(self.store.project_directory(project_id) / "交付") if project_id and self.store.partitioned else str(self.store.root / "exports")
         directory = resolve_export_directory(
             default if export_directory is None else export_directory
         )
@@ -1040,6 +1084,11 @@ class Service(MotionOperations, MotionSamplingOperations, AudioOperations, Audio
         if job["status"] not in {"failed", "cancelled", "interrupted"}:
             raise ChromaError("job_state", "Job is not resumable")
         snapshot = self.store.get("snapshot", job_id)
+        if self.store.partitioned:
+            from .project_storage import delivery_root
+            relocated = delivery_root(self.store, job_id)
+            if relocated is not None and str(relocated) != job.get('export_path'):
+                raise ChromaError('project_moved', '项目已搬移，旧任务的目标路径已冻结；请新建交付任务。')
         if hashlib.sha256(canonical(snapshot).encode()).hexdigest() != job["snapshot_hash"]:
             raise ChromaError("snapshot_corrupt", "Frozen configuration checksum mismatch")
         # Both engines freeze their runtime and OCIO configuration before caching masters.

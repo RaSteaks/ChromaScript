@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -376,26 +377,23 @@ class MotionSamplingOperations:
             "sample_count": min(12, spec.frames), "request_key": idempotency_key,
             "request_hash": request_hash, "pid": process.pid, "process_started": process.create_time(),
         }
-        recover_samples(self.store)
-        # The lease is transactional across separate CLI/daemon service instances.
-        with _tasks_lock, self.store.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            previous = connection.execute(
-                "SELECT data FROM records WHERE kind='motion_estimate' AND json_extract(data,'$.request_key')=?",
-                (idempotency_key,),
-            ).fetchone()
-            if previous:
-                prior = json.loads(previous[0])
+        # One workspace lease spans discovery and publication across all project
+        # databases, including legacy global records. Keep the local task lock
+        # until its thread exists so recovery cannot interrupt a new reservation.
+        with _tasks_lock, (self.store.root / 'sampling.lock').open('a') as lease:
+            fcntl.flock(lease, fcntl.LOCK_EX)
+            recover_samples(self.store)
+            estimates = self.store.list('motion_estimate')
+            prior = next((r for r in estimates if r.get('request_key') == idempotency_key), None)
+            if prior:
                 if prior["request_hash"] != request_hash:
                     raise ChromaError("idempotency_conflict", "采样请求标识已用于不同内容。")
                 return {"estimate": self._sample_public(prior)}
-            active = connection.execute(
-                "SELECT id FROM records WHERE kind='motion_estimate' AND json_extract(data,'$.status')='running' LIMIT 1"
-            ).fetchone()
-            if active:
+            if any(r.get('status') == 'running' for r in estimates):
                 raise ChromaError("estimate_busy", "已有采样任务运行中，请等待或取消后重试。")
-            connection.execute("INSERT INTO records VALUES (?,?,?)", ("motion_estimate", estimate_id, canonical(record)))
-            connection.commit()
+            # Store routes the authoritative sampling record to its owning project;
+            # backup/restore and project busy checks now see the same reservation.
+            self.store.put('motion_estimate', estimate_id, record)
             task = SamplingTask()
             thread = threading.Thread(target=run_sample, args=(self.store, estimate_id, task), daemon=True)
             task.thread = thread

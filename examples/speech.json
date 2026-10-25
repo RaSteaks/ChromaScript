@@ -1,0 +1,10 @@
+{
+  "project_id": "REPLACE_WITH_PROJECT_ID",
+  "name": "旁白 intro v001",
+  "idempotency_key": "narration-intro-v001",
+  "request": {
+    "text": "城市渐渐安静下来，而我们的故事才刚刚开始。",
+    "instructions": "使用自然的普通话，温暖、克制的纪录片旁白，语速稍慢。",
+    "response_format": "pcm"
+  }
+}
