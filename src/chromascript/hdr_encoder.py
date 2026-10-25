@@ -29,9 +29,11 @@ class FragmentEncoder:
 
     def __init__(self, args: list[str], count: int, frame_bytes: int):
         self.count = count
-        # FFmpeg/VideoToolbox retains a bounded asynchronous pipeline. Twelve
-        # flush-only pictures cover the measured delay; none enter the preview.
-        self.flush_frames = 12
+        # Measured single-frame low-delay requests need two drain pictures.
+        # Playback batches still need twelve to empty the asynchronous pipeline;
+        # using the single-frame budget there causes a five-second fallback.
+        # Drain pictures never enter preview or its verified frame count.
+        self.flush_frames = 2 if count == 1 else 12
         self.frame_bytes = frame_bytes
         self.parts: queue.Queue[bytes | Exception] = queue.Queue(maxsize=4)
         self.initialization = b""
@@ -41,6 +43,8 @@ class FragmentEncoder:
         self.last_used = time.monotonic()
         self.stderr = tempfile.TemporaryFile()
         args = args.copy()
+        if count == 1:
+            args[-1:-1] = ["-flags", "+low_delay"]
         args[args.index("-g") + 1] = str(count + self.flush_frames)
         args[args.index("-movflags") + 1] = "+empty_moov+default_base_moof+frag_every_frame+write_colr"
         # Force an IDR at EVERY request boundary, even if the native encoder
@@ -143,7 +147,10 @@ class FragmentEncoder:
         self.closed.set()
         self.process.terminate()
         try:
-            self.process.wait(timeout=2)
+            # All requested fragments have already been returned, or this
+            # private transient stream has failed. A pipe-blocked FFmpeg must
+            # not add two seconds when switching between scrub/playback batches.
+            self.process.wait(timeout=.2)
         except subprocess.TimeoutExpired:
             self.process.kill()
             self.process.wait()

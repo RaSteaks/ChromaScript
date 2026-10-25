@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
 // Keep display-query fixtures independent of the host monitor while exercising
@@ -68,6 +68,55 @@ export default function createScene() {
     timeout: 20000,
   });
   return page.frameLocator("iframe[title='动画画面']");
+}
+
+// Delay delivery of a real native-fetch response, not the binary upload itself:
+// proxying a WebKit Blob request through route.fetch can alter its request body.
+async function holdHDRResponses(page: Page, fail = false) {
+  await page.evaluate((fail) => {
+    const original = window.fetch.bind(window);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const control = {
+      pending: false,
+      release,
+      restore: () => {
+        window.fetch = original;
+        release();
+      },
+    };
+    (window as any).__hdrResponseGate = control;
+    window.fetch = async (...args) => {
+      const response = await original(...args);
+      if (!String(args[0]).endsWith("/encode_motion_hdr_preview/binary"))
+        return response;
+      control.pending = true;
+      await gate;
+      return fail
+        ? new Response(
+            JSON.stringify({ error: { message: "测试定位编码失败" } }),
+            {
+              status: 503,
+              headers: { "Content-Type": "application/json" },
+            },
+          )
+        : response;
+    };
+  }, fail);
+  return {
+    wait: () =>
+      expect
+        .poll(() =>
+          page.evaluate(() => (window as any).__hdrResponseGate.pending),
+        )
+        .toBe(true),
+    release: () =>
+      page.evaluate(() => (window as any).__hdrResponseGate.release()),
+    restore: () =>
+      page.evaluate(() => (window as any).__hdrResponseGate.restore()),
+  };
 }
 
 test("GPU P010 preserves one ACES PQ transform, black alpha compositing and row order", async ({
@@ -228,6 +277,418 @@ test("HDR video uses native decoded segments, bounds buffers, seeks and pauses",
   await page.getByLabel("预览显示", { exact: true }).selectOption("srgb");
   await expect(page.getByText("ACES · sRGB", { exact: true })).toBeVisible();
   await expect(page.locator(".motion-preview-surface video")).toHaveCount(0);
+});
+
+test("uncached rapid seeks retain decoded HDR until the latest target is ready", async ({
+  page,
+}, info) => {
+  await hdrScreen(page, true);
+  await setup(page);
+  await expect(page.getByText("ACES · HDR PQ", { exact: true })).toBeVisible({
+    timeout: 30000,
+  });
+  const timeline = page.getByLabel("动画时间线", { exact: true });
+  const videos = page.locator(".motion-preview-surface video");
+  const retained = await videos.elementHandle();
+  const retainedSource = await retained!.evaluate(
+    (node: HTMLVideoElement) => node.src,
+  );
+  const gate = await holdHDRResponses(page);
+  // Sample every paint opportunity: no normal seek may expose the SDR canvas.
+  await page.evaluate(() => {
+    const evidence = {
+      samples: 0,
+      missingHDR: 0,
+      maxPlayers: 0,
+      running: true,
+    };
+    (window as any).__hdrHandoff = evidence;
+    const sample = () => {
+      if (!evidence.running) return;
+      const nodes = [
+        ...document.querySelectorAll<HTMLVideoElement>(
+          ".motion-preview-surface video",
+        ),
+      ];
+      evidence.samples++;
+      evidence.maxPlayers = Math.max(evidence.maxPlayers, nodes.length);
+      if (
+        !nodes.some(
+          (node) =>
+            getComputedStyle(node).visibility === "visible" &&
+            node.readyState >= 2,
+        )
+      )
+        evidence.missingHDR++;
+      requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
+  try {
+    await timeline.fill("30");
+    await gate.wait();
+    await timeline.fill("60");
+    await timeline.fill("90");
+    await expect(videos).toHaveCount(1);
+    await expect(page.getByText(/保留上一帧 HDR 画面/)).toBeVisible();
+    expect(
+      await retained!.evaluate((node: HTMLVideoElement) => ({
+        connected: node.isConnected,
+        source: node.src,
+        ready: node.readyState >= 2,
+        visible: getComputedStyle(node).visibility,
+        paused: node.paused,
+      })),
+    ).toEqual({
+      connected: true,
+      source: retainedSource,
+      ready: true,
+      visible: "visible",
+      paused: true,
+    });
+    await expect(timeline).toHaveValue("90");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page
+      .locator(".motion-preview-panel")
+      .screenshot({ path: "../reports/hdr-seek-retained.png" });
+    await gate.release();
+    await expect(timeline).toHaveValue("90", { timeout: 30000 });
+    await expect(
+      page.getByText("ACES · HDR PQ", { exact: true }),
+    ).toBeVisible();
+    await expect(videos).toHaveCount(1);
+    expect(await retained!.evaluate((node) => node.isConnected)).toBe(true);
+    const evidence = await page.evaluate(() => {
+      const result = (window as any).__hdrHandoff;
+      result.running = false;
+      return result;
+    });
+    expect(evidence.samples).toBeGreaterThan(0);
+    expect(evidence.missingHDR).toBe(0);
+    expect(evidence.maxPlayers).toBe(1);
+    await info.attach("HDR seek handoff", {
+      body: JSON.stringify({ ...evidence, displayQuerySimulated: true }),
+      contentType: "application/json",
+    });
+    await page
+      .locator(".motion-preview-panel")
+      .screenshot({ path: "../reports/hdr-seek-decoded.png" });
+    // Keyboard stepping uses the same native HDR handoff and decoded clock.
+    await page.getByRole("button", { name: "下一帧动画", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await expect(timeline).toHaveValue("91", { timeout: 30000 });
+    await expect(videos).toHaveCount(1);
+  } finally {
+    await gate.restore();
+  }
+});
+
+for (const scenario of [
+  { start: 0, target: 2, action: "下一帧动画", keyboard: false, fail: false },
+  { start: 90, target: 88, action: "上一帧动画", keyboard: true, fail: false },
+  { start: 0, target: 2, action: "下一帧动画", keyboard: false, fail: true },
+]) {
+  test(`pending HDR steps accumulate: ${scenario.action}, keyboard=${scenario.keyboard}, fallback=${scenario.fail}`, async ({
+    page,
+  }, info) => {
+    await hdrScreen(page, true);
+    await setup(page);
+    const ready = page.getByText("ACES · HDR PQ", { exact: true });
+    await expect(ready).toBeVisible({ timeout: 30000 });
+    const timeline = page.getByLabel("动画时间线", { exact: true });
+    if (scenario.start) {
+      await timeline.fill(String(scenario.start));
+      await expect(ready).toBeVisible({ timeout: 30000 });
+    }
+    const retained = await page
+      .locator(".motion-preview-surface video")
+      .elementHandle();
+    // Observe actual SDR renderer acknowledgements for failure recovery, without
+    // accepting the optimistic transport value itself as proof of rendering.
+    await page.evaluate(() => {
+      window.addEventListener("message", (event) => {
+        if (event.data?.type === "frame")
+          (window as any).__lastSDRFrame = event.data.value;
+      });
+    });
+    const gate = await holdHDRResponses(page, scenario.fail);
+    try {
+      const step = page.getByRole("button", {
+        name: scenario.action,
+        exact: true,
+      });
+      const advance = () =>
+        scenario.keyboard ? step.press("Enter") : step.click();
+      await advance();
+      await gate.wait();
+      await advance();
+      await expect(timeline).toHaveValue(String(scenario.target));
+      await expect(page.getByText(/保留上一帧 HDR 画面/)).toBeVisible();
+      expect(
+        await retained!.evaluate(
+          (node: HTMLVideoElement) =>
+            node.isConnected &&
+            node.readyState >= 2 &&
+            getComputedStyle(node).visibility === "visible",
+        ),
+      ).toBe(true);
+      await info.attach("pending-steps", {
+        body: JSON.stringify({
+          ...scenario,
+          requested: await timeline.inputValue(),
+        }),
+        contentType: "application/json",
+      });
+      await page.locator(".motion-preview-panel").screenshot({
+        path: `../reports/hdr-step-${scenario.target}-${scenario.fail}-pending.png`,
+      });
+      await gate.release();
+      if (scenario.fail) {
+        await expect(
+          page.getByText(/测试定位编码失败.*已回退 sRGB/),
+        ).toBeVisible();
+        await expect
+          .poll(() => page.evaluate(() => (window as any).__lastSDRFrame))
+          .toBe(scenario.target);
+      } else {
+        await expect(ready).toBeVisible({ timeout: 30000 });
+        await expect(page.locator(".motion-preview-surface video")).toHaveCount(
+          1,
+        );
+        expect(await retained!.evaluate((node) => node.isConnected)).toBe(true);
+      }
+      await expect(timeline).toHaveValue(String(scenario.target));
+      // Once decode/fallback settles, further steps still use the new position.
+      await advance();
+      const next =
+        scenario.target + (scenario.action === "下一帧动画" ? 1 : -1);
+      await expect(timeline).toHaveValue(String(next));
+      if (!scenario.fail) await expect(ready).toBeVisible({ timeout: 30000 });
+      else
+        await expect
+          .poll(() => page.evaluate(() => (window as any).__lastSDRFrame))
+          .toBe(next);
+    } finally {
+      await gate.restore();
+    }
+  });
+}
+
+test("continuous pointer scrubbing presents HDR before release and reuses cached native frames", async ({
+  page,
+}, info) => {
+  await hdrScreen(page, true);
+  await setup(page);
+  await expect(page.getByText("ACES · HDR PQ", { exact: true })).toBeVisible({
+    timeout: 30000,
+  });
+  const video = page.locator(".motion-preview-surface video");
+  const original = await video.elementHandle();
+  const source = await video.evaluate((node: HTMLVideoElement) => node.src);
+  await page.evaluate(() => {
+    const evidence = { frames: [] as any[], gaps: 0, running: true, inputs: 0 };
+    (window as any).__scrubEvidence = evidence;
+    document.addEventListener("hdr-preview-sample", (event) =>
+      evidence.frames.push((event as CustomEvent).detail),
+    );
+    document.addEventListener("input", (event) => {
+      if ((event.target as Element).matches('input[type="range"]'))
+        evidence.inputs++;
+    });
+    const sample = () => {
+      if (!evidence.running) return;
+      if (
+        ![
+          ...document.querySelectorAll<HTMLVideoElement>(
+            ".motion-preview-surface video",
+          ),
+        ].some(
+          (node) =>
+            node.readyState >= 2 &&
+            getComputedStyle(node).visibility === "visible",
+        )
+      )
+        evidence.gaps++;
+      requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
+  const timeline = page.getByLabel("动画时间线", { exact: true });
+  await timeline.scrollIntoViewIfNeeded();
+  const box = (await timeline.boundingBox())!;
+  await page.mouse.move(box.x + 5, box.y + box.height / 2);
+  await page.mouse.down();
+  for (let i = 1; i <= 40; i++) {
+    await page.mouse.move(
+      box.x + box.width * (0.15 + (0.65 * i) / 40),
+      box.y + box.height / 2,
+    );
+    await page.waitForTimeout(60);
+  }
+  const target = Number(await timeline.inputValue());
+  const shownDuringDrag = await page.evaluate(
+    () =>
+      (window as any).__scrubEvidence.frames.filter(
+        (frame: any) => frame.dragging,
+      ).length,
+  );
+  writeFileSync(
+    "../reports/hdr-scrub-in-progress.json",
+    JSON.stringify(
+      await page.evaluate(() => (window as any).__scrubEvidence),
+      null,
+      2,
+    ),
+  );
+  expect(shownDuringDrag).toBeGreaterThanOrEqual(3);
+  const released = Date.now();
+  await page.mouse.up();
+  await expect(video).toHaveAttribute("data-frame", String(target), {
+    timeout: 10000,
+  });
+  const settleMs = Date.now() - released;
+  await expect(page.getByText("ACES · HDR PQ", { exact: true })).toBeVisible();
+  const evidence = await page.evaluate(() => {
+    const value = (window as any).__scrubEvidence;
+    value.running = false;
+    return value;
+  });
+  expect(evidence.gaps).toBe(0);
+  expect(evidence.frames.length).toBeLessThan(evidence.inputs);
+  expect(await original!.evaluate((node) => node.isConnected)).toBe(true);
+  expect(await video.evaluate((node: HTMLVideoElement) => node.src)).toBe(
+    source,
+  );
+  const cached = evidence.frames.at(-3).frame;
+  await timeline.fill(String(cached));
+  await expect(video).toHaveAttribute("data-frame", String(cached));
+  const cacheEvidence = await page
+    .locator(".motion-hdr-video")
+    .evaluate((node) =>
+      JSON.parse((node as HTMLElement).dataset.hdrMetrics!).at(-1),
+    );
+  expect(cacheEvidence.cache).toBe("native");
+  expect(cacheEvidence.capture).toBe(0);
+  expect(cacheEvidence.encode).toBe(0);
+  const report = {
+    ...evidence,
+    settleMs,
+    cacheEvidence,
+    displayQuerySimulated: true,
+  };
+  writeFileSync(
+    "../reports/hdr-scrub-performance.json",
+    JSON.stringify(report, null, 2),
+  );
+  await info.attach("HDR scrub performance", {
+    body: JSON.stringify(report),
+    contentType: "application/json",
+  });
+  await page
+    .locator(".motion-preview-panel")
+    .screenshot({ path: "../reports/hdr-scrub-performance.png" });
+});
+
+test("hidden previews suspend queued HDR work and resume at the latest target", async ({
+  page,
+}) => {
+  await hdrScreen(page, true);
+  await setup(page);
+  await expect(page.getByText("ACES · HDR PQ", { exact: true })).toBeVisible({
+    timeout: 30000,
+  });
+  const gate = await holdHDRResponses(page);
+  const timeline = page.getByLabel("动画时间线", { exact: true });
+  let uploads = 0;
+  page.on("request", (request) => {
+    if (request.url().endsWith("/encode_motion_hdr_preview/binary")) uploads++;
+  });
+  try {
+    await timeline.fill("60");
+    await gate.wait();
+    await timeline.fill("90");
+    // Exercise the visibility contract without modifying the renderer/decoder.
+    await page.evaluate(() => {
+      Object.defineProperty(document, "hidden", {
+        configurable: true,
+        value: true,
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    const before = uploads;
+    await gate.release();
+    await page.waitForTimeout(250);
+    expect(uploads).toBe(before);
+    await expect(page.locator(".motion-preview-surface video")).toHaveAttribute(
+      "data-frame",
+      "0",
+    );
+    await page.evaluate(() => {
+      delete (document as any).hidden;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await expect(page.locator(".motion-preview-surface video")).toHaveAttribute(
+      "data-frame",
+      "90",
+      { timeout: 10000 },
+    );
+    await expect(timeline).toHaveValue("90");
+  } finally {
+    await gate.restore();
+  }
+});
+
+test("a native seek finishing while hidden restores its frame before playback", async ({
+  page,
+}, info) => {
+  await hdrScreen(page, true);
+  await setup(page);
+  await expect(page.getByText("ACES · HDR PQ", { exact: true })).toBeVisible({
+    timeout: 30000,
+  });
+  const video = page.locator(".motion-preview-surface video");
+  const timeline = page.getByLabel("动画时间线", { exact: true });
+  await video.evaluate((node: HTMLVideoElement) => {
+    // Hide during the actual decoder seek, rather than during HTTP encoding.
+    node.addEventListener(
+      "seeking",
+      () => {
+        Object.defineProperty(document, "hidden", {
+          configurable: true,
+          value: true,
+        });
+        document.dispatchEvent(new Event("visibilitychange"));
+      },
+      { once: true },
+    );
+  });
+  await timeline.fill("120");
+  try {
+    await expect.poll(() => page.evaluate(() => document.hidden)).toBe(true);
+    await expect
+      .poll(() =>
+        video.evaluate(
+          (node: HTMLVideoElement) => !node.seeking && node.readyState >= 2,
+        ),
+      )
+      .toBe(true);
+    await expect(video).toHaveAttribute("data-frame", "0");
+  } finally {
+    await page.evaluate(() => {
+      delete (document as any).hidden;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+  }
+  await expect(video).toHaveAttribute("data-frame", "120");
+  await expect(timeline).toHaveValue("120");
+  await page.getByRole("button", { name: "播放动画", exact: true }).click();
+  await expect
+    .poll(async () => Number(await video.getAttribute("data-frame")))
+    .toBeGreaterThan(120);
+  await page.getByRole("button", { name: "暂停动画", exact: true }).click();
+  await page.locator(".motion-preview-panel").screenshot({
+    path: info.outputPath("hidden-seek-resumed.png"),
+  });
 });
 
 test("automatic SDR fallback remains accessible on a non-HDR display", async ({

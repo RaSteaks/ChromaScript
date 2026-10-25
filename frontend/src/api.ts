@@ -9,8 +9,11 @@ export class ApiError extends Error {
     super(message);
   }
 }
-export async function connect(): Promise<{ workspace: string }> {
-  const response = await fetch("/api/session");
+export async function connect(
+  signal?: AbortSignal,
+): Promise<{ workspace: string }> {
+  // Reconnecting notification streams bound session discovery as well as data reads.
+  const response = await fetch("/api/session", { signal });
   if (!response.ok) throw new Error("本地服务未连接，请启动服务后重试。");
   const session = await response.json();
   token = session.token;

@@ -23,6 +23,7 @@ import {
   Settings2,
 } from "lucide-react";
 import { artifactUrl, call, connect } from "./api";
+import { observeJobs } from "./jobEvents";
 import { loadProjects } from "./projects";
 import {
   WorkspaceLibrary,
@@ -196,6 +197,7 @@ export default function App() {
     [samples, setSamples] = useState("4"),
     [frame, setFrame] = useState("0");
   const [timecode, setTimecode] = useState("00:00:00:00");
+  const [jobSyncError, setJobSyncError] = useState("");
   const [error, setError] = useState(""),
     [status, setStatus] = useState(""),
     [offline, setOffline] = useState(false);
@@ -473,47 +475,34 @@ export default function App() {
 
   useEffect(() => {
     if (!projectId) return;
-    const controller = new AbortController();
-    let reading = false;
-    const poll = async () => {
-      if (reading) return;
-      reading = true;
-      try {
+    setJobSyncError("");
+    // The shared navigation count and native queue consume the same commit
+    // signals as animation results; neither polls an unchanged job list.
+    return observeJobs(
+      { projectId },
+      async (signal) => {
         const value = await call<{ items: Job[]; total: number }>(
           "list_jobs",
           { project_id: projectId, limit: 8, offset: jobPage * 8 },
-          controller.signal,
+          signal,
         );
-        // An off-page selection still needs progress updates and scene ownership.
         const details =
           activeJobId && !value.items.some((j) => j.id === activeJobId)
             ? await call<{ job: Job }>(
                 "get_job",
                 { job_id: activeJobId },
-                controller.signal,
+                signal,
               )
             : null;
-        if (!controller.signal.aborted) {
-          setJobs(value.items);
-          if (details) setSelectedJob(details.job);
-          setJobTotal(value.total);
-          setOffline(false);
-        }
-      } catch (e) {
-        if (!controller.signal.aborted) {
-          setOffline(true);
-          setError(errorText(e));
-        }
-      } finally {
-        reading = false;
-      }
-    };
-    void poll();
-    const interval = window.setInterval(() => void poll(), 1500);
-    return () => {
-      controller.abort();
-      window.clearInterval(interval);
-    };
+        if (signal.aborted) return;
+        setJobs(value.items);
+        if (details) setSelectedJob(details.job);
+        setJobTotal(value.total);
+        setJobSyncError("");
+        setOffline(false);
+      },
+      (cause) => setJobSyncError(errorText(cause)),
+    );
   }, [projectId, jobPage, activeJobId]);
 
   useEffect(() => {
@@ -1038,6 +1027,7 @@ export default function App() {
         </div>
       </header>
       <Notice text={error} error onClose={() => setError("")} />
+      <Notice text={jobSyncError} error />
       {/* A failed open/create must remain visible even while its adapter is hidden. */}
       <Notice text={family === "wgsl" ? motionSession.error : ""} error />
       <div className="status-line" aria-live="polite">

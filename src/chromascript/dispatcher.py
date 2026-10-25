@@ -41,6 +41,9 @@ class Dispatcher:
                 print(f"Dispatcher: {exc}", file=sys.stderr, flush=True)
 
     def tick(self) -> None:
+        # Recover committed worker signals even when the final HTTP notification
+        # failed and the browser's SSE connection is still healthy.
+        self.store.flush_job_notifications()
         for id, child in list(self.children.items()):
             if child.poll() is not None:
                 del self.children[id]

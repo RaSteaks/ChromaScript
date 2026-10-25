@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from fractions import Fraction
 from functools import lru_cache
 from pathlib import Path
@@ -126,10 +127,15 @@ def encode_hdr_preview_binary(request: HDRPreviewHeader, payload: bytes | bytear
     """The HTTP adapter cannot bypass the same precision, dimensions or byte limits."""
     if len(payload) != request.frame_bytes * request.frame_count:
         raise ChromaError("hdr_preview_frame", "HDR 预览二进制长度与帧数不符。")
+    queued = time.perf_counter()
     if not _encoder.acquire(timeout=2):
         raise ChromaError("hdr_preview_busy", "HDR 预览编码器正在使用中，请稍后重试预览。")
+    acquired = time.perf_counter()
     try:
-        return _encode(request, payload)
+        result = _encode(request, payload)
+        result["timings_ms"]["queue"] = (acquired - queued) * 1000
+        result["timings_ms"]["total"] = (time.perf_counter() - queued) * 1000
+        return result
     finally:
         _encoder.release()
 
@@ -186,12 +192,16 @@ def _encode(request: HDRPreviewHeader, payload: bytes | bytearray) -> dict[str, 
             args[args.index("-vf") + 1] = "format=yuv420p10le" + color_fields
             args[-1:-1] = [
                 "-enc_time_base", f"{request.fps.denominator}:{request.fps.numerator}",
-                # VT's isolated first packet can lack duration. Freeze a one-frame
-                # duration in the exact project timebase, including fractional fps.
+                # VT's isolated first packet can lack duration. Express seconds
+                # in the filter's actual TB, without changing that timebase:
+                # setts output-timebase rescaling differs across FFmpeg versions.
+                # Multiplying by the rational denominator twice stretches 59.94
+                # fps frames by 1001 and makes MSE report nonexistent coverage.
                 "-bsf:v", "hevc_metadata=colour_primaries=9:transfer_characteristics=16:matrix_coefficients=9:video_full_range_flag=0:chroma_sample_loc_type=2:"
                 f"tick_rate={request.fps.ffmpeg}:num_ticks_poc_diff_one=1,"
-                f"setts=pts=N*{request.fps.denominator}:dts=N*{request.fps.denominator}:"
-                f"duration={request.fps.denominator}:time_base=1/{request.fps.numerator}",
+                f"setts=pts=N*{request.fps.denominator}/{request.fps.numerator}/TB:"
+                f"dts=N*{request.fps.denominator}/{request.fps.numerator}/TB:"
+                f"duration={request.fps.denominator}/{request.fps.numerator}/TB",
             ]
             software_args = args.copy()
             if hardware_key not in _hardware_failed and _hardware_available():
@@ -206,9 +216,12 @@ def _encode(request: HDRPreviewHeader, payload: bytes | bytearray) -> dict[str, 
                 args[-1:-1] = ["-profile:v", "main10", "-b:v", "16000k", "-allow_sw", "0",
                                 "-realtime", "1", "-prio_speed", "1", "-bf", "0"]
         persistent = False
+        encode_began = time.perf_counter()
         try:
+            # Single-frame seeks reuse the measured low-delay native stream too;
+            # each independent fragment still receives full decode verification.
             stream_key = (*hardware_key, request.frame_count)
-            if encoder == "hevc_videotoolbox" and request.frame_count >= 8 and stream_key not in _stream_failed:
+            if encoder == "hevc_videotoolbox" and stream_key not in _stream_failed:
                 from .hdr_encoder import encode_fragment
 
                 try:
@@ -244,28 +257,37 @@ def _encode(request: HDRPreviewHeader, payload: bytes | bytearray) -> dict[str, 
                 if remux.returncode:
                     raise ChromaError("hdr_preview_encode", "HDR 预览容器写入失败")
                 path = remuxed
+            verify_began = time.perf_counter()
+            # count_frames performs a full decode in this same probe process.
+            # Explode-on-error, stderr, actual frame count, packet timing and
+            # pixel/tag checks retain strict verification without a second decode.
             decoded = subprocess.run(
-                [probe_executable, "-v", "error", "-show_streams",
+                [probe_executable, "-v", "error", "-err_detect", "explode",
+                 "-threads", "4", "-count_frames", "-show_streams", "-show_packets",
+                 "-show_entries", "stream:packet=pts,dts,duration",
                  "-of", "json", str(path)], capture_output=True, text=True, timeout=10,
             )
             if decoded.returncode or decoded.stderr:
                 raise ChromaError("hdr_preview_decode", decoded.stderr[-2000:])
-            streams = json.loads(decoded.stdout)["streams"]
+            probed = json.loads(decoded.stdout)
+            streams = probed["streams"]
             video: dict[str, Any] = next((item for item in streams if item.get("codec_type") == "video"), {})
-            strict = subprocess.run(
-                [args[0], "-v", "error", "-xerror", "-err_detect", "explode", "-i", str(path),
-                 "-map", "0:v:0", "-fps_mode", "passthrough", "-nostats", "-progress", "pipe:1", "-f", "null", "-"],
-                capture_output=True, timeout=10,
-            )
-            if strict.returncode or strict.stderr:
-                raise ChromaError("hdr_preview_decode", "HDR 预览未通过完整严格解码。")
-            # Count actual frames in that ONE strict decode instead of decoding
-            # every 720p segment once in ffprobe and a second time in FFmpeg.
-            progress = strict.stdout.decode().splitlines()
-            counts = [int(line.split("=", 1)[1]) for line in progress if line.startswith("frame=")]
-            if not counts or "progress=end" not in progress:
-                raise ChromaError("hdr_preview_decode", "HDR 预览严格解码未完成")
-            video["nb_read_frames"] = str(counts[-1])
+            # A codec's nominal r_frame_rate is not proof of presentation time.
+            # Check every bounded packet on the actual MP4 clock, including a
+            # one-frame poster and the nonzero origin of a reused encoder.
+            packets = probed.get("packets", [])
+            step = Fraction(request.fps.denominator, request.fps.numerator)
+            time_base = Fraction(video.get("time_base", "1/1"))
+            first_pts = packets[0].get("pts") if packets else None
+            if len(packets) != request.frame_count or first_pts is None or any(
+                packet.get("pts") is None or packet.get("dts") != packet.get("pts")
+                or (packet["pts"] - first_pts) * time_base != index * step
+                or packet.get("duration", 0) * time_base != step
+                for index, packet in enumerate(packets)
+            ):
+                raise ChromaError("hdr_preview_verification", "HDR 预览实际帧时间戳或时长不符。")
+            if video.get("nb_read_frames") != str(request.frame_count):
+                raise ChromaError("hdr_preview_decode", "HDR 预览严格解码帧数不符。")
             expected = {
                 "codec_name": "hevc", "codec_tag_string": "hvc1", "pix_fmt": "yuv420p10le",
                 "color_primaries": "bt2020", "color_transfer": "smpte2084",
@@ -294,5 +316,8 @@ def _encode(request: HDRPreviewHeader, payload: bytes | bytearray) -> dict[str, 
             # each independently decoded chunk using its actual first timestamp.
             "timestamp_base": float(int(video.get("start_pts", 0)) * Fraction(video["time_base"])),
             "persistent_encoder": persistent,
-            "verification": {"decoded": expected, "container_color": native, "strict_decode": True},
+            "timings_ms": {"encode_mux": (verify_began - encode_began) * 1000,
+                           "verify": (time.perf_counter() - verify_began) * 1000},
+            "verification": {"decoded": expected, "container_color": native, "strict_decode": True,
+                             "packet_timing": True},
         }

@@ -15,6 +15,7 @@ import {
 } from "react";
 import { Copy, Download, Film, Square } from "lucide-react";
 import { ApiError, artifactUrl, call, connect } from "./api";
+import { observeJobs } from "./jobEvents";
 import { Button, Field, Modal, Notice, Textarea } from "./components";
 import { MotionSourceEditor, sourceFilesError } from "./MotionSourceEditor";
 import { DeliveryDestination } from "./DeliveryDestination";
@@ -246,6 +247,8 @@ export const MotionWorkbench = memo(function MotionWorkbench({
   const [jobId, setJobId] = useState("");
   const [job, setJob] = useState<Job | null>(null);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [jobListError, setJobListError] = useState("");
+  const [jobDetailError, setJobDetailError] = useState("");
   const [refresh, setRefresh] = useState(0);
   const [reviewTarget, setReviewTarget] = useState<MotionReply | null>(null);
   const [reviewer, setReviewer] = useState("");
@@ -537,56 +540,56 @@ export const MotionWorkbench = memo(function MotionWorkbench({
   }, [engine, refresh]);
 
   useEffect(() => {
-    if (!active || !projectId || !caps) return;
-    let stopped = false;
-    void call<Page<Job>>("list_jobs", {
-      project_id: projectId,
-      kind: "motion",
-      limit: pageSize,
-      offset: jobPage * pageSize,
-    })
-      .then((reply) => {
-        if (!stopped) {
-          setHistory(reply.items);
-          setJobTotal(reply.total);
-        }
-      })
-      .catch((cause) => {
-        if (!stopped) setError(text(cause));
-      });
-    return () => {
-      stopped = true;
-    };
-  }, [active, projectId, jobPage, refresh, caps]);
+    setJobListError("");
+    if (!active || !projectId) return;
+    // Shared commit signals include MCP/CLI submissions. Read only this page;
+    // external changes never replace the user's selected job or source draft.
+    return observeJobs(
+      { projectId, kind: "motion" },
+      async (signal) => {
+        const reply = await call<Page<Job>>(
+          "list_jobs",
+          {
+            project_id: projectId,
+            kind: "motion",
+            limit: pageSize,
+            offset: jobPage * pageSize,
+          },
+          signal,
+        );
+        if (signal.aborted) return;
+        setHistory(reply.items);
+        setJobTotal(reply.total);
+        setJobListError("");
+      },
+      (cause) => setJobListError(text(cause)),
+    );
+  }, [active, projectId, jobPage, refresh]);
 
   useEffect(() => {
-    if (!active || !jobId) return;
-    let stopped = false;
-    let timer: number | undefined;
-    const poll = async () => {
-      try {
+    setJobDetailError("");
+    if (!active || !projectId || !jobId) return;
+    // Watch the selected ID even off-page or terminal: external retries and
+    // newly published artifacts still trigger a read without idle polling.
+    return observeJobs(
+      { projectId, jobId },
+      async (signal) => {
         const reply = await call<{ job: Job; artifacts: Artifact[] }>(
           "get_job",
           { job_id: jobId },
+          signal,
         );
-        if (stopped) return;
+        if (signal.aborted) return;
         setJob(reply.job);
         setArtifacts(reply.artifacts);
+        setJobDetailError("");
         setHistory((old) =>
           old.map((item) => (item.id === jobId ? reply.job : item)),
         );
-        if (["queued", "running"].includes(reply.job.status))
-          timer = window.setTimeout(() => void poll(), 1000);
-      } catch (cause) {
-        if (!stopped) setError(text(cause));
-      }
-    };
-    void poll();
-    return () => {
-      stopped = true;
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [active, jobId, refresh]);
+      },
+      (cause) => setJobDetailError(text(cause)),
+    );
+  }, [active, projectId, jobId, refresh]);
 
   useEffect(() => {
     if (!dirty) return;
@@ -1389,6 +1392,14 @@ export const MotionWorkbench = memo(function MotionWorkbench({
             <h2>渲染任务与成果</h2>
             <small>{jobTotal} 个任务</small>
           </div>
+          <Notice
+            text={
+              jobListError || jobDetailError
+                ? `任务同步暂时失败，正在重试：${jobListError || jobDetailError}`
+                : ""
+            }
+            error
+          />
           {history.length > 0 && (
             <Field label="动画渲染任务" id="motion-job">
               <select

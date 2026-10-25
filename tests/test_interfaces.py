@@ -1,6 +1,7 @@
 """Schema parity and public HTTP behavior are tested without a specific model vendor."""
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -209,3 +210,93 @@ def test_media_cookies_do_not_collide_between_local_ports(tmp_path):
             b.cookies.update(a.cookies)
             assert a.get("/api/artifacts/sample").text == "first"
             assert b.get("/api/artifacts/sample").text == "second"
+
+
+def test_mcp_animation_submission_is_visible_in_http_queue(tmp_path, monkeypatch):
+    import httpx
+
+    from chromascript.dispatcher import Dispatcher
+
+    # Verify the real MCP adapter and shared durable records without launching
+    # the production Chrome renderer; worker execution is outside this regression.
+    monkeypatch.setattr(Dispatcher, "start", lambda self: None)
+    monkeypatch.setattr(Dispatcher, "close", lambda self: None)
+    monkeypatch.setattr("chromascript.motion.motion_environment", lambda: {"render_available": True})
+    monkeypatch.setattr("chromascript.motion.motion_identity", lambda: {"test_runtime": 1})
+    root = tmp_path / "workspace"
+    app = create_app(root)
+    async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        "chromascript.mcp_server.httpx.AsyncClient",
+        lambda **kwargs: async_client(transport=httpx.ASGITransport(app=app), **kwargs),
+    )
+    with TestClient(app) as web:
+        token = web.get("/api/session").json()["token"]
+        headers = {"Authorization": "Bearer " + token}
+        service = app.state.service
+        project = service.create_project("MCP queue")["project"]["id"]
+        scene = service.create_motion_scene(project)
+        # Subscribe on the daemon loop before submission, as an SSE browser does.
+        stream = app.state.job_events.stream()
+        assert web.portal.call(anext, stream) == "data: null\n\n"
+
+        async def submit():
+            async with Client(create_mcp(root)) as client:
+                reply = await client.call_tool("chromascript.submit_motion_render", {
+                    "request": {
+                        "scene_id": scene["record"]["id"],
+                        "expected_revision_id": scene["revision_id"],
+                        "idempotency_key": "mcp-queue",
+                        "output": {"video": "none"},
+                    },
+                })
+                assert not reply.is_error
+                return reply.structured_content["job"]
+
+        job = asyncio.run(submit())
+        event = web.portal.call(anext, stream)
+        assert json.loads(event.removeprefix("data: ")) == {
+            "project_id": project, "job_id": job["id"], "kind": "motion",
+        }
+        response = web.post("/api/operations/list_jobs", headers=headers, json={
+            "project_id": project, "kind": "motion", "limit": 20, "offset": 0,
+        })
+        assert response.status_code == 200
+        assert response.json()["items"] == [job]
+        assert response.json()["total"] == 1
+        assert job["status"] == "queued"
+        assert web.post("/api/operations/get_job", headers=headers, json={
+            "job_id": job["id"],
+        }).json() == {"job": job, "artifacts": []}
+        # Repeating an idempotent MCP request creates neither a job nor a signal.
+        assert asyncio.run(submit())["id"] == job["id"]
+        assert all(queue.empty() for queue in app.state.job_events.listeners)
+
+        from chromascript.store import Store
+
+        def worker_post(url, *, json, headers, **kwargs):
+            return web.post("/api/job-events", json=json, headers=headers)
+
+        monkeypatch.setattr("chromascript.store.httpx.post", worker_post)
+        worker = Store(root)
+        worker.update("job", job["id"], lambda current: {
+            **current, "status": "completed", "progress": 1,
+        })
+        event = web.portal.call(anext, stream)
+        assert json.loads(event.removeprefix("data: "))["job_id"] == job["id"]
+        assert service.get_job(job["id"])["job"]["status"] == "completed"
+        web.portal.call(stream.aclose)
+        assert not app.state.job_events.listeners
+
+
+def test_job_notification_transport_requires_authentication(tmp_path):
+    with TestClient(create_app(tmp_path)) as client:
+        assert client.get("/api/job-events").status_code == 401
+        assert client.post("/api/job-events", json={"job_id": "absent"}).status_code == 401
+        token = client.get("/api/session").json()["token"]
+        # The SSE cookie permits reads, never worker notification writes.
+        assert client.post("/api/job-events", json={"job_id": "absent"}).status_code == 401
+        headers = {"Authorization": "Bearer " + token}
+        assert client.post("/api/job-events", headers=headers, json={"job_id": "absent"}).status_code == 400
+        assert client.post("/api/job-events", headers=headers, json={"job_id": "absent", "extra": True}).status_code == 400
+        assert client.get("/api/job-events", headers={**headers, "Origin": "https://example.invalid"}).status_code == 403

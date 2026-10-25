@@ -1,4 +1,4 @@
-import { useId, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 import { Pause, Play, SkipBack, StepBack, StepForward } from "lucide-react";
 import { Button } from "./components";
 
@@ -10,6 +10,7 @@ export function PreviewTimeline({
   disabled,
   onPlay,
   onSeek,
+  onScrubbingChange,
   animation = false,
   tools,
 }: {
@@ -19,10 +20,13 @@ export function PreviewTimeline({
   disabled: boolean;
   onPlay: () => void;
   onSeek: (frame: number) => void;
+  onScrubbingChange?: (scrubbing: boolean) => void;
   animation?: boolean;
   tools?: ReactNode;
 }) {
   const id = useId();
+  const finishDrag = useRef<(() => void) | null>(null);
+  useEffect(() => () => finishDrag.current?.(), []);
   const last = Number.isFinite(maxFrame) ? Math.max(0, maxFrame) : 0;
   const current = Number.isFinite(frame)
     ? Math.max(0, Math.min(frame, last))
@@ -83,6 +87,24 @@ export function PreviewTimeline({
         step={1}
         value={current}
         disabled={disabled}
+        // Leave native thumb tracking to the browser. Explicit pointer capture
+        // steals WebKit's internal thumb drag; window listeners still catch
+        // release outside the control and clean up on cancellation/unmount.
+        onPointerDown={() => {
+          finishDrag.current?.();
+          const finish = () => {
+            window.removeEventListener("pointerup", finish);
+            window.removeEventListener("pointercancel", finish);
+            finishDrag.current = null;
+            onScrubbingChange?.(false);
+          };
+          finishDrag.current = finish;
+          window.addEventListener("pointerup", finish, { once: true });
+          window.addEventListener("pointercancel", finish, { once: true });
+          onScrubbingChange?.(true);
+        }}
+        onBlur={() => finishDrag.current?.()}
+        onKeyDown={() => finishDrag.current?.()}
         onChange={(e) => onSeek(Number(e.target.value))}
       />
       {/* Display/recompile tools share the transport, without moving the media DOM. */}

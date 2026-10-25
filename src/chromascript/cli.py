@@ -39,9 +39,18 @@ def serve(
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
-    uvicorn.run(
-        create_app(workspace, port, export_root), host="127.0.0.1", port=port, log_level="info"
-    )
+    application = create_app(workspace, port, export_root)
+
+    class LocalServer(uvicorn.Server):
+        async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
+            # Close notification streams before Uvicorn waits for HTTP requests;
+            # an open browser must not prevent Ctrl+C/restarting the daemon.
+            application.state.job_events.close()
+            await super().shutdown(sockets)
+
+    LocalServer(uvicorn.Config(
+        application, host="127.0.0.1", port=port, log_level="info"
+    )).run()
 
 
 @app.command()

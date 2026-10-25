@@ -45,6 +45,8 @@ export const MotionPreview = memo(function MotionPreview({
   composing: boolean;
 }) {
   const audio = useRef<PreviewAudioHandle>(null);
+  const activeView = useRef(active);
+  activeView.current = active;
   const [pictures, setPictures] = useState<Picture[]>([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<{
@@ -53,6 +55,21 @@ export const MotionPreview = memo(function MotionPreview({
   } | null>(null);
   const [retry, setRetry] = useState(0);
   const [frame, setFrame] = useState(0);
+  const [requestedFrame, setRequestedFrame] = useState<number | null>(null);
+  const requested = useRef<number | null>(null);
+  const requestFrame = useCallback((value: number | null) => {
+    requested.current = value;
+    setRequestedFrame(value);
+  }, []);
+  const acknowledgeFrame = useCallback(
+    (value: number) => {
+      // Keep the decoded/audio clock separate from transport intent. A late frame
+      // must not undo queued steps or move the thumb away from the newest target.
+      setFrame(value);
+      if (requested.current === value) requestFrame(null);
+    },
+    [requestFrame],
+  );
   const [playing, setPlaying] = useState(false);
   const [hdrPreview, setHdrPreview] = useState(true);
   const windows = useRef(new Map<string, HTMLIFrameElement>());
@@ -68,36 +85,48 @@ export const MotionPreview = memo(function MotionPreview({
   // A frame acknowledgement must not serialize up to 2 MB of unchanged source.
   const recipe = useMemo(() => (spec ? JSON.stringify(spec) : ""), [spec]);
   const accepted = pictures.find((picture) => picture.ready);
-  const command = useCallback((type: string, value?: number) => {
-    const picture = current.current.find((item) => item.ready);
-    if (picture && type === "seek" && value !== undefined) {
-      const spec: MotionSpec = JSON.parse(picture.recipe);
-      audio.current?.seek((value * spec.fps.denominator) / spec.fps.numerator);
-    }
-    if (hdr.current?.enabled) {
-      if (type === "play") {
-        hdr.current.play();
-        return;
-      }
-      if (type === "pause") hdr.current.pause();
-      if (type === "seek" && value !== undefined) hdr.current.seek(value);
-    }
-    if (picture)
-      windows.current
-        .get(picture.channel)
-        ?.contentWindow?.postMessage(
-          { channel: picture.channel, type, value },
-          "*",
+  const command = useCallback(
+    (type: string, value?: number) => {
+      const picture = current.current.find((item) => item.ready);
+      if (picture && type === "seek" && value !== undefined) {
+        requestFrame(value);
+        const spec: MotionSpec = JSON.parse(picture.recipe);
+        audio.current?.seek(
+          (value * spec.fps.denominator) / spec.fps.numerator,
         );
-  }, []);
+      }
+      if (hdr.current?.enabled) {
+        if (type === "play") {
+          hdr.current.play();
+          return;
+        }
+        if (type === "pause") hdr.current.pause();
+        if (type === "seek" && value !== undefined) {
+          // Native HDR owns the decoded clock; the requested transport position
+          // advances immediately so consecutive steps accumulate during encoding.
+          hdr.current.seek(value);
+          return;
+        }
+      }
+      if (picture)
+        windows.current
+          .get(picture.channel)
+          ?.contentWindow?.postMessage(
+            { channel: picture.channel, type, value },
+            "*",
+          );
+    },
+    [requestFrame],
+  );
 
   useEffect(() => {
     setPictures([]);
     setFrame(0);
+    requestFrame(null);
     setPlaying(false);
     setError(null);
     failed.current.clear();
-  }, [sceneId]);
+  }, [sceneId, requestFrame]);
 
   const acceptedChannel = accepted?.channel;
   const acceptedRecipe = accepted?.recipe;
@@ -248,21 +277,27 @@ export const MotionPreview = memo(function MotionPreview({
           AbortSignal.any([abort.signal, AbortSignal.timeout(45000)]),
         ),
       onStatus: status,
-      onFrame: setFrame,
+      onFrame: acknowledgeFrame,
       onPlaying: setPlaying,
       onFallback() {
         target.postMessage(
           {
             channel: acceptedChannel,
             type: "seek",
-            value: latestFrame.current,
+            value: requested.current ?? latestFrame.current,
           },
           "*",
         );
       },
     });
     hdr.current = controller;
-    controller.seek(Math.min(latestFrame.current, source.frames - 1));
+    controller.setActive(activeView.current && !document.hidden);
+    const targetFrame = Math.min(
+      requested.current ?? latestFrame.current,
+      source.frames - 1,
+    );
+    if (requested.current !== null) requestFrame(targetFrame);
+    controller.seek(targetFrame);
     return () => {
       abort.abort();
       controller.dispose();
@@ -274,7 +309,13 @@ export const MotionPreview = memo(function MotionPreview({
       }
       captures.clear();
     };
-  }, [acceptedChannel, acceptedRecipe, acceptedHDR]);
+  }, [
+    acceptedChannel,
+    acceptedRecipe,
+    acceptedHDR,
+    acknowledgeFrame,
+    requestFrame,
+  ]);
 
   useEffect(() => {
     // A replaced candidate must not let its old readiness timeout overwrite a
@@ -424,11 +465,18 @@ export const MotionPreview = memo(function MotionPreview({
         setPending(false);
         setError(null);
         setPlaying(false);
+        // Replacement drafts may shorten the timeline while a seek is pending.
+        // Clamp the intent too, so an unreachable target cannot remain selected.
+        const targetFrame = Math.min(
+          requested.current ?? latestFrame.current,
+          picture.frames - 1,
+        );
+        if (requested.current !== null) requestFrame(targetFrame);
         windows.current.get(data.channel)?.contentWindow?.postMessage(
           {
             channel: data.channel,
             type: "seek",
-            value: Math.min(latestFrame.current, picture.frames - 1),
+            value: targetFrame,
           },
           "*",
         );
@@ -436,11 +484,12 @@ export const MotionPreview = memo(function MotionPreview({
       if (
         picture.ready &&
         data.type === "frame" &&
+        !hdr.current?.enabled &&
         Number.isInteger(data.value) &&
         data.value >= 0 &&
         data.value < picture.frames
       ) {
-        setFrame(data.value);
+        acknowledgeFrame(data.value);
         // Only an acknowledged rendered frame clears this picture's error;
         // playback of a retained picture must not hide a new draft's failure.
         setError((old) => (old?.channel === data.channel ? null : old));
@@ -454,10 +503,11 @@ export const MotionPreview = memo(function MotionPreview({
     };
     window.addEventListener("message", message);
     return () => window.removeEventListener("message", message);
-  }, [recipe, hdrPreview]);
+  }, [recipe, hdrPreview, acknowledgeFrame, requestFrame]);
 
   useEffect(() => {
     const pauseHidden = () => {
+      hdr.current?.setActive(active && !document.hidden);
       if (!active || document.hidden) command("pause");
     };
     pauseHidden();
@@ -543,7 +593,7 @@ export const MotionPreview = memo(function MotionPreview({
       </div>
       <PreviewTimeline
         animation
-        frame={frame}
+        frame={requestedFrame ?? frame}
         maxFrame={maxFrame}
         playing={playing}
         disabled={!accepted}
@@ -551,6 +601,7 @@ export const MotionPreview = memo(function MotionPreview({
           if (!playing) audio.current?.unlock();
           command(playing ? "pause" : "play");
         }}
+        onScrubbingChange={(value) => hdr.current?.setScrubbing(value)}
         onSeek={(value) => {
           command("pause");
           command("seek", value);

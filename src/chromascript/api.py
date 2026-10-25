@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import secrets
@@ -22,6 +23,7 @@ from starlette.types import Receive, Scope, Send
 from .artifacts import archive_members, artifact_path, stream_zip
 from .dispatcher import Dispatcher
 from .errors import ChromaError
+from .job_events import JobEvents
 from .mcp_server import create_mcp
 from .operations import REGISTRY, catalogue, execute
 from .service import Service
@@ -52,6 +54,7 @@ class ArchiveResponse(StreamingResponse):
 def create_app(root: Path, port: int = 8765, export_roots: list[Path] | None = None) -> FastAPI:
     root = root.resolve()
     service = Service(root, export_roots)
+    job_events = JobEvents()
     token = secrets.token_urlsafe(32)
     # Cookies are host-scoped, not port-scoped. Distinct workspaces on localhost
     # must not overwrite each other's media authentication when opened in two tabs.
@@ -63,12 +66,19 @@ def create_app(root: Path, port: int = 8765, export_roots: list[Path] | None = N
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        loop = asyncio.get_running_loop()
+
+        def publish_job(job: dict[str, Any]) -> None:
+            loop.call_soon_threadsafe(job_events.publish, job)
+
+        service.store.on_job_change = publish_job
         dispatcher = Dispatcher(service.store)
         info = {
             "url": f"http://127.0.0.1:{port}",
             "workspace": str(root),
             "token": token,
             "pid": os.getpid(),
+            "job_events": True,
         }
         path = root / "server.json"
         path.write_text(json.dumps(info))
@@ -79,6 +89,7 @@ def create_app(root: Path, port: int = 8765, export_roots: list[Path] | None = N
                 yield
         finally:
             dispatcher.close()
+            service.store.on_job_change = None
             from .motion_sampling import close_samples
             close_samples(service.store)
             # Preview encoders are transient and must not outlive this daemon.
@@ -87,6 +98,7 @@ def create_app(root: Path, port: int = 8765, export_roots: list[Path] | None = N
 
     app = FastAPI(title="ChromaScript", version="0.1.0", lifespan=lifespan)
     app.state.service = service
+    app.state.job_events = job_events
     app.add_middleware(
         TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"]
     )
@@ -104,11 +116,11 @@ def create_app(root: Path, port: int = 8765, export_roots: list[Path] | None = N
             return JSONResponse(
                 {"error": {"code": "origin", "message": "Origin is not allowed"}}, status_code=403
             )
-        protected = request.url.path.startswith(("/api/operations/", "/api/artifacts/", "/mcp"))
+        protected = request.url.path.startswith(("/api/operations/", "/api/artifacts/", "/api/job-events", "/mcp"))
         supplied = request.headers.get("authorization", "").removeprefix("Bearer ")
         # Same-site HttpOnly cookies permit native media range requests; all mutations
         # still require the explicit in-memory bearer token.
-        if request.method == "GET" and request.url.path.startswith("/api/artifacts/"):
+        if request.method == "GET" and request.url.path.startswith(("/api/artifacts/", "/api/job-events")):
             supplied = supplied or request.cookies.get(media_cookie, "")
         if protected and not secrets.compare_digest(supplied, token):
             return JSONResponse(
@@ -130,6 +142,27 @@ def create_app(root: Path, port: int = 8765, export_roots: list[Path] | None = N
     @app.get("/api/operations")
     def operations():
         return {"operations": catalogue()}
+
+    @app.get("/api/job-events")
+    async def subscribe_jobs():
+        # This transport only invalidates existing shared list_jobs/get_job reads;
+        # it introduces no parallel product operation or task state.
+        return StreamingResponse(
+            job_events.stream(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.post("/api/job-events")
+    async def notify_jobs(request: Request):
+        try:
+            model = REGISTRY["get_job"].input_model.model_validate(await request.json())
+            job = await run_in_threadpool(service.store.get, "job", model.model_dump()["job_id"])
+            job_events.publish(job)
+            return {"notified": True}
+        except ChromaError as exc:
+            return JSONResponse({"error": exc.as_dict()}, status_code=400)
+        except (ValidationError, ValueError) as exc:
+            return JSONResponse({"error": {"code": "invalid_arguments", "message": str(exc)}}, status_code=400)
 
     @app.post("/api/operations/encode_motion_hdr_preview/binary")
     async def binary_hdr_preview(request: Request):

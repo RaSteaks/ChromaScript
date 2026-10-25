@@ -3,6 +3,7 @@
 import base64
 import json
 import subprocess
+from fractions import Fraction
 
 import numpy as np
 import pytest
@@ -169,3 +170,95 @@ def test_binary_and_json_use_identical_p010_processing(tmp_path, monkeypatch):
     pixels[0] |= 1
     with pytest.raises(ChromaError, match="低 6 位"):
         encode_hdr_preview_binary(header, pixels.tobytes()*2)
+
+
+@pytest.mark.parametrize("fps", [(60000, 1001), (24000, 1001), (60, 1)])
+@pytest.mark.parametrize("count", [1, 8])
+def test_p010_packet_clock_matches_rational_seek_frames(tmp_path, monkeypatch, fps, count):
+    import chromascript.motion_hdr_preview as hdr
+
+    # Force the portable encoder too: nominal SPS frame rate can be right while
+    # the MP4 packet duration is wrong. A paused seek must cover exactly one frame.
+    monkeypatch.setattr(hdr, "_hardware_available", lambda: False)
+    width, height = 64, 32
+    pixels = np.full(width * height * 3 // 2, 512 << 6, dtype="<u2")
+    result = encode_hdr_preview_binary(HDRPreviewHeader(
+        width=width, height=height, frame_count=count,
+        fps={"numerator": fps[0], "denominator": fps[1]},
+        source_color_space="Linear Rec.2020", input_format="p010-pq",
+    ), pixels.tobytes() * count)
+    path = tmp_path / "seek.mp4"
+    path.write_bytes(base64.b64decode(result["data"]))
+    decoded = json.loads(subprocess.check_output([
+        "ffprobe", "-v", "error", "-show_streams", "-show_packets", "-of", "json", str(path),
+    ]))
+    clock = Fraction(decoded["streams"][0]["time_base"])
+    step = Fraction(fps[1], fps[0])
+    packets = decoded["packets"]
+    assert len(packets) == count
+    assert result["verification"]["packet_timing"] is True
+    for i, packet in enumerate(packets):
+        assert (packet["pts"] - packets[0]["pts"]) * clock == i * step
+        assert packet["dts"] == packet["pts"]
+        assert packet["duration"] * clock == step
+
+
+@pytest.mark.parametrize("count,numerator,denominator", [(1, 60000, 1001), (1, 24, 1), (8, 30, 1)])
+def test_native_reused_fragments_never_include_drain_pictures(tmp_path, count, numerator, denominator):
+    import chromascript.motion_hdr_preview as hdr
+    from chromascript.hdr_encoder import close_encoder
+
+    if not hdr._hardware_available():
+        pytest.skip("Native VideoToolbox is unavailable")
+    close_encoder()
+    header = HDRPreviewHeader(width=64, height=32, frame_count=count,
+        fps={"numerator": numerator, "denominator": denominator},
+        source_color_space="Linear Rec.2020", input_format="p010-pq")
+    samples = []
+    try:
+        for level in (240, 700):
+            pixels = np.full(64 * 32 * 3 // 2, 512 << 6, dtype="<u2")
+            pixels[:64 * 32] = level << 6
+            result = encode_hdr_preview_binary(header, pixels.tobytes() * count)
+            if result["encoder"] != "hevc_videotoolbox":
+                pytest.skip("The native encoder cannot run in this environment")
+            assert result["persistent_encoder"] is True
+            assert result["verification"]["packet_timing"] is True
+            path = tmp_path / f"{level}.mp4"
+            path.write_bytes(base64.b64decode(result["data"]))
+            decoded = subprocess.check_output([
+                "ffmpeg", "-v", "error", "-xerror", "-i", str(path), "-fps_mode", "passthrough",
+                "-pix_fmt", "yuv420p10le", "-f", "rawvideo", "-",
+            ], timeout=10)
+            planes = np.frombuffer(decoded, dtype="<u2").reshape(count, -1)
+            # Every independently decoded picture must belong to this request,
+            # not a previous request's drain frames or a shifted IDR boundary.
+            assert planes.shape[1] == 64 * 32 * 3 // 2
+            assert np.max(np.abs(planes[:, :64 * 32].astype(float) - level)) < 10
+            samples.append(result["timestamp_base"])
+        assert samples[1] > samples[0]
+    finally:
+        close_encoder()
+
+
+def test_combined_strict_probe_rejects_truncated_encoded_pixels(monkeypatch):
+    import chromascript.motion_hdr_preview as hdr
+    from chromascript.encoding import _boxes
+
+    monkeypatch.setattr(hdr, "_hardware_available", lambda: False)
+    metadata = hdr.quicktime_color_metadata
+    def truncate_payload(path):
+        result = metadata(path)
+        data = path.read_bytes()
+        with path.open("rb") as stream:
+            ends = [end for kind, _, end in _boxes(stream, 0, len(data)) if kind == b"mdat"]
+        # Corrupt actual compressed pixels while leaving the PQ/10-bit metadata
+        # intact. Nominal tags and packet counts must never certify this file.
+        path.write_bytes(data[:ends[-1] - 10])
+        return result
+    monkeypatch.setattr(hdr, "quicktime_color_metadata", truncate_payload)
+    header = HDRPreviewHeader(width=64, height=32, frame_count=1,
+        fps={"numerator":60,"denominator":1}, source_color_space="Linear Rec.2020", input_format="p010-pq")
+    pixels = np.full(64 * 32 * 3 // 2, 512 << 6, dtype="<u2")
+    with pytest.raises(ChromaError):
+        encode_hdr_preview_binary(header, pixels.tobytes())

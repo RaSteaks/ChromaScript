@@ -4,6 +4,10 @@ export type HDRController = {
   play(): void;
   pause(): void;
   seek(frame: number): void;
+  /** Drag may present intermediate HDR frames; release restores exact targeting. */
+  setScrubbing(value: boolean): void;
+  /** Suspend offscreen work while retaining the latest requested position. */
+  setActive(value: boolean): void;
   dispose(): void;
 };
 export function hdrVideoSupport(scope?: Window): boolean;
@@ -28,6 +32,9 @@ export function createHDRPreview(options: {
   encodeChunk(header: unknown, frames: ArrayBuffer[]): Promise<unknown>;
   onFrame(frame: number): void;
   onPlaying(playing: boolean): void;
-  onStatus(status: { mode: "sdr" | "hdr" | "buffering"; message: string }): void;
+  onStatus(status: {
+    mode: "sdr" | "hdr" | "buffering";
+    message: string;
+  }): void;
   onFallback(): void;
 }): HDRController;
