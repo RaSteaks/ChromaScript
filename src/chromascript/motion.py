@@ -56,6 +56,9 @@ class MotionOutput(Model):
     render_scale: Literal[1, 2, 4] = 2
     # Independent frame producers; the final video keeps one ordered encoder.
     render_workers: Literal[1, 2, 4] = Field(default=1, description="Independent float frame producers; 1, 2 or 4. Frames retain absolute time and feed one ordered video encoder. React SDR supports 1 only.")
+    video_processing: Literal["auto", "reference"] = Field(default="auto", description="Auto uses GPU video processing for float video-only output; reference preserves CPU processing. EXR masters remain unchanged.")
+    video_encoder: Literal["auto", "software", "hardware"] = Field(default="auto", description="Auto uses measured VideoToolbox H.264/HEVC where available; software retains x264/x265; hardware requires a passing native probe.")
+    video_quality: Literal["quality", "balanced", "speed"] = "quality"
 
     @field_validator("render_scale", mode="before")
     @classmethod
@@ -114,7 +117,7 @@ def resolve_motion_output(engine: MotionEngine, output: MotionOutput | None) -> 
     """Estimate and submission agree on engine-specific master defaults."""
     floating = engine == "three-float-v1"
     output = output or (
-        MotionOutput() if floating else MotionOutput(master_bit_depth=None, video="srgb")
+        MotionOutput() if floating else MotionOutput(master_bit_depth=None, video="srgb", video_processing="reference")
     )
     if not floating and (
         output.master_bit_depth is not None or output.video not in {"srgb", "rec709", "prores-hq-srgb"}
@@ -385,6 +388,9 @@ def motion_identity() -> dict[str, Any]:
         Path(__file__).with_name("motion_sdr_worker.py"),
         FRONTEND / "motion" / "float-runtime.mjs",
         FRONTEND / "motion" / "float-transport.mjs",
+        FRONTEND / "motion" / "video-capture.mjs",
+        FRONTEND / "motion" / "video-transport.mjs",
+        FRONTEND / "motion" / "video-protocol.mjs",
         FRONTEND / "motion" / "hdr-preview.mjs",
         FRONTEND / "motion" / "hdr-capture.mjs",
         FRONTEND / "motion" / "source-color.mjs",
@@ -402,6 +408,10 @@ def motion_identity() -> dict[str, Any]:
         Path(__file__).with_name("motion_render.py"),
         Path(__file__).with_name("motion_processing.py"),
         Path(__file__).with_name("motion_parallel.py"),
+        Path(__file__).with_name("motion_video_render.py"),
+        Path(__file__).with_name("motion_video_plan.py"),
+        Path(__file__).with_name("video_transport.py"),
+        Path(__file__).with_name("video_hardware.py"),
         Path(__file__).with_name("frame_manifest.py"),
         Path(__file__).with_name("artifacts.py"),
         Path(__file__).with_name("exports.py"),
@@ -571,7 +581,7 @@ class MotionOperations:
             "master_color_space": "ACEScg" if floating else None,
             "alpha": "straight" if floating else "composited on black",
             "default": (
-                MotionOutput() if floating else MotionOutput(master_bit_depth=None, video="srgb")
+                MotionOutput() if floating else MotionOutput(master_bit_depth=None, video="srgb", video_processing="reference")
             ).model_dump(),
             "videos": choices,
             "scene_linear_master": floating,
@@ -579,6 +589,10 @@ class MotionOperations:
             "preview": "sRGB SDR; independent of delivery",
             "render_scales": [1, 2, 4],
             "render_workers": [1, 2, 4] if floating else [1],
+            "video_processing": ["auto", "reference"] if floating else ["reference"],
+            "video_encoders": ["auto", "software", "hardware"],
+            "video_qualities": ["quality", "balanced", "speed"],
+            "hardware_probe_on_submit": True,
             "direct_to_destination": True,
         }
 
@@ -911,6 +925,13 @@ class MotionOperations:
         if spec.preserved_layers:
             # Layers reuse one scratch RGBA32F target, not one full raster per layer.
             working_bytes += pixels * output.render_scale**2 * 16
+        if spec.engine == "three-float-v1" and output.master_bit_depth is None and output.video_processing == "auto":
+            # GPU video keeps source/depth targets plus resolve/display textures,
+            # bounded packed readback/IPC buffers and a one-time sRGB thumbnail.
+            # It never allocates the old supersampled CPU float copies.
+            packed_bytes = 6 if output.video == "prores-4444-acescct" else 4 if output.video.startswith("prores-hq-") else 1.5 if output.video == "srgb" else 3
+            working_bytes = int(pixels * (output.render_scale**2 * (40 if spec.preserved_layers else 20)
+                                         + 96 + packed_bytes * 20))
         active_workers = min(output.render_workers, spec.frames)
         working_bytes *= active_workers
         if output.render_workers > 1:
@@ -939,9 +960,21 @@ class MotionOperations:
                 destination=str(destination), required_bytes=estimate["destination_required_bytes"],
                 estimate=estimate,
             )
+        previous = self.store.request_snapshot(idempotency_key)
+        if previous is not None:
+            # Hardware availability and native failure logs can change between
+            # retries. Reuse the first decision; create_job still compares the
+            # complete snapshot so edits to the requested recipe remain conflicts.
+            video_execution = previous.get("video_execution")
+        else:
+            from .motion_video_plan import resolve_video_execution
+
+            video_plan = resolve_video_execution(spec.engine, output, spec.settings())
+            video_execution = video_plan.model_dump() if video_plan is not None else None
         snapshot = {
             "engine": spec.engine,
             "output": output.model_dump(),
+            "video_execution": video_execution,
             "color_configuration": color_info(),
             "kind": "motion",
             "scene": spec.model_dump(),
@@ -981,4 +1014,5 @@ class MotionOperations:
             idempotency_key=idempotency_key,
         )
         job.export_path = str(destination / bundle_name(spec.name, job.id))
-        return {"job": self.store.create_job(idempotency_key, digest, job.model_dump(), snapshot)}
+        return {"job": self.store.create_job(idempotency_key, digest, job.model_dump(), snapshot),
+                "video_execution": video_execution}

@@ -25,6 +25,7 @@ from .images import read_image, resize_srgb, write_image
 from .motion import MotionOutput, MotionSpec, motion_video_preset
 from .motion_processing import PreparedFrame, prepare_float_frame
 from .store import canonical
+from .video_transport import VideoPixelFormat, video_frame_bytes
 
 
 def iter_parallel_frames(
@@ -32,6 +33,7 @@ def iter_parallel_frames(
     config_hash: str, masters: Path | None = None, missing: list[int] | None = None,
     expected_gpu: dict[str, Any] | None = None, bundle: RenderBundle | None = None,
     thumbnail: Path | None = None, cancelled: Callable[[], bool] | None = None,
+    video_input: VideoPixelFormat | None = None,
 ) -> Generator[PreparedFrame, None, None]:
     """Pixels occupy a shared slot valid until the consumer advances the iterator.
 
@@ -55,15 +57,17 @@ def iter_parallel_frames(
     try:
         for worker in range(count):
             assigned = indices[worker::count]
-            slot = SharedMemory(create=True, size=spec.width * spec.height * 16)
+            size = video_frame_bytes(spec.width, spec.height, video_input) if video_input else spec.width * spec.height * 16
+            slot = SharedMemory(create=True, size=size)
             slots.append(slot)
-            arrays.append(np.ndarray((spec.height, spec.width, 4), np.float32, buffer=slot.buf))
+            arrays.append(np.ndarray((size,), np.uint8, buffer=slot.buf) if video_input else
+                          np.ndarray((spec.height, spec.width, 4), np.float32, buffer=slot.buf))
             parent, child = context.Pipe()
             connections.append(parent)
             process: BaseProcess = context.Process(target=_produce, name=f"chroma-frame-{worker}", args=(
                 child, stop, slot.name, spec.model_dump(), output.model_dump(), assigned,
                 [index for index in assigned if index in needed], directory / f"parallel-{worker}",
-                masters, config_hash, expected_gpu, bundle, thumbnail, motion_render.RUNTIME,
+                masters, config_hash, expected_gpu, bundle, thumbnail, motion_render.RUNTIME, video_input,
             ))
             try:
                 process.start()
@@ -173,11 +177,16 @@ def _produce(
     recipe: dict[str, Any], indices: list[int], missing: list[int], directory: Path,
     masters: Path | None, config_hash: str, expected_gpu: dict[str, Any] | None,
     bundle: RenderBundle | None, thumbnail: Path | None, runtime: Path,
+    video_input: VideoPixelFormat | None,
 ) -> None:
     try:
         spec, output = MotionSpec.model_validate(scene), MotionOutput.model_validate(recipe)
         # Test drivers may supply WebKit; production inherits its frozen runtime path.
         motion_render.RUNTIME = runtime
+        if video_input is not None:
+            _produce_video(connection, stop, slot_name, spec, output, indices, directory,
+                           bundle, thumbnail, video_input)
+            return
         with ExitStack() as stack:
             shared = stack.enter_context(closing(SharedMemory(name=slot_name)))
             pixels = np.ndarray((spec.height, spec.width, 4), np.float32, buffer=shared.buf)
@@ -233,3 +242,31 @@ def _produce(
             pass  # Parent cancellation already owns cleanup and reporting.
     finally:
         connection.close()
+
+
+def _produce_video(connection: Connection, stop: Event, slot_name: str, spec: MotionSpec,
+                   output: MotionOutput, indices: list[int], directory: Path,
+                   bundle: RenderBundle | None, thumbnail: Path | None, video_input: VideoPixelFormat) -> None:
+    from .motion_video_render import iter_video_frames
+
+    with closing(SharedMemory(name=slot_name)) as shared, closing(iter_video_frames(
+        spec, directory, indices, motion_video_preset(output.video).color.output,
+        render_scale=output.render_scale, thumbnail=thumbnail, cancelled=stop.is_set, pixel_format=video_input,
+    )) as frames:
+        pixels = np.ndarray((video_frame_bytes(spec.width, spec.height, video_input),), np.uint8, buffer=shared.buf)
+        first = next(frames)
+        connection.send({"kind": "gpu", "gpu": json.loads((directory / "gpu.json").read_text())})
+        if connection.recv() != "gpu-accepted":
+            return
+        for position, index in enumerate(indices):
+            if stop.is_set():
+                return
+            if bundle is not None:
+                bundle.check_volume()
+            data = first if position == 0 else next(frames)
+            np.copyto(pixels, np.frombuffer(data, np.uint8))
+            connection.send({"kind": "frame", "index": index, "record": None, "seconds": {}})
+            if connection.recv() != "next":
+                return
+        next(frames, None)
+        connection.send({"kind": "done", "transport": json.loads((directory / "transport.json").read_text())})

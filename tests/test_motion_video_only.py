@@ -28,7 +28,7 @@ def make_job(tmp_path, video="pq", *, frames=3, scale=1):
     saved = service.create_motion_scene(pid, spec=spec)
     job = service.submit_motion_render(saved["record"]["id"], saved["revision_id"], "video-only",
         export_directory=str(tmp_path / "delivery"),
-        output=MotionOutput(master_bit_depth=None, video=video, render_scale=scale))["job"]
+        output=MotionOutput(master_bit_depth=None, video=video, render_scale=scale, video_processing="reference", video_encoder="software"))["job"]
     return service, job, motion_bundle(job, service.store.get("snapshot", job["id"]))
 
 
@@ -132,7 +132,9 @@ def test_mode_validation_and_4k_budget_without_master_sequence(tmp_path):
     result = service.estimate_motion_render(settings, output=output)
     assert result["basis"] == "nominal-no-margin-v2"
     assert result["master_uncompressed_bytes"] == result["master_overhead_budget_bytes"] == 0
-    assert result["intermediate_budget_bytes"] == 3840 * 2160 * 16
+    assert result["intermediate_budget_bytes"] == 0
+    reference = service.estimate_motion_render(settings, output=output.model_copy(update={"video_processing": "reference"}))
+    assert reference["intermediate_budget_bytes"] == 3840 * 2160 * 16
     assert result["video_planning_bps"] == 99_532_800
     assert result["destination_required_bytes"] < 10 * 1024**3
     assert service.get_motion_delivery_options()["video_only"]

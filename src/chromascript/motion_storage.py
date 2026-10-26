@@ -49,7 +49,8 @@ def estimate_storage(
             video = math.ceil(bits * count / 8)
             video_planning_bps = math.ceil(bits * Fraction(settings.fps.numerator, settings.fps.denominator))
         else:
-            video_planning_bps = max(8_000_000, math.ceil(Fraction(pixels * settings.fps.numerator, 5 * settings.fps.denominator)))
+            density = {"quality": Fraction(1, 5), "balanced": Fraction(7, 50), "speed": Fraction(1, 10)}[output.video_quality]
+            video_planning_bps = max(8_000_000, math.ceil(pixels * density * Fraction(settings.fps.numerator, settings.fps.denominator)))
             video = math.ceil(video_planning_bps * duration / 8)
         if sample_count and "video_packet_bytes" in measured:
             video = math.ceil(Fraction(sum(measured["video_packet_bytes"]) * count, sample_count))
@@ -76,7 +77,8 @@ def estimate_storage(
     video += embedded_audio
     # Float transport is one supersampled frame per producer. SDR retains its
     # screenshot sequence, whose compressed size is unknown without sampling.
-    intermediate = pixels * 16 * output.render_scale**2 * min(output.render_workers, count) if floating else pixels * 4 * output.render_scale**2 * count
+    gpu_video = floating and output.master_bit_depth is None and output.video_processing == "auto"
+    intermediate = (0 if gpu_video else pixels * 16 * output.render_scale**2 * min(output.render_workers, count)) if floating else pixels * 4 * output.render_scale**2 * count
     auxiliary = measured.get("source_metadata_bytes", 0)
     final = master + video + audio_bytes + auxiliary
     # Float EXR and video now stream together: account for their simultaneous

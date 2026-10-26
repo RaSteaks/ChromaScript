@@ -8,6 +8,15 @@ import {
 import createScene from "chromascript:scene";
 import config from "chromascript:config";
 import { createHDRCapture } from "./hdr-capture.mjs";
+import { createVideoCapture } from "./video-capture.mjs";
+
+function encodeBytes(bytes) {
+  if (typeof bytes.toBase64 === "function") return bytes.toBase64();
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 32768)
+    binary += String.fromCharCode(...bytes.subarray(i, i + 32768));
+  return btoa(binary);
+}
 
 // Only this bridge owns the renderer. Source supplies a scene, camera and pure
 // frame update, never a display canvas, screenshot, previous-frame accumulator.
@@ -213,7 +222,8 @@ function main() {
         )
       : Math.min(1, limit / Math.max(config.width, config.height));
   // Logical scene dimensions/time never change with preview or final sampling.
-  // Export uses an integer pixel grid; CPU integration filters associated light.
+  // Export uses an integer grid. Master/reference and GPU video paths both
+  // integrate associated light before any display transform.
   const renderScale = config.preview ? 1 : config.renderScale || 1;
   // Video chroma requires even rasters; logical layout and source time are unchanged.
   const raster = (value) =>
@@ -341,7 +351,20 @@ function main() {
   const hdrCapture = useHDR
     ? createHDRCapture(renderer, target, config.display.hdr, width, height)
     : null;
+  const videoCapture = config.videoCapture
+    ? createVideoCapture(
+        renderer,
+        target,
+        config.videoCapture,
+        config.width,
+        config.height,
+        renderScale,
+      )
+    : null;
   window.addEventListener("pagehide", () => hdrCapture?.dispose(), {
+    once: true,
+  });
+  window.addEventListener("pagehide", () => videoCapture?.dispose(), {
     once: true,
   });
   let data = null;
@@ -483,6 +506,15 @@ function main() {
   }
   const bridge = {
     capture,
+    async captureVideo(frame, slot, thumbnail) {
+      if (!videoCapture) throw new Error("GPU 视频出口未启用。");
+      render(frame, false);
+      const captured = await videoCapture.capture(slot, thumbnail);
+      return {
+        pixels: encodeBytes(captured.pixels),
+        thumbnail: captured.thumbnail ? encodeBytes(captured.thumbnail) : null,
+      };
+    },
     // Numeric QA can compare the packed GPU output to the CPU ACES reference.
     captureHDR(frame) {
       if (!hdrCapture) throw new Error("HDR 采集未启用");
@@ -508,14 +540,7 @@ function main() {
         length > 4 * 1024 * 1024
       )
         throw new Error("无效读取范围。");
-      const chunk = data.subarray(offset, offset + length);
-      // Newer runtimes encode typed bytes directly. Retain the bounded fallback
-      // for installed browsers without this API; both paths preserve exact bytes.
-      if (typeof chunk.toBase64 === "function") return chunk.toBase64();
-      let binary = "";
-      for (let i = 0; i < chunk.length; i += 32768)
-        binary += String.fromCharCode(...chunk.subarray(i, i + 32768));
-      return btoa(binary);
+      return encodeBytes(data.subarray(offset, offset + length));
     },
     probe: {
       format: "RGBA32F",

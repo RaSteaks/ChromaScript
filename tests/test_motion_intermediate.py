@@ -102,7 +102,9 @@ def test_no_percentage_reserves_or_duplicate_movie(context):
     assert result["video_budget_bytes"] == expected
     assert result["master_overhead_budget_bytes"] == result["auxiliary_budget_bytes"] == 0
     assert result["estimated_output_bytes"] == expected
-    assert result["destination_required_bytes"] == expected + 3840 * 2160 * 16 * 4 + result["workspace_required_bytes"]
+    assert result["destination_required_bytes"] == expected + result["workspace_required_bytes"]
+    reference = service.estimate_motion_render(settings, output=output.model_copy(update={"video_processing": "reference"}), export_directory=str(destination))
+    assert reference["destination_required_bytes"] == expected + 3840 * 2160 * 16 * 4 + reference["workspace_required_bytes"]
     assert not destination.exists()
 
 
@@ -236,7 +238,7 @@ def test_native_scene_log_precision_tags_and_sampling(context, monkeypatch):
         encode(preset, settings, destination / "invalid.mov", iter([pixels]), lambda _: None)
     assert error.value.code == "log_storage_range" and error.value.details["frame"] == 0
     assert not (destination / "invalid.mov").exists()
-    output = MotionOutput(master_bit_depth=None, video="prores-4444-acescct", render_scale=1)
+    output = MotionOutput(master_bit_depth=None, video="prores-4444-acescct", render_scale=1, video_processing="reference")
     id = service.start_motion_render_estimate(project, spec, output, str(destination), "native")["estimate"]["id"]
     result = wait_sample(service, id)
     assert result["status"] == "completed", result

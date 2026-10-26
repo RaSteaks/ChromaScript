@@ -6,10 +6,12 @@ from typing import Any, Literal
 import numpy as np
 import PyOpenColorIO as ocio
 
-from .color import DISPLAYS, HDR_VIEW, SDR_VIEW, config, transform
+from .color import DISPLAYS, HDR_VIEW, SDR_VIEW, color_processor, config, transform
 from .errors import ChromaError
+from .video_transport import VideoPixelFormat
 
 MotionSourceSpace = Literal["Linear Rec.709 (sRGB)", "ACEScg", "Linear Rec.2020", "ACES2065-1"]
+VideoOutput = Literal["sRGB", "PQ", "HLG", "ACEScct"]
 SOURCE_SPACE: MotionSourceSpace = "Linear Rec.709 (sRGB)"
 SOURCE_SPACES = [
     {"value": "Linear Rec.2020", "label": "线性 BT.2020 / D65"},
@@ -50,6 +52,26 @@ def display_shader(source: MotionSourceSpace = SOURCE_SPACE, hdr: bool = False) 
         ocio.DisplayViewTransform(src=source, display=DISPLAYS["PQ" if hdr else "sRGB"],
                                   view=HDR_VIEW if hdr else SDR_VIEW)
     )
+    return _shader_data(processor, source)
+
+
+@lru_cache(maxsize=48)
+def video_shader(source: MotionSourceSpace, output: VideoOutput,
+                 pixel_format: VideoPixelFormat | None = None) -> dict[str, Any]:
+    # Resolve samples and coverage in the author's linear basis, then cross the
+    # same ACEScg boundary as CPU delivery before applying the pinned output view.
+    matrix = config().getProcessor(source, "ACEScg").getDefaultCPUProcessor()
+    return {
+        "output": output,
+        "to_acescg": np.array([matrix.applyRGB(row.tolist()) for row in np.eye(3)]).T.tolist(),
+        "display": _shader_data(color_processor("ACEScg", output), "ACEScg"),
+        "thumbnail": display_shader("ACEScg"),
+        "pixel_format": pixel_format or ("nv12" if output == "sRGB" else "p010le"),
+        "chroma_location": "topleft" if output in {"PQ", "HLG"} else "left",
+    }
+
+
+def _shader_data(processor: Any, source: MotionSourceSpace) -> dict[str, Any]:
     desc = ocio.GpuShaderDesc.CreateShaderDesc()
     desc.setLanguage(ocio.GPU_LANGUAGE_GLSL_ES_3_0)
     desc.setAllowTexture1D(False)

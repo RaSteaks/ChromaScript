@@ -113,18 +113,18 @@ def color_info() -> dict[str, Any]:
 
 
 @lru_cache(maxsize=32)
-def processor(source: str, output: str) -> Any:
+def color_processor(source: str, output: str) -> Any:
     c = config()
     src = "sRGB Encoded Rec.709 (sRGB)" if source == "sRGB" else source
     if output in {"ACEScg", "ACES2065-1", "ACEScct"}:
-        return c.getProcessor(src, output).getDefaultCPUProcessor()
+        return c.getProcessor(src, output)
     if output == "HLG":
         group = ocio.GroupTransform()
         group.appendTransform(
             ocio.DisplayViewTransform(src=src, display=DISPLAYS["PQ"], view=HDR_VIEW)
         )
         group.appendTransform(ocio.ColorSpaceTransform(src=DISPLAYS["PQ"], dst=HLG_DISPLAY))
-        return c.getProcessor(group).getDefaultCPUProcessor()
+        return c.getProcessor(group)
     if output in GAMMA_DISPLAYS:
         base, display, _, _, _ = GAMMA_DISPLAYS[output]
         group = ocio.GroupTransform()
@@ -133,7 +133,7 @@ def processor(source: str, output: str) -> Any:
         # One ACES rendering transform, followed by display encoding only: changing
         # gamma must not apply tone mapping a second time or alter the P3 primaries.
         group.appendTransform(ocio.ColorSpaceTransform(src=DISPLAYS[base], dst=display))
-        return c.getProcessor(group).getDefaultCPUProcessor()
+        return c.getProcessor(group)
     # Utility/working spaces are pure color-space conversions, distinct from the
     # named display aliases which deliberately apply an ACES output transform.
     target = c.getColorSpace(output)
@@ -142,7 +142,7 @@ def processor(source: str, output: str) -> Any:
         and target
         and target.getReferenceSpaceType() == ocio.REFERENCE_SPACE_SCENE
     ):
-        return c.getProcessor(src, output).getDefaultCPUProcessor()
+        return c.getProcessor(src, output)
     if output not in DISPLAYS:
         raise ChromaError("unknown_color_output", f"Unknown output: {output}")
     # P3 uses the official P3 limiting gamut as well as P3 display encoding;
@@ -158,7 +158,11 @@ def processor(source: str, output: str) -> Any:
     )
     return c.getProcessor(
         ocio.DisplayViewTransform(src=src, display=DISPLAYS[output], view=view)
-    ).getDefaultCPUProcessor()
+    )
+
+@lru_cache(maxsize=32)
+def processor(source: str, output: str) -> Any:
+    return color_processor(source, output).getDefaultCPUProcessor()
 
 
 def transform(

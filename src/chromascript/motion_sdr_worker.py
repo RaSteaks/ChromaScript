@@ -31,6 +31,7 @@ from .motion import (
 )
 from .motion import SDR_RUNTIME as RUNTIME
 from .motion_sources import source_hash, write_sources
+from .motion_video_plan import VideoExecution
 from .store import Store, canonical, now
 
 
@@ -229,7 +230,8 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
             {"frame": 0, "color_space": "sRGB", "engine": "remotion", "scene_linear_master": False},
         )
 
-        preset = motion_video_preset(output.video)
+        video_plan = VideoExecution.model_validate(snapshot["video_execution"]) if snapshot.get("video_execution") else None
+        preset = video_plan.preset if video_plan is not None else motion_video_preset(output.video)
 
         # SDR conversion changes display encoding only; never apply an ACES view
         # to a browser screenshot or represent it as a scene-linear HDR master.
@@ -253,6 +255,7 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
             lambda count: progress("encoding", 0.75 + 0.2 * count / spec.frames),
             # Audio is an independent optional input, never part of the pixel stream.
             audio_path=audio_path if audio_info is not None else None,
+            speed=video_plan.speed if video_plan is not None else "slow",
         )
         verification = check_probe(info, preset, settings)
         # Padding an 8-bit screenshot into the encoder's 16-bit input pipe adds

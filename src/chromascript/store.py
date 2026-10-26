@@ -266,6 +266,18 @@ class Store:
                 values = list(newest.values())
         return values
 
+    def request_snapshot(self, key: str) -> dict[str, Any] | None:
+        # Reuse frozen execution evidence after daemon restarts, including when
+        # only a portable project's authoritative request index is available.
+        for owner in self.database_owners():
+            with self.connect(owner) as connection:
+                previous = connection.execute(
+                    "SELECT job_id FROM requests WHERE key=?", (key,)
+                ).fetchone()
+            if previous:
+                return self.get("snapshot", previous[0])
+        return None
+
     def create_job(self, key: str, snapshot_hash: str, job: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
         if not self.partitioned:
             return self._create_job(key, snapshot_hash, job, snapshot)

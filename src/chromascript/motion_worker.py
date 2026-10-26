@@ -34,9 +34,11 @@ from .motion_color import decode_float_frame
 from .motion_processing import prepare_float_frame
 from .motion_render import iter_float_frames, render_float_frames
 from .motion_sources import write_sources
+from .motion_video_plan import VideoExecution
 from .presets import builtins
 from .prores import prores_capability
 from .store import Store, canonical, now
+from .video_transport import VideoFrame
 
 
 def atomic_json(path: Path, value: Any) -> None:
@@ -140,6 +142,8 @@ def run_motion(root: Path, job_id: str) -> None:
             raise ChromaError("snapshot_corrupt", "动画导出位置与冻结快照不一致。")
         settings = spec.settings()
         output = resolve_motion_output(spec.engine, MotionOutput.model_validate(snapshot["output"]))
+        video_plan = VideoExecution.model_validate(snapshot["video_execution"]) if snapshot.get("video_execution") else None
+        gpu_video = video_plan is not None and video_plan.processing == "gpu"
         if output.video == "prores-4444-acescct":
             precision = prores_capability(root)
             if not precision["available"] or precision["identity"] != snapshot.get("precision_verification", {}).get("identity"):
@@ -184,7 +188,8 @@ def run_motion(root: Path, job_id: str) -> None:
         stage_seconds = {"float_decode": 0.0, "exr_write_and_hash": 0.0, "exr_verify": 0.0,
                          "manifest_record": 0.0}
         thumbnail = directory / "thumbnail.png"
-        video_preset = motion_video_preset(output.video) if output.video != "none" else None
+        video_preset = video_plan.preset if video_plan is not None else motion_video_preset(output.video) if output.video != "none" else None
+        encode_speed = video_plan.speed if video_plan is not None else "slow"
         video = directory / f"animation-{output.video}.{video_preset.container}" if video_preset else None
         # Encode beside the resumable transport, then publish on the same volume.
         encoded_video = work / video.name if video is not None and bundle is not None else video
@@ -196,7 +201,7 @@ def run_motion(root: Path, job_id: str) -> None:
 
         def parallel_pixels(frame_indices: list[int], master_directory: Path | None = None,
                             missing_indices: list[int] | None = None,
-                            expected: dict[str, Any] | None = None) -> Generator[np.ndarray, None, None]:
+                            expected: dict[str, Any] | None = None) -> Generator[np.ndarray | VideoFrame, None, None]:
             from .motion_parallel import iter_parallel_frames
 
             with closing(iter_parallel_frames(
@@ -204,6 +209,7 @@ def run_motion(root: Path, job_id: str) -> None:
                 masters=master_directory, missing=missing_indices, expected_gpu=expected, bundle=bundle,
                 thumbnail=thumbnail if master_directory is None else None,
                 cancelled=lambda: store.get("job", job_id)["status"] == "cancelled",
+                video_input=video_plan.pixel_format if gpu_video and video_plan is not None else None,
             )) as prepared:
                 for frame in prepared:
                     if frame.record is not None:
@@ -215,7 +221,11 @@ def run_motion(root: Path, job_id: str) -> None:
                     progress("encoding" if video_preset else "rendering",
                              (0.95 if video_preset else 0.7) * (frame.index + 1) / spec.frames,
                              frame.index + 1)
-                    yield frame.pixels
+                    if gpu_video:
+                        assert video_plan is not None and video_plan.pixel_format is not None
+                        yield VideoFrame(memoryview(frame.pixels), video_plan.pixel_format)
+                    else:
+                        yield frame.pixels
             gpu.update(json.loads((work / "gpu.json").read_text()))
 
         if master_depth is not None:
@@ -272,7 +282,7 @@ def run_motion(root: Path, job_id: str) -> None:
                 with closing(parallel_pixels(list(range(spec.frames)), masters, todo, expected_gpu)) as frames:
                     info = encode(video_preset, settings, encoded_video, frames,
                                   lambda count: progress("encoding", 0.95 * count / spec.frames, count),
-                                  audio_path=audio_path if audio_info is not None else None)
+                                  audio_path=audio_path if audio_info is not None else None, speed=encode_speed)
             elif output.render_workers > 1 and todo:
                 with closing(parallel_pixels(todo, masters, todo, expected_gpu)) as frames:
                     for _ in frames:
@@ -310,7 +320,7 @@ def run_motion(root: Path, job_id: str) -> None:
                 with closing(master_video_frames()) as frames:
                     info = encode(video_preset, settings, encoded_video, frames,
                                   lambda count: progress("encoding", 0.95 * count / spec.frames, count),
-                                  audio_path=audio_path if audio_info is not None else None)
+                                  audio_path=audio_path if audio_info is not None else None, speed=encode_speed)
             elif todo or expected_gpu is None:
                 gpu = render_float_frames(spec, work, todo, accept_frame, expected_gpu=expected_gpu, render_scale=output.render_scale)
                 atomic_json(work / "gpu-verified.json", gpu)
@@ -353,7 +363,7 @@ def run_motion(root: Path, job_id: str) -> None:
             "passed": True,
             "scene_linear_master": master_depth is not None,
             "delivery_mode": "video-only" if master_depth is None else "exr-master",
-            "source_precision": "RGBA32F GPU readback",
+            "source_precision": "RGBA32F scene/processing; packed video readback" if gpu_video else "RGBA32F GPU readback",
             "source_color_space": spec.source_color_space,
             "preserved_layer_spaces": [layer.source_color_space for layer in spec.preserved_layers],
             "linear_processing": "source, spatial sampling, layer compositing and master conversion; display rendering only at preview/video exits",
@@ -366,16 +376,34 @@ def run_motion(root: Path, job_id: str) -> None:
             "scene_reference_basis": "declared source contract; see source_color_contract",
             "sampling": {"render_scale": output.render_scale, "spatial_samples": output.render_scale**2, "temporal_samples": 1},
             "render_workers": output.render_workers,
+            "video_execution": video_plan.model_dump() if video_plan is not None else None,
         }
         declaration_path = None
         if video_preset is not None:
             assert video is not None and encoded_video is not None
             preset = video_preset
 
-            def video_frames() -> Generator[np.ndarray, None, None]:
+            def video_frames() -> Generator[np.ndarray | VideoFrame, None, None]:
                 if output.render_workers > 1:
                     with closing(parallel_pixels(list(range(spec.frames)))) as frames:
                         yield from frames
+                    return
+                if gpu_video:
+                    from .motion_video_render import iter_video_frames
+
+                    assert video_plan is not None and video_plan.pixel_format is not None
+                    with closing(iter_video_frames(
+                        spec, work, list(range(spec.frames)), preset.color.output,
+                        render_scale=output.render_scale, thumbnail=thumbnail,
+                        cancelled=lambda: store.get("job", job_id)["status"] == "cancelled",
+                        pixel_format=video_plan.pixel_format,
+                    )) as packets:
+                        for index, data in enumerate(packets):
+                            if bundle is not None:
+                                bundle.check_volume()
+                            progress("encoding", 0.95 * index / spec.frames, index)
+                            yield VideoFrame(data, video_plan.pixel_format)
+                    gpu.update(json.loads((work / "gpu.json").read_text()))
                     return
                 # One float frame is consumed by the encoder before requesting the
                 # next. No EXR, whole-sequence cache, or second GPU render is involved.
@@ -409,6 +437,8 @@ def run_motion(root: Path, job_id: str) -> None:
                         preset, settings, encoded_video, frames,
                         lambda count: progress("encoding", 0.95 * count / spec.frames, count),
                         audio_path=audio_path if audio_info is not None else None,
+                        video_input=video_plan.pixel_format if gpu_video and video_plan is not None else None,
+                        speed=encode_speed,
                     )
             video_verification = check_probe(info, preset, settings)
             if not video_verification["passed"]:

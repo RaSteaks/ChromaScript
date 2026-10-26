@@ -306,6 +306,9 @@ export type MotionOutput = {
     | "prores-4444-acescct";
   render_scale?: 1 | 2 | 4;
   render_workers?: 1 | 2 | 4;
+  video_processing?: "auto" | "reference";
+  video_encoder?: "auto" | "software" | "hardware";
+  video_quality?: "quality" | "balanced" | "speed";
 };
 export type MotionDeliveryOptions = {
   engine: MotionSpec["engine"];
@@ -316,6 +319,9 @@ export type MotionDeliveryOptions = {
   master_archive?: "zip-stream" | null;
   render_scales?: (1 | 2 | 4)[];
   render_workers?: (1 | 2 | 4)[];
+  video_processing?: ("auto" | "reference")[];
+  video_encoders?: ("auto" | "software" | "hardware")[];
+  video_qualities?: ("quality" | "balanced" | "speed")[];
   videos: {
     value: MotionOutput["video"];
     label: string;

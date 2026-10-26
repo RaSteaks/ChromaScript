@@ -35,7 +35,7 @@ def make_job(tmp_path, depth, video="srgb", width=32, height=18):
     saved = service.create_motion_scene(project, spec=spec)
     job = service.submit_motion_render(saved["record"]["id"], saved["revision_id"], "pipeline",
         export_directory=str(tmp_path / "delivery"),
-        output=MotionOutput(master_bit_depth=depth, video=video, render_scale=2))["job"]
+        output=MotionOutput(master_bit_depth=depth, video=video, render_scale=2, video_processing="reference", video_encoder="software"))["job"]
     return service, job, motion_bundle(job, service.store.get("snapshot", job["id"]))
 
 

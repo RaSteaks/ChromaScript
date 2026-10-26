@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import shutil
 import struct
 import subprocess
@@ -19,6 +20,7 @@ from numpy.typing import NDArray
 from .color import output_metadata, tags, video_tag_issue
 from .errors import ChromaError
 from .models import OUTPUT_ENCODINGS, DeliveryPreset, RenderSettings
+from .video_transport import VideoFrame, VideoPixelFormat
 
 
 def available_encoders() -> set[str]:
@@ -187,7 +189,57 @@ def preset_tag_issue(preset: DeliveryPreset) -> str | None:
     return video_tag_issue(preset.color.output, preset.container)
 
 
-def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path) -> list[str]:
+def _colr_values(preset: DeliveryPreset) -> tuple[int, int, int]:
+    expected = _video_tags(preset)
+    rgb = preset.pixel_format.startswith(("gbr", "rgb", "bgr"))
+    return (
+        {"bt2020": 9, "smpte432": 12, "unknown": 2}.get(expected["primaries"], 1),
+        {"bt709": 1, "unknown": 2, "bt470m": 4, "iec61966-2-1": 13,
+         "smpte2084": 16, "arib-std-b67": 18}[expected["transfer"]],
+        0 if rgb else 9 if expected["matrix"] == "bt2020nc" else 1,
+    )
+
+
+def _stamp_quicktime_color(path: Path, preset: DeliveryPreset) -> None:
+    """Stamp the encoded pixel contract in the private native colr box, in place.
+
+    VideoToolbox may discard sRGB attachments even when the pixels are already
+    transformed. The bitstream filter writes the matching SPS VUI; this writes
+    matching container fields without a second movie copy or another transform.
+    Both are independently read back before publication.
+    """
+    offsets = []
+    with path.open("r+b") as stream:
+        def visit(start: int, end: int, depth: int = 0) -> None:
+            if depth > 8:
+                return
+            for kind, payload, stop in _boxes(stream, start, end):
+                if kind in {b"moov", b"trak", b"mdia", b"minf", b"stbl"}:
+                    visit(payload, stop, depth + 1)
+                elif kind == b"stsd":
+                    for sample_type, sample, sample_end in _boxes(stream, payload + 8, stop):
+                        if sample_type not in {b"avc1", b"avc3", b"hvc1", b"hev1"}:
+                            continue
+                        for child, data, child_end in _boxes(stream, sample + 78, sample_end):
+                            if child == b"colr" and child_end - data >= 10:
+                                stream.seek(data)
+                                flavor = stream.read(4)
+                                if flavor in {b"nclc", b"nclx"}:
+                                    offsets.append((data, flavor, child_end - data))
+        visit(0, path.stat().st_size)
+        if len(offsets) != 1:
+            raise ChromaError("video_color_tags", "硬件编码文件缺少唯一的原生 colr 字段。")
+        offset, flavor, length = offsets[0]
+        if flavor == b"nclx" and length < 11:
+            raise ChromaError("video_color_tags", "硬件编码文件的 colr 字段不完整。")
+        stream.seek(offset + 4)
+        stream.write(struct.pack(">HHH", *_colr_values(preset)))
+        if flavor == b"nclx":
+            stream.write(bytes([128 if preset.data_range == "full" else 0]))
+
+
+def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path, *,
+            video_input: VideoPixelFormat | None = None, speed: str = "slow") -> list[str]:
     # Comments/sidecars cannot replace native gamut and transfer tags. This gate
     # also covers legacy preset calls that bypass the configured-delivery UI.
     if issue := preset_tag_issue(preset):
@@ -204,7 +256,11 @@ def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path)
     alpha = preset.alpha
     chroma_location = _hdr_chroma_location(preset)
     floating = _hlg_float_input(preset)
-    if rgb:
+    if video_input is not None:
+        # GPU pixels already have the output curve, matrix, range and sampling.
+        # Only repack planes for the encoder; never apply zscale/OCIO again.
+        video_filter = f"format={pixel}"
+    elif rgb:
         video_filter = f"format={pixel}"
     else:
         source_format = "gbrap16le" if alpha else "gbrp16le"
@@ -251,7 +307,7 @@ def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path)
         "-f",
         "rawvideo",
         "-pixel_format",
-        ("gbrapf32le" if alpha else "gbrpf32le") if floating else "rgba64le",
+        video_input or (("gbrapf32le" if alpha else "gbrpf32le") if floating else "rgba64le"),
         "-video_size",
         f"{settings.width}x{settings.height}",
         "-framerate",
@@ -272,7 +328,7 @@ def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path)
     if preset.codec in {"libx264", "libx265"}:
         args += [
             "-preset",
-            "slow",
+            speed,
             "-g",
             str(max(1, round(settings.fps.value * preset.gop_seconds))),
         ]
@@ -282,6 +338,26 @@ def command(preset: DeliveryPreset, settings: RenderSettings, destination: Path)
             args += ["-b:v", f"{preset.bitrate_kbps}k"]
     if preset.codec == "libx265":
         args += ["-tag:v", "hvc1", "-x265-params", "log-level=error:pools=4"]
+    if preset.codec in {"h264_videotoolbox", "hevc_videotoolbox"}:
+        if preset.bitrate_kbps is None:
+            raise ChromaError("encoder_input", "硬件视频编码需要明确的目标码率。")
+        hardware_pixel = "p010le" if preset.bit_depth == 10 else "nv12"
+        args[args.index("-vf") + 1] += f",format={hardware_pixel}"
+        # Formal export keeps ordinary encoder buffering. Realtime mode is not
+        # a quality-neutral shortcut; require hardware rather than silent fallback.
+        args += ["-allow_sw", "0", "-g", str(max(1, round(settings.fps.value * preset.gop_seconds))),
+                 "-b:v", f"{preset.bitrate_kbps}k", "-enc_time_base",
+                 f"{settings.fps.denominator}:{settings.fps.numerator}"]
+        if speed == "fast":
+            args += ["-prio_speed", "1"]
+        codes = _colr_values(preset)
+        filter_name = "hevc_metadata" if preset.codec == "hevc_videotoolbox" else "h264_metadata"
+        args += ["-bsf:v", f"{filter_name}=colour_primaries={codes[0]}:transfer_characteristics={codes[1]}:"
+                 f"matrix_coefficients={codes[2]}:video_full_range_flag={int(preset.data_range == 'full')}:"
+                 f"chroma_sample_loc_type={2 if chroma_location == 'topleft' else 0}"]
+        if preset.codec == "hevc_videotoolbox":
+            args += ["-tag:v", "hvc1"]
+        pixel = hardware_pixel
     if preset.codec == "ffv1":
         args += ["-level", "3", "-coder", "1", "-context", "1"]
     args += [
@@ -323,15 +399,16 @@ def encode(
     preset: DeliveryPreset,
     settings: RenderSettings,
     path: Path,
-    frames: Iterable[NDArray[np.float32]],
+    frames: Iterable[NDArray[np.float32] | VideoFrame],
     progress: Callable[[int], None],
     audio_path: Path | None = None,
     on_process: Callable[[subprocess.Popen[Any]], None] | None = None,
+    *, video_input: VideoPixelFormat | None = None, speed: str = "slow",
 ) -> dict[str, Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(path.stem + ".partial" + path.suffix)
     log_path = path.with_suffix(path.suffix + ".ffmpeg.log")
-    args = command(preset, settings, partial)
+    args = command(preset, settings, partial, video_input=video_input, speed=speed) if video_input is not None or speed != "slow" else command(preset, settings, partial)
     if audio_path is not None:
         # Audio is a separate PCM input; video/color filters never see its samples.
         # Match the pre-rendered exact-length WAV, without -shortest dropping video frames.
@@ -352,6 +429,16 @@ def encode(
         try:
             assert process.stdin is not None
             for frame in frames:
+                if isinstance(frame, VideoFrame):
+                    if frame.pixel_format != video_input:
+                        raise ChromaError("encoder_input", "GPU 视频格式与冻结编码配置不符。")
+                    frame.validate(settings.width, settings.height, preset.color.output)
+                    process.stdin.write(frame.data)
+                    count += 1
+                    progress(count)
+                    continue
+                if video_input is not None:
+                    raise ChromaError("encoder_input", "编码器需要已转换的视频像素。")
                 if (
                     frame.shape != (settings.height, settings.width, 4)
                     or not np.isfinite(frame).all()
@@ -391,6 +478,8 @@ def encode(
                     command=args,
                     return_code=return_code,
                 )
+            if preset.codec in {"h264_videotoolbox", "hevc_videotoolbox"}:
+                _stamp_quicktime_color(partial, preset)
             partial.replace(path)
         except Exception as exc:
             if process.stdin and not process.stdin.closed:
@@ -415,6 +504,23 @@ def encode(
                 ) from exc
             raise
     info = probe(path, on_process=on_process) if on_process is not None else probe(path)
+    if preset.codec in {"h264_videotoolbox", "hevc_videotoolbox"}:
+        trace = subprocess.run([
+            "ffmpeg", "-v", "info", "-i", str(path), "-map", "0:v:0", "-frames:v", "1",
+            "-c", "copy", "-bsf:v", "trace_headers", "-f", "null", "-",
+        ], capture_output=True, text=True, timeout=30)
+        expected_codes = dict(zip(("colour_primaries", "transfer_characteristics", "matrix_coefficients"),
+                                  _colr_values(preset), strict=True))
+        expected_codes["video_full_range_flag"] = int(preset.data_range == "full")
+        if _hdr_chroma_location(preset) == "topleft":
+            expected_codes["chroma_sample_loc_type_top_field"] = 2
+        for field, value in expected_codes.items():
+            found = re.findall(rf"\b{field}\s+[^\n]*=\s*(\d+)\s*$", trace.stderr, re.MULTILINE)
+            if trace.returncode or not found or any(int(item) != value for item in found):
+                raise ChromaError("video_color_tags", f"硬件视频的实际码流 {field} 校验失败。")
+        info["native_bitstream_color_verified"] = True
+    if video_input is not None:
+        info["encoder_transport"] = {"pixel_format": video_input, "gpu_display_rendered": True}
     if audio_path is not None:
         audio = next((s for s in info["streams"] if s["codec_type"] == "audio"), None)
         duration = float(audio.get("duration", info["format"].get("duration", 0))) if audio else 0
@@ -578,7 +684,8 @@ def check_probe(
             issues.append(f"chroma location mismatch: expected {location}, got {video.get('chroma_location')}")
     if issue := preset_tag_issue(preset):
         issues.append(issue)
-    expected_codec = {"libx264": "h264", "libx265": "hevc", "prores_ks": "prores", "prores_videotoolbox": "prores"}.get(
+    expected_codec = {"libx264": "h264", "libx265": "hevc", "h264_videotoolbox": "h264",
+                      "hevc_videotoolbox": "hevc", "prores_ks": "prores", "prores_videotoolbox": "prores"}.get(
         preset.codec, preset.codec
     )
     if video.get("codec_name") != expected_codec:
@@ -635,18 +742,7 @@ def check_probe(
     if preset.container in {"mov", "mp4"}:
         # A valid codec VUI alone does not prove Resolve can read container color
         # metadata. Verify physical colr without claiming automatic Gamma interpretation.
-        expected_colr = {
-            "primaries": {"bt2020": 9, "smpte432": 12, "unknown": 2}.get(expected["primaries"], 1),
-            "transfer": {
-                "bt709": 1,
-                "unknown": 2,
-                "bt470m": 4,
-                "iec61966-2-1": 13,
-                "smpte2084": 16,
-                "arib-std-b67": 18,
-            }[expected["transfer"]],
-            "matrix": 0 if expected_matrix == "gbr" else 9 if expected_matrix == "bt2020nc" else 1,
-        }
+        expected_colr = dict(zip(("primaries", "transfer", "matrix"), _colr_values(preset), strict=True))
         container_color = info.get("container_color", [])
         if len(container_color) != 1 or any(
             container_color[0].get(key) != value for key, value in expected_colr.items()
@@ -729,7 +825,8 @@ def check_probe(
         "frame_rate_source": rate_source,
         "verified_frame_rate": str(actual_rate) if actual_rate is not None else None,
         "render_precision": "float32",
-        "encoder_input_precision": "32-bit float RGB" if _hlg_float_input(preset) else "16-bit RGB",
+        "encoder_input_precision": info["encoder_transport"]["pixel_format"] if info.get("encoder_transport")
+        else "32-bit float RGB" if _hlg_float_input(preset) else "16-bit RGB",
         "hlg_extended_range": _hlg_float_input(preset),
         "codec_input_precision": "16-bit YCbCr / P416" if preset.codec == "prores_videotoolbox" else f"{preset.bit_depth}-bit",
         "decoded_storage_precision": f"{actual_depth}-bit",
@@ -754,6 +851,8 @@ def check_probe(
 # Encoder option names and ffprobe profile names are different vocabularies.
 # Unknown requested profiles fail closed rather than certifying from the codec alone.
 PROFILE_NAMES = {
+    "h264_videotoolbox": {"baseline": "Constrained Baseline", "main": "Main", "high": "High"},
+    "hevc_videotoolbox": {"main": "Main", "main10": "Main 10"},
     "prores_videotoolbox": {"4": "4444"},
     "prores_ks": {
         alias: decoded

@@ -5,6 +5,10 @@ import { createInterface } from "node:readline";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  transportVideoFrames,
+  writeVideoPacket,
+} from "../motion/video-transport.mjs";
 
 // Benchmark-only overrides load a frozen compiler/transport from a temporary
 // directory. Production never reads these environment variables.
@@ -50,17 +54,31 @@ try {
   if (state.error) throw new Error(state.error);
   mkdirSync(request.frames, { recursive: true });
   writeFileSync(join(request.frames, "gpu.json"), JSON.stringify(state.probe));
-  const timing = await transportFloatFrames(
-    frame,
-    request.frame_indices,
-    request.frames,
-    async (index) => {
-      process.stdout.write(JSON.stringify({ frame: index }) + "\n");
-      const reply = await lines.next();
-      if (reply.done || JSON.parse(reply.value).accepted !== index)
-        throw new Error("Invalid ACK");
-    },
-  );
+  const accept = async (index) => {
+    const reply = await lines.next();
+    if (reply.done || JSON.parse(reply.value).accepted !== index)
+      throw new Error("Invalid ACK");
+  };
+  const timing =
+    process.argv[2] === "video"
+      ? await transportVideoFrames(
+          frame,
+          request.frame_indices,
+          request.thumbnail,
+          async (index, pixels, thumbnail) => {
+            await writeVideoPacket(index, pixels, thumbnail);
+            await accept(index);
+          },
+        )
+      : await transportFloatFrames(
+          frame,
+          request.frame_indices,
+          request.frames,
+          async (index) => {
+            process.stdout.write(JSON.stringify({ frame: index }) + "\n");
+            await accept(index);
+          },
+        );
   writeFileSync(join(request.frames, "transport.json"), JSON.stringify(timing));
 } catch (error) {
   console.error(error);

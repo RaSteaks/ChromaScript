@@ -214,7 +214,7 @@ def test_worker_master_and_direct_video_use_frozen_native_basis(tmp_path, monkey
     monkeypatch.setattr("chromascript.motion.motion_identity", lambda: {"test":True})
     monkeypatch.setattr("chromascript.motion_worker.motion_identity", lambda: {"test":True})
     job = service.submit_motion_render(saved["record"]["id"], saved["revision_id"], "worker",
-        export_directory=str(tmp_path / "output"), output=MotionOutput(master_bit_depth=depth, video="pq", render_scale=1))["job"]
+        export_directory=str(tmp_path / "output"), output=MotionOutput(master_bit_depth=depth, video="pq", render_scale=1, video_processing="reference", video_encoder="software"))["job"]
     run_motion(service.store.root, job["id"])
     result = service.get_job(job["id"])["job"]
     assert result["status"] == "completed", result["error"]

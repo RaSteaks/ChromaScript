@@ -107,6 +107,9 @@ test("video-only mode preserves master settings and exports without EXR; accessi
     video: "srgb",
     render_scale: 1,
     render_workers: 1,
+    video_processing: "auto",
+    video_encoder: "auto",
+    video_quality: "quality",
   });
   let result: { job: { status: string }; artifacts: { kind: string }[] };
   await expect

@@ -214,6 +214,7 @@ export const MotionWorkbench = memo(function MotionWorkbench({
   const [masterDepth, setMasterDepth] = useState<16 | 32>(32);
   const outputEngine = useRef<MotionSpec["engine"]>("three-float-v1");
   const [outputError, setOutputError] = useState("");
+  const [accelerationOpen, setAccelerationOpen] = useState(false);
   const [outputOptions, setOutputOptions] =
     useState<MotionDeliveryOptions | null>(null);
   const [destinationOptions, setDestinationOptions] =
@@ -527,6 +528,8 @@ export const MotionWorkbench = memo(function MotionWorkbench({
         outputEngine.current = engine;
         if (changedEngine && reply.default.master_bit_depth !== null)
           setMasterDepth(reply.default.master_bit_depth);
+        // First same-engine discovery must fill newly supported defaults while
+        // preserving every explicit local choice on later refreshes.
         setOutput((old) =>
           !changedEngine &&
           reply.videos.some((v) => v.value === old.video) &&
@@ -535,7 +538,15 @@ export const MotionWorkbench = memo(function MotionWorkbench({
             ? old.master_bit_depth !== null ||
               (reply.video_only === true && old.video !== "none")
             : old.master_bit_depth === null)
-            ? old
+            ? {
+                ...old,
+                render_workers:
+                  old.render_workers ?? reply.default.render_workers,
+                video_processing:
+                  old.video_processing ?? reply.default.video_processing,
+                video_encoder: old.video_encoder ?? reply.default.video_encoder,
+                video_quality: old.video_quality ?? reply.default.video_quality,
+              }
             : reply.default,
         );
       })
@@ -768,7 +779,14 @@ export const MotionWorkbench = memo(function MotionWorkbench({
     if (submission.current?.recipe !== recipe)
       submission.current = { recipe, key: crypto.randomUUID() };
     const reply = await run("提交本地渲染", () =>
-      call<{ job: Job }>("submit_motion_render", {
+      call<{
+        job: Job;
+        video_execution?: {
+          processing: "reference" | "gpu";
+          hardware: boolean;
+          fallback_reason?: string | null;
+        } | null;
+      }>("submit_motion_render", {
         ...args,
         idempotency_key: submission.current!.key,
       }),
@@ -783,7 +801,15 @@ export const MotionWorkbench = memo(function MotionWorkbench({
       setDestinationError("");
       setJobPage(0);
       setRefresh((old) => old + 1);
-      setStatus("任务已提交，可继续编辑；渲染使用已保存版本。");
+      let execution =
+        reply.video_execution?.processing === "gpu" ? "GPU 视频处理" : "";
+      if (reply.video_execution?.hardware)
+        execution += (execution ? " · " : "") + "硬件编码";
+      else if (reply.video_execution?.fallback_reason)
+        execution += (execution ? " · " : "") + "软件编码（硬件未通过实测）";
+      setStatus(
+        `任务已提交${execution ? `（${execution}）` : ""}，可继续编辑；渲染使用已保存版本。`,
+      );
       onStepChange("jobs");
     } else {
       setDestinationError("请核对导出目录和上方错误后重试。");
@@ -1321,7 +1347,14 @@ export const MotionWorkbench = memo(function MotionWorkbench({
                         onChange={(event) => {
                           const video = event.currentTarget
                             .value as MotionOutput["video"];
-                          setOutput((old) => ({ ...old, video }));
+                          setOutput((old) => ({
+                            ...old,
+                            video,
+                            ...(outputOptions?.video_encoders &&
+                            video.startsWith("prores-")
+                              ? { video_encoder: "auto" as const }
+                              : {}),
+                          }));
                         }}
                       >
                         {(outputOptions?.videos || [])
@@ -1344,6 +1377,113 @@ export const MotionWorkbench = memo(function MotionWorkbench({
                           ))}
                       </select>
                     </Field>
+                    {output.video !== "none" &&
+                      outputOptions?.video_encoders && (
+                        <details
+                          className="technical-note"
+                          open={accelerationOpen}
+                          onToggle={(event) =>
+                            setAccelerationOpen(event.currentTarget.open)
+                          }
+                        >
+                          <summary>视频加速与编码</summary>
+                          <div className="frame-settings">
+                            {draft.engine === "three-float-v1" &&
+                              output.master_bit_depth === null && (
+                                <Field
+                                  label="视频处理"
+                                  id="motion-video-processing"
+                                  hint="GPU 加速使用相同 ACES 配置；需要沿用原 CPU 处理路径时选择参考模式。"
+                                >
+                                  <select
+                                    id="motion-video-processing"
+                                    value={output.video_processing ?? "auto"}
+                                    disabled={!!pending}
+                                    onChange={(event) => {
+                                      const value = event.currentTarget
+                                        .value as "auto" | "reference";
+                                      setOutput((old) => ({
+                                        ...old,
+                                        video_processing: value,
+                                      }));
+                                    }}
+                                  >
+                                    <option value="auto">
+                                      GPU 加速（自动）
+                                    </option>
+                                    <option value="reference">CPU 参考</option>
+                                  </select>
+                                </Field>
+                              )}
+                            {["srgb", "pq", "hlg"].includes(output.video) && (
+                              <>
+                                <Field
+                                  label="视频编码"
+                                  id="motion-video-encoder"
+                                  hint="自动模式在提交时验证硬件编码；不满足当前规格时使用软件编码。"
+                                >
+                                  <select
+                                    id="motion-video-encoder"
+                                    value={output.video_encoder ?? "auto"}
+                                    disabled={!!pending}
+                                    onChange={(event) => {
+                                      const value = event.currentTarget
+                                        .value as
+                                        "auto" | "software" | "hardware";
+                                      setOutput((old) => ({
+                                        ...old,
+                                        video_encoder: value,
+                                      }));
+                                    }}
+                                  >
+                                    <option value="auto">
+                                      自动（优先硬件）
+                                    </option>
+                                    <option value="software">软件编码</option>
+                                    <option value="hardware">
+                                      硬件编码（必须可用）
+                                    </option>
+                                  </select>
+                                </Field>
+                                <Field
+                                  label="编码优先"
+                                  id="motion-video-quality"
+                                  hint="更快的压缩设置可能改变细节和文件大小，色彩空间与位深保持不变。"
+                                >
+                                  <select
+                                    id="motion-video-quality"
+                                    value={output.video_quality ?? "quality"}
+                                    disabled={!!pending}
+                                    onChange={(event) => {
+                                      const value = event.currentTarget
+                                        .value as
+                                        "quality" | "balanced" | "speed";
+                                      setOutput((old) => ({
+                                        ...old,
+                                        video_quality: value,
+                                      }));
+                                    }}
+                                  >
+                                    <option value="quality">画质优先</option>
+                                    <option value="balanced">均衡</option>
+                                    <option value="speed">速度优先</option>
+                                  </select>
+                                </Field>
+                              </>
+                            )}
+                          </div>
+                          {output.master_bit_depth !== null && (
+                            <p className="muted">
+                              EXR 母版保留原精度处理；编码选项用于附带的视频。
+                            </p>
+                          )}
+                          {output.video.startsWith("prores-") && (
+                            <p className="muted">
+                              ProRes 使用所选格式的专用编码与精度验证。
+                            </p>
+                          )}
+                        </details>
+                      )}
                   </div>
                 </section>
                 <div className="motion-export-destination">

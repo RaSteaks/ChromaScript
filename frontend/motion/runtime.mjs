@@ -2,6 +2,7 @@
 import { build, formatMessages } from "esbuild";
 import { sourceModules } from "./source-modules.mjs";
 import { transportFloatFrames } from "./float-transport.mjs";
+import { transportVideoFrames, writeVideoPacket } from "./video-transport.mjs";
 import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -141,6 +142,7 @@ async function compile(
   renderScale = 1,
   layerIndex = null,
   hdrPreview = true,
+  videoCapture,
 ) {
   const config = {
     width: spec.width,
@@ -155,6 +157,7 @@ async function compile(
     // Final spatial sampling is frozen with output; preview uses a separate raster budget.
     renderScale,
     hdrPreview,
+    videoCapture,
   };
   // Retain isolated ColorManagement for top-level colors and update closures,
   // but share resource IDs across those bundles and the host's Three instance.
@@ -237,6 +240,7 @@ export async function compileFloatDocument(request, mode) {
     request.render_scale,
     null,
     request.hdr_preview,
+    request.video_capture,
   );
   const script = [...layerScripts, result.outputFiles[0].text]
     .join("\n")
@@ -254,7 +258,7 @@ async function main() {
   let input = null;
   let lines = null;
   let request;
-  if (process.argv[2] === "frames") {
+  if (["frames", "video"].includes(process.argv[2])) {
     input = createInterface({ input: process.stdin, crlfDelay: Infinity });
     lines = input[Symbol.asyncIterator]();
     const first = await lines.next();
@@ -274,7 +278,7 @@ async function main() {
     process.stdout.write(JSON.stringify({ html, channel }));
     return;
   }
-  if (process.argv[2] !== "frames")
+  if (!["frames", "video"].includes(process.argv[2]))
     throw new Error("Unknown animation runtime mode");
   // Reuse the installed, pinned Chromium driver, but never screenshot its DOM.
   // Source executes only in a network-disabled opaque data document, not Node.
@@ -318,23 +322,38 @@ async function main() {
       join(request.frames, "gpu.json"),
       JSON.stringify(state.probe),
     );
-    const timing = await transportFloatFrames(
-      page,
-      request.frame_indices || Array.from({ length: spec.frames }, (_, i) => i),
-      request.frames,
-      async (frame) => {
-        process.stdout.write(
-          JSON.stringify({ completed: frame + 1, frame }) + "\n",
-        );
-        // ACK gates disk transport; one capture can overlap EXR/video consumption.
-        const acknowledgement = await lines.next();
-        if (
-          acknowledgement.done ||
-          JSON.parse(acknowledgement.value).accepted !== frame
-        )
-          throw new Error("Float frame consumption was not acknowledged");
-      },
-    );
+    const accept = async (frame) => {
+      const acknowledgement = await lines.next();
+      if (
+        acknowledgement.done ||
+        JSON.parse(acknowledgement.value).accepted !== frame
+      )
+        throw new Error("Frame consumption was not acknowledged");
+    };
+    const timing =
+      process.argv[2] === "video"
+        ? await transportVideoFrames(
+            page,
+            request.frame_indices,
+            request.thumbnail,
+            async (frame, pixels, thumbnail) => {
+              await writeVideoPacket(frame, pixels, thumbnail);
+              await accept(frame);
+            },
+          )
+        : await transportFloatFrames(
+            page,
+            request.frame_indices ||
+              Array.from({ length: spec.frames }, (_, i) => i),
+            request.frames,
+            async (frame) => {
+              process.stdout.write(
+                JSON.stringify({ completed: frame + 1, frame }) + "\n",
+              );
+              // ACK gates disk transport; one capture can overlap EXR/video consumption.
+              await accept(frame);
+            },
+          );
     writeFileSync(
       join(request.frames, "transport.json"),
       JSON.stringify(timing),

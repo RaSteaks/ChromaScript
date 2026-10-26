@@ -42,7 +42,7 @@ def make_job(tmp_path, workers, depth=32, video="srgb"):
     spec = MotionSpec(code=SOURCE, source_color_space="ACEScg", width=32, height=18, frames=5,
                       fps={"numerator": 30000, "denominator": 1001})
     saved = service.create_motion_scene(project, spec=spec)
-    output = MotionOutput(master_bit_depth=depth, video=video, render_scale=2, render_workers=workers)
+    output = MotionOutput(master_bit_depth=depth, video=video, render_scale=2, render_workers=workers, video_processing="reference", video_encoder="software")
     job = service.submit_motion_render(saved["record"]["id"], saved["revision_id"], "parallel",
         export_directory=str(tmp_path / "delivery"), output=output)["job"]
     return service, job, motion_bundle(job, service.store.get("snapshot", job["id"]))

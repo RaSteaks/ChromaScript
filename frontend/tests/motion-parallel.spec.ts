@@ -44,7 +44,7 @@ test("parallel delivery settings preserve drafts, budgets and keyboard; accessib
   await expect(workers).toHaveValue("4");
   await expect(
     page.getByRole("region", { name: "渲染磁盘空间预估" }),
-  ).toContainText("每路最多保留一帧");
+  ).toContainText("不写逐帧临时文件");
   await page.getByRole("button", { name: "刷新作品列表", exact: true }).click();
   await expect(workers).toHaveValue("4");
   await page.locator(".motion-export").screenshot({
