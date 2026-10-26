@@ -15,7 +15,7 @@ def runtime_identity() -> dict:
     # Freeze both master generation and delivery processing: chroma sampling,
     # alpha flattening and encoder changes must not resume under an old identity.
     # UI and transport-only edits still leave numerical jobs unchanged.
-    for name in ("gpu.py", "color.py", "images.py", "models.py", "encoding.py", "worker.py"):
+    for name in ("gpu.py", "color.py", "images.py", "models.py", "encoding.py", "worker.py", "frame_manifest.py"):
         digest.update(name.encode())
         digest.update(Path(__file__).with_name(name).read_bytes())
     return {

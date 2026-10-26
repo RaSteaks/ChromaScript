@@ -74,16 +74,16 @@ def estimate_storage(
                 embedded_audio = math.ceil(128_000 * duration / 8)
                 unknown.append("视频内 AAC 音轨按 128 kb/s 默认目标估算，尚未实测")
     video += embedded_audio
-    # Float transport is one supersampled frame. SDR currently retains its
+    # Float transport is one supersampled frame per producer. SDR retains its
     # screenshot sequence, whose compressed size is unknown without sampling.
-    intermediate = pixels * 16 * output.render_scale**2 if floating else pixels * 4 * output.render_scale**2 * count
+    intermediate = pixels * 16 * output.render_scale**2 * min(output.render_workers, count) if floating else pixels * 4 * output.render_scale**2 * count
     auxiliary = measured.get("source_metadata_bytes", 0)
     final = master + video + audio_bytes + auxiliary
-    # EXR writing and video encoding are separate phases. Rename publication
-    # does not create a second movie. CPU/GPU buffers are not disk allocations.
+    # Float EXR and video now stream together: account for their simultaneous
+    # files plus bounded raw transports. Shared CPU/GPU buffers are not disk files.
     render_peak = master + audio_bytes + auxiliary + intermediate
     encode_peak = final + (intermediate if not master_frame else 0)
-    peak = max(render_peak, encode_peak)
+    peak = final + intermediate if floating else max(render_peak, encode_peak)
     same_volume = volume.stat().st_dev == store.root.stat().st_dev
     workspace_required = len(canonical({
         "settings": settings.model_dump(), "output": output.model_dump(), "measurements": measured,

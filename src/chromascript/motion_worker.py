@@ -17,9 +17,10 @@ import numpy as np
 
 from .audio import mix_audio
 from .color import color_info, render_output, transform
-from .encoding import check_image_metadata, check_probe, encode
+from .encoding import check_probe, encode
 from .errors import ChromaError
 from .exports import DESTINATION_LAYOUT, RenderBundle, bundle_name, motion_bundle, publish_bundle
+from .frame_manifest import FrameManifest
 from .images import file_hash, read_image, resize_srgb, write_image
 from .models import Artifact
 from .motion import (
@@ -30,6 +31,7 @@ from .motion import (
     resolve_motion_output,
 )
 from .motion_color import decode_float_frame
+from .motion_processing import prepare_float_frame
 from .motion_render import iter_float_frames, render_float_frames
 from .motion_sources import write_sources
 from .presets import builtins
@@ -178,15 +180,53 @@ def run_motion(root: Path, job_id: str) -> None:
 
         master_depth = output.master_bit_depth
         work = bundle.work if bundle is not None else store.file(f"jobs/{job_id}/motion")
+        (work / "transport.json").unlink(missing_ok=True)
+        stage_seconds = {"float_decode": 0.0, "exr_write_and_hash": 0.0, "exr_verify": 0.0,
+                         "manifest_record": 0.0}
         thumbnail = directory / "thumbnail.png"
+        video_preset = motion_video_preset(output.video) if output.video != "none" else None
+        video = directory / f"animation-{output.video}.{video_preset.container}" if video_preset else None
+        # Encode beside the resumable transport, then publish on the same volume.
+        encoded_video = work / video.name if video is not None and bundle is not None else video
+        info = None
         paths: list[Path] = []
         gpu: dict[str, Any] = {}
         masters = directory / "masters"
         manifest_file = masters / "sequence.json"
+
+        def parallel_pixels(frame_indices: list[int], master_directory: Path | None = None,
+                            missing_indices: list[int] | None = None,
+                            expected: dict[str, Any] | None = None) -> Generator[np.ndarray, None, None]:
+            from .motion_parallel import iter_parallel_frames
+
+            with closing(iter_parallel_frames(
+                spec, output, work, frame_indices, config_hash=snapshot["color_configuration"]["sha256"],
+                masters=master_directory, missing=missing_indices, expected_gpu=expected, bundle=bundle,
+                thumbnail=thumbnail if master_directory is None else None,
+                cancelled=lambda: store.get("job", job_id)["status"] == "cancelled",
+            )) as prepared:
+                for frame in prepared:
+                    if frame.record is not None:
+                        # Only this coordinator appends the recovery journal; workers
+                        # never race a full manifest or acknowledge an unrecorded frame.
+                        manifest.record(frame.index, frame.record)
+                    for stage, seconds in frame.seconds.items():
+                        stage_seconds[stage] = stage_seconds.get(stage, 0) + seconds
+                    progress("encoding" if video_preset else "rendering",
+                             (0.95 if video_preset else 0.7) * (frame.index + 1) / spec.frames,
+                             frame.index + 1)
+                    yield frame.pixels
+            gpu.update(json.loads((work / "gpu.json").read_text()))
+
         if master_depth is not None:
             masters.mkdir(exist_ok=True)
-            old = json.loads(manifest_file.read_text()) if manifest_file.exists() else {}
-            entries = old.get("frames", {})
+            master_preset = builtins()[f"exr-{output.master_bit_depth}-zip"]
+            manifest = FrameManifest(manifest_file, {
+                "settings": settings.model_dump(),
+                "color_configuration": snapshot["color_configuration"],
+                "preset": master_preset.model_dump(),
+            })
+            entries = manifest.frames
             # Each cached master is tied to the frozen source/runtime/configuration.
             # Hash failures invalidate only that frame; output retries retain good masters.
             todo = []
@@ -198,70 +238,85 @@ def run_motion(root: Path, job_id: str) -> None:
                 # A fresh GPU probe cannot prove which backend produced existing
                 # masters. Missing recovery identity must never certify a mixed cache.
                 raise ChromaError("gpu_changed", "母版缓存缺少已验证的 GPU 身份，请重新提交任务。")
-            preset = builtins()[f"exr-{output.master_bit_depth}-zip"]
 
-            def accept_frame(index: int, raw: Path) -> None:
+            def save_master(index: int, raw: Path) -> np.ndarray:
                 if bundle is not None:
                     bundle.check_volume()
                 # Persist actual GPU identity before the first reusable EXR. This also
                 # covers interruption after the last frame but before browser shutdown.
                 if not (work / "gpu-verified.json").exists():
                     atomic_json(work / "gpu-verified.json", json.loads((work / "gpu.json").read_text()))
-                pixels = decode_float_frame(raw.read_bytes(), spec.width, spec.height, output.render_scale, spec.source_color_space)
-                target = masters / f"{index:08d}.exr"
-                result = write_image(
-                    target,
-                    pixels,
-                    depth=master_depth,
-                    config_hash=snapshot["color_configuration"]["sha256"],
-                    fps=(spec.fps.numerator, spec.fps.denominator),
-                    frame_index=index,
-                    disk_reserve_bytes=0,
-                )
-                decoded, metadata = read_image(target)
-                expected = (
-                    pixels
-                    if output.master_bit_depth == 32
-                    else pixels.astype(np.float16).astype(np.float32)
-                )
-                issues = check_image_metadata(metadata, preset)
-                if issues or not np.array_equal(decoded, expected):
-                    raise ChromaError(
-                        "verification_failed", "EXR 实际存储或像素回读不符。", issues=issues
-                    )
-                entries[str(index)] = {
-                    **result,
-                    "metadata": metadata,
-                    "minimum": decoded.min(axis=(0, 1)).tolist(),
-                    "maximum": decoded.max(axis=(0, 1)).tolist(),
-                    "high_rgb_values": int((decoded[..., :3] > 1).sum()),
-                    "negative_rgb_values": int((decoded[..., :3] < 0).sum()),
-                    "round_trip_max_error": float(np.max(np.abs(decoded - pixels))),
-                    "passed": True,
-                }
-                atomic_json(
-                    manifest_file,
-                    {
-                        "frames": entries,
-                        "settings": settings.model_dump(),
-                        "color_configuration": snapshot["color_configuration"],
-                        "preset": preset.model_dump(),
-                    },
-                )
-                progress("rendering", 0.7 * len(entries) / spec.frames, len(entries))
+                prepared = prepare_float_frame(index, raw, spec, output,
+                    snapshot["color_configuration"]["sha256"], masters / f"{index:08d}.exr")
+                for stage, seconds in prepared.seconds.items():
+                    stage_seconds[stage] += seconds
+                stage_start = time.monotonic()
+                assert prepared.record is not None
+                manifest.record(index, prepared.record)
+                stage_seconds["manifest_record"] += time.monotonic() - stage_start
+                progress("encoding" if video_preset else "rendering",
+                         (0.95 if video_preset else 0.7) * len(entries) / spec.frames, len(entries))
+                return prepared.pixels
+
+            def accept_frame(index: int, raw: Path) -> None:
+                save_master(index, raw)
 
             progress("rendering", 0)
-            if todo or not (work / "gpu-verified.json").is_file():
-                expected_gpu = (
-                    json.loads((work / "gpu-verified.json").read_text())
-                    if (work / "gpu-verified.json").is_file()
-                    else None
-                )
+            expected_gpu = (
+                json.loads((work / "gpu-verified.json").read_text())
+                if (work / "gpu-verified.json").is_file() else None
+            )
+            paths = [masters / f"{i:08d}.exr" for i in range(spec.frames)]
+            if output.render_workers > 1 and video_preset is not None:
+                assert encoded_video is not None
+                with closing(parallel_pixels(list(range(spec.frames)), masters, todo, expected_gpu)) as frames:
+                    info = encode(video_preset, settings, encoded_video, frames,
+                                  lambda count: progress("encoding", 0.95 * count / spec.frames, count),
+                                  audio_path=audio_path if audio_info is not None else None)
+            elif output.render_workers > 1 and todo:
+                with closing(parallel_pixels(todo, masters, todo, expected_gpu)) as frames:
+                    for _ in frames:
+                        pass  # Master pixels have already been written and verified.
+            elif video_preset is not None:
+                assert encoded_video is not None
+
+                def master_video_frames() -> Generator[np.ndarray, None, None]:
+                    assert video_preset is not None
+                    if not todo and expected_gpu is not None:
+                        gpu.update(expected_gpu)
+                        for path in paths:
+                            yield render_output(read_image(path)[0], video_preset.color.output, False)
+                        return
+                    missing = set(todo)
+                    with closing(iter_float_frames(
+                        spec, work, todo, expected_gpu=expected_gpu, render_scale=output.render_scale,
+                    )) as frames:
+                        for index, path in enumerate(paths):
+                            if index in missing:
+                                frame, raw = next(frames)
+                                pixels = save_master(frame, raw)
+                            else:
+                                pixels = read_image(path)[0]
+                            # Feed the actual verified storage pixels, including Half
+                            # rounding. Reusing this readback avoids a second EXR decode
+                            # without changing the historical master-to-video result.
+                            yield render_output(pixels, video_preset.color.output, False)
+                        # Resume the suspended producer once more to ACK its last raw
+                        # file and check process completion before certifying the GPU.
+                        next(frames, None)
+                    gpu.update(json.loads((work / "gpu.json").read_text()))
+                    atomic_json(work / "gpu-verified.json", gpu)
+
+                with closing(master_video_frames()) as frames:
+                    info = encode(video_preset, settings, encoded_video, frames,
+                                  lambda count: progress("encoding", 0.95 * count / spec.frames, count),
+                                  audio_path=audio_path if audio_info is not None else None)
+            elif todo or expected_gpu is None:
                 gpu = render_float_frames(spec, work, todo, accept_frame, expected_gpu=expected_gpu, render_scale=output.render_scale)
                 atomic_json(work / "gpu-verified.json", gpu)
             else:
-                gpu = json.loads((work / "gpu-verified.json").read_text())
-            paths = [masters / f"{i:08d}.exr" for i in range(spec.frames)]
+                gpu = expected_gpu
+            manifest.finish()
             # Publish representative master artifacts for original-pixel inspection on MCP,
             # CLI and HTTP; the sequence manifest enumerates all frames and hashes.
             for index in sorted({0, spec.frames // 2, spec.frames - 1}):
@@ -310,22 +365,17 @@ def run_motion(root: Path, job_id: str) -> None:
             "source_color_contract": snapshot.get("source_color_review", {"status": "unreviewed"}),
             "scene_reference_basis": "declared source contract; see source_color_contract",
             "sampling": {"render_scale": output.render_scale, "spatial_samples": output.render_scale**2, "temporal_samples": 1},
+            "render_workers": output.render_workers,
         }
-        video = None
-        info = None
         declaration_path = None
-        if output.video != "none":
-            preset = motion_video_preset(output.video)
-            # File extension and MIME follow the frozen encoding, including MOV.
-            video = directory / f"animation-{output.video}.{preset.container}"
-            # Keep encoder logs/partials outside the published payload. The final
-            # video moves on the same export volume, without another data copy.
-            encoded_video = work / video.name if bundle is not None else video
+        if video_preset is not None:
+            assert video is not None and encoded_video is not None
+            preset = video_preset
 
             def video_frames() -> Generator[np.ndarray, None, None]:
-                if master_depth is not None:
-                    for path in paths:
-                        yield render_output(read_image(path)[0], preset.color.output, False)
+                if output.render_workers > 1:
+                    with closing(parallel_pixels(list(range(spec.frames)))) as frames:
+                        yield from frames
                     return
                 # One float frame is consumed by the encoder before requesting the
                 # next. No EXR, whole-sequence cache, or second GPU render is involved.
@@ -350,18 +400,16 @@ def run_motion(root: Path, job_id: str) -> None:
                         yield render_output(pixels, preset.color.output, False)
                     gpu.update(json.loads((work / "gpu.json").read_text()))
 
-            progress("encoding", 0 if master_depth is None else 0.75, 0 if master_depth is None else None)
             # Explicit close tears down the browser/transport even if FFmpeg fails
             # while the producer is suspended at a yielded frame.
-            with closing(video_frames()) as frames:
-                info = encode(
-                    preset,
-                    settings,
-                    encoded_video,
-                    frames,
-                    lambda count: progress("encoding", 0.95 * count / spec.frames if master_depth is None else 0.75 + 0.2 * count / spec.frames, count),
-                    audio_path=audio_path if audio_info is not None else None,
-                )
+            if info is None:
+                progress("encoding", 0, 0)
+                with closing(video_frames()) as frames:
+                    info = encode(
+                        preset, settings, encoded_video, frames,
+                        lambda count: progress("encoding", 0.95 * count / spec.frames, count),
+                        audio_path=audio_path if audio_info is not None else None,
+                    )
             video_verification = check_probe(info, preset, settings)
             if not video_verification["passed"]:
                 raise ChromaError(
@@ -410,6 +458,13 @@ def run_motion(root: Path, job_id: str) -> None:
                     "video_sha256": file_hash(video) if video else None,
                     "fps": spec.fps.model_dump(),
                     "color_configuration": snapshot["color_configuration"],
+                    "performance": {
+                        "elapsed_before_publication_seconds": time.monotonic() - start,
+                        "master_stage_seconds": stage_seconds,
+                        "float_transport": json.loads((work / "transport.json").read_text())
+                        if (work / "transport.json").is_file() else None,
+                        "transport_stages_overlap": True,
+                    },
                     "notes": [
                         f"RGBA32F {spec.source_color_space} readback converted to ACEScg using pinned OCIO; Alpha bypasses the transform",
                         "No EXR masters written; float frames stream directly to the video encoder" if master_depth is None else "EXR masters contain no display transform; sRGB previews use the ACES SDR view",

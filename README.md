@@ -53,6 +53,12 @@ cd /absolute/path/ChromaScript
 
 预览刷新上限不代表保证实时帧率。渲染尺寸、交付帧率与采样设置保持独立；预览不会降低母版精度。自动 HDR 需浏览器与显示设备支持实际 HEVC/PQ 解码，否则回退 sRGB；也可手动选择 sRGB SDR。HDR 启动需要缓冲，自动化检查不证明实体屏幕的亮度表现。
 
+正式浮点交付使用最多 4 MiB 的传输块，复用浏览器 float32 读回缓冲，并在 Python 消费当前帧时提前采集下一帧。下一帧只留在浏览器内存中，每路在导出盘最多保留一帧 `.f32`；采样、色彩变换、Alpha 和交付精度不变。EXR 母版附带视频时，验证后的 EXR 像素直接进入编码器，避免全部母版完成后再次读取整段序列；Half 母版仍按其实际存储像素生成视频。WGSL 缓存与浮点母版逐帧追加恢复记录，完成时原子生成完整清单，减少长序列的重复写入。
+
+浮点动画交付新增“渲染并发”1／2／4 路（默认 1 路），对应 CLI/MCP 的 `output.render_workers`。独立进程并行生成和处理不同帧，按绝对帧号和有理数时间计算，通过每路一个固定大小的共享内存槽按序送入同一个编码器；不拆分视频码流，不改变编码质量、Alpha 或采样。仅视频、EXR 母版及两者同时输出均支持；React SDR 保持单路。提交会按并发数量检查内存和临时磁盘需求，取消/失败会清理整组进程和共享内存。并行依赖源码遵守现有逐帧确定性约定；共享 GPU 的实际收益需测量。修改并发只影响新提交任务，不会改变运行中的任务。
+
+任务总耗时包含最终验证与发布。浮点交付的 `verification.json.performance` 另记录母版处理和传输阶段耗时；浏览器采集与消费会重叠，分阶段时间不能直接相加。性能依赖场景、尺寸、采样、编码格式和导出磁盘，不承诺固定加速倍数。
+
 ## 色彩与交付
 
 “动画代码”使用 `Three.js RGBA32F → 浮点读取 → OCIO → ACEScg EXR`，母版不烘焙显示变换。SDR 预览使用 ACES 2.0 sRGB 变换；HDR 预览与视频使用 ACES 1000-nit PQ/HLG 输出变换，可选 HEVC Main10 或 Apple ProRes 422 HQ（MOV、10-bit 4:2:2）。GPU 会实际测试负值、超过 1 的高光和 float32 读回；无法满足时明确失败。同时支持 `remotion-sdr-v1`：React/DOM/SVG/ThreeCanvas → sRGB 截图 → SDR 视频。历史未标记引擎的动画按 SDR 打开，源码与修订记录不变。
@@ -74,7 +80,7 @@ cd /absolute/path/ChromaScript
 
 线性黑底合成后只进行 ACEScg → ACEScct 编码，不烘焙显示变换，不带 Alpha。整数存储前拒绝超出 0–1 的 Log 码值。AP1/D60 与 ACEScct 通过 MOV 声明和 `color-encoding.json` 记录；标准 colr 为 2/2/1，BT.709 仅表示 YCbCr 打包矩阵。Resolve 请手动指定 ACEScct 输入和 Video 数据范围。这是制作中间片，不是标准 ACES2065-1 归档容器；报告不会把声明验证说成自动颜色识别或 Resolve 导入认证。
 
-磁盘面板区分“预计成品体积”和“预计磁盘峰值占用”，不增加 20%、30% 或 EXR 10% 余量。快速规格估算不创建文件；“采样估算”按当前完整草稿、正式尺寸和采样倍率处理最多 12 帧，使用真实 ZIP 文件和 ProRes 包的平均大小外推，不使用最大帧放大。未采样的编码部分及未知开销明确注明；估算不是体积上限。临时原始帧只保留一帧，发布重命名不计第二份视频。
+磁盘面板区分“预计成品体积”和“预计磁盘峰值占用”，不增加 20%、30% 或 EXR 10% 余量。快速规格估算不创建文件；“采样估算”按当前完整草稿、正式尺寸和采样倍率处理最多 12 帧，使用真实 ZIP 文件和 ProRes 包的平均大小外推，不使用最大帧放大。未采样的编码部分及未知开销明确注明；估算不是体积上限。采样估算只保留一帧临时原始数据；正式导出每路最多一帧，发布重命名不计第二份视频。
 
 CLI/MCP 与网页共享 `start_motion_render_estimate`、`get_motion_render_estimate`、`cancel_motion_render_estimate`。提交可传 `storage_estimate_id`，采用匹配源码、颜色、时间、输出和运行环境的采样结果验盘。内容改变即失效，名称改变不失效；刷新只重读磁盘和音轨。采样可取消、不保存草稿、不创建正式渲染任务，超时或中断后清理临时样片；正式任务仍保留自己的恢复规则。
 
@@ -135,7 +141,7 @@ Agent 通过 `get_motion_capabilities.color_authoring` 发现保色升级操作�
 
 MCP/CLI 使用 `get_motion_delivery_options` 发现输出，`render_motion_frame` 检查未保存草稿的 sRGB 图片和原始浮点范围，`submit_motion_render` 的 `output` 为 `{"master_bit_depth":32,"video":"pq"}`（video 可选 none/pq/hlg）。浮点动画直接在导出盘的任务临时目录生成逐帧 EXR、源码、快照、缩略图、可选视频与验证报告，验证后原地发布；workspace 不再复制母版。失败或中断保留已验证帧，重试校验帧哈希和冻结的 GPU/运行环境/色彩配置。`inspect_frame` / `sample_pixels` 可检查导出目录中的原始母版。
 
-新增“仅视频”模式使用 `output={"master_bit_depth":null,"video":"pq","render_scale":1}`（视频也可选 `hlg` / `srgb`），通过同一 `submit_motion_render` / `estimate_motion_render` 操作在界面、CLI 和 MCP 使用。每帧浮点读取、线性采样/Alpha 处理与 ACES 输出变换后直接送入 FFmpeg，不写 EXR，也不二次渲染。导出盘仅保留一帧临时 `.f32` 传输文件，消费后删除；成果仍附源码、规格、缩略图和验证报告。默认母版模式保持不变。仅视频不能同时设置 `video="none"`，中断后的显式重试从头开始；已原子发布的成果可直接恢复完成状态。
+新增“仅视频”模式使用 `output={"master_bit_depth":null,"video":"pq","render_scale":1}`（视频也可选 `hlg` / `srgb`），通过同一 `submit_motion_render` / `estimate_motion_render` 操作在界面、CLI 和 MCP 使用。每帧浮点读取、线性采样/Alpha 处理与 ACES 输出变换后直接送入 FFmpeg，不写 EXR，也不二次渲染。每路在导出盘仅保留一帧临时 `.f32` 传输文件，消费后删除；成果仍附源码、规格、缩略图和验证报告。默认母版模式保持不变。仅视频不能同时设置 `video="none"`，中断后的显式重试从头开始；已原子发布的成果可直接恢复完成状态。
 
 仅视频空间预算包含单帧中间数据、音轨、辅助文件以及压缩视频估算；规划码率为 `max(8 Mbps, 宽×高×fps×0.2)`，按精确有理帧率算时长，不追加百分比余量；未测量的封装开销会单独注明。规划码率**不是编码器限制**，原有 CRF/质量不变，不能保证实际文件大小；运行时持续检查磁盘余量。4K UHD 60fps、10 分钟、1×1 无音轨的估算约 7.08 GiB，而不是按整段未压缩 EXR 计算。
 
@@ -490,6 +496,16 @@ CHROMASCRIPT_URL=http://127.0.0.1:8875 npm --prefix frontend run test:e2e -- tes
 ```
 
 截图、日志和报告保存在 `reports/`、`frontend/test-results/` 与 `frontend/playwright-report/`。动画离线导出所需的浏览器运行时与网页测试引擎是不同路径；执行测试前检查用例是否会触发离线导出。
+
+正式浮点导出可使用只启动 headless WebKit 的测试驱动，覆盖最终采样尺寸、Node/Python ACK、真实 EXR 和视频完整解码，不启动 Chrome：
+
+```sh
+.venv/bin/python -m pytest tests/test_export_pipeline.py tests/test_frame_manifest.py -q
+# BASELINE_COMMIT 指向优化前修订；输出目录必须尚不存在。
+.venv/bin/python scripts/benchmark_exports.py --baseline-ref BASELINE_COMMIT --output /tmp/chromascript-export-benchmark
+```
+
+基准交替执行修改前后版本，比较仅母版、仅视频及母版附带视频的完整任务耗时，并逐帧核对 EXR 像素和视频解码校验和。默认使用合成场景、640×360、2×2 采样和 30000/1001 fps；可通过参数调整。WebKit 结果不等于生产 Chromium 驱动或真实作品的速度认证。
 
 
 ### 声音工作区与 Agent 试听协作

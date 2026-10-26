@@ -54,6 +54,8 @@ class MotionOutput(Model):
     ] = "none"
     # Spatial supersampling is independent of preview resolution and source precision.
     render_scale: Literal[1, 2, 4] = 2
+    # Independent frame producers; the final video keeps one ordered encoder.
+    render_workers: Literal[1, 2, 4] = Field(default=1, description="Independent float frame producers; 1, 2 or 4. Frames retain absolute time and feed one ordered video encoder. React SDR supports 1 only.")
 
     @field_validator("render_scale", mode="before")
     @classmethod
@@ -61,6 +63,13 @@ class MotionOutput(Model):
         # Literal equality alone accepts True and 2.0; the public contract is integer-only.
         if type(value) is not int:
             raise ValueError("render_scale must be the integer 1, 2 or 4")
+        return value
+
+    @field_validator("render_workers", mode="before")
+    @classmethod
+    def integer_workers(cls, value: Any) -> Any:
+        if type(value) is not int:
+            raise ValueError("render_workers must be the integer 1, 2 or 4")
         return value
 
 
@@ -116,6 +125,8 @@ def resolve_motion_output(engine: MotionEngine, output: MotionOutput | None) -> 
         )
     if floating and output.master_bit_depth is None and output.video == "none":
         raise ChromaError("motion_output", "仅视频模式需要选择视频格式；或选择 EXR 母版精度。")
+    if not floating and output.render_workers != 1:
+        raise ChromaError("motion_output", "并行帧渲染目前支持 Three.js 浮点动画；React SDR 请使用单路。")
     return output
 
 
@@ -373,6 +384,7 @@ def motion_identity() -> dict[str, Any]:
         FRONTEND / "motion" / "preview.tsx",
         Path(__file__).with_name("motion_sdr_worker.py"),
         FRONTEND / "motion" / "float-runtime.mjs",
+        FRONTEND / "motion" / "float-transport.mjs",
         FRONTEND / "motion" / "hdr-preview.mjs",
         FRONTEND / "motion" / "hdr-capture.mjs",
         FRONTEND / "motion" / "source-color.mjs",
@@ -388,6 +400,9 @@ def motion_identity() -> dict[str, Any]:
         Path(__file__),
         Path(__file__).with_name("motion_worker.py"),
         Path(__file__).with_name("motion_render.py"),
+        Path(__file__).with_name("motion_processing.py"),
+        Path(__file__).with_name("motion_parallel.py"),
+        Path(__file__).with_name("frame_manifest.py"),
         Path(__file__).with_name("artifacts.py"),
         Path(__file__).with_name("exports.py"),
         Path(__file__).with_name("encoding.py"),
@@ -563,6 +578,7 @@ class MotionOperations:
             "master_archive": "zip-stream" if floating else None,
             "preview": "sRGB SDR; independent of delivery",
             "render_scales": [1, 2, 4],
+            "render_workers": [1, 2, 4] if floating else [1],
             "direct_to_destination": True,
         }
 
@@ -891,12 +907,18 @@ class MotionOperations:
         pixels = spec.width * spec.height
         # Budget all simultaneous CPU copies plus GPU targets before allocating. The
         # browser additionally checks its actual texture/renderbuffer/viewport limits.
-        working_bytes = pixels * (output.render_scale ** 2 * 96 + 96) + spec.frames * 1024
+        working_bytes = pixels * (output.render_scale ** 2 * 96 + 96)
         if spec.preserved_layers:
             # Layers reuse one scratch RGBA32F target, not one full raster per layer.
             working_bytes += pixels * output.render_scale**2 * 16
+        active_workers = min(output.render_workers, spec.frames)
+        working_bytes *= active_workers
+        if output.render_workers > 1:
+            # One final-resolution float32 shared slot per producer bounds reordering.
+            working_bytes += pixels * 16 * active_workers
+        working_bytes += spec.frames * 1024
         if working_bytes > psutil.virtual_memory().available * 0.7:
-            raise ChromaError("motion_memory", "当前可用内存不足；请降低超采样倍率、尺寸或释放内存。", required_bytes=working_bytes)
+            raise ChromaError("motion_memory", "当前可用内存不足；请减少渲染并发、超采样倍率、尺寸或释放内存。", required_bytes=working_bytes)
         estimate = self.estimate_motion_render(
             spec.settings(), spec.engine, output, str(destination), record["project_id"]
         )

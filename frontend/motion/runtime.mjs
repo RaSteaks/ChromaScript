@@ -1,16 +1,10 @@
 // Source is compiled as browser code only. Never import/evaluate it in Node.
 import { build, formatMessages } from "esbuild";
 import { sourceModules } from "./source-modules.mjs";
+import { transportFloatFrames } from "./float-transport.mjs";
 import { randomUUID } from "node:crypto";
-import {
-  readFileSync,
-  writeFileSync,
-  mkdirSync,
-  openSync,
-  writeSync,
-  closeSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
 
@@ -216,6 +210,44 @@ async function compile(
   });
 }
 
+// Compilation has no browser side effects. The same final-raster document can be
+// verified in headless WebKit without starting the production Chromium driver.
+export async function compileFloatDocument(request, mode) {
+  const spec = request.spec || request;
+  const channel = randomUUID();
+  const layerScripts = [];
+  for (const [index, layer] of (spec.preserved_layers || []).entries()) {
+    const compiled = await compile(
+      { ...spec, ...layer, preserved_layers: [] },
+      "layer",
+      channel,
+      { working_space: request.display.layers[index] },
+      request.max_dimension,
+      request.render_scale,
+      index,
+    );
+    layerScripts.push(compiled.outputFiles[0].text);
+  }
+  const result = await compile(
+    spec,
+    mode,
+    channel,
+    request.display,
+    request.max_dimension,
+    request.render_scale,
+    null,
+    request.hdr_preview,
+  );
+  const script = [...layerScripts, result.outputFiles[0].text]
+    .join("\n")
+    .replace(/<\/script/gi, "<\\/script");
+  // Match the host color scheme so Chromium does not force an opaque white iframe
+  // backdrop behind a correctly transparent float-scene canvas.
+  // The sandbox keeps its own landmark/heading when the expanded viewer makes the host inert.
+  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>动画预览</title><meta http-equiv="Content-Security-Policy" content="${policy}"><style>html,body,#root{color-scheme:dark;margin:0;width:100%;height:100%;overflow:hidden;background:transparent}</style></head><body><main aria-label="动画画面" style="width:100%;height:100%"><h1 style="position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap">动画预览</h1><div id="root"></div></main><script>${script}</script></body></html>`;
+  return { html, channel };
+}
+
 async function main() {
   // Frame mode keeps stdin open for consumption acknowledgements. Preview still
   // accepts the original JSON-to-EOF protocol used by transient compilation.
@@ -234,37 +266,10 @@ async function main() {
     request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   }
   const spec = request.spec || request;
-  const channel = randomUUID();
-  const layerScripts = [];
-  for (const [index, layer] of (spec.preserved_layers || []).entries()) {
-    const compiled = await compile(
-      { ...spec, ...layer, preserved_layers: [] },
-      "layer",
-      channel,
-      { working_space: request.display.layers[index] },
-      request.max_dimension,
-      request.render_scale,
-      index,
-    );
-    layerScripts.push(compiled.outputFiles[0].text);
-  }
-  const result = await compile(
-    spec,
+  const { html, channel } = await compileFloatDocument(
+    request,
     process.argv[2],
-    channel,
-    request.display,
-    request.max_dimension,
-    request.render_scale,
-    null,
-    request.hdr_preview,
   );
-  const script = [...layerScripts, result.outputFiles[0].text]
-    .join("\n")
-    .replace(/<\/script/gi, "<\\/script");
-  // Match the host color scheme so Chromium does not force an opaque white iframe
-  // backdrop behind a correctly transparent float-scene canvas.
-  // The sandbox keeps its own landmark/heading when the expanded viewer makes the host inert.
-  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>动画预览</title><meta http-equiv="Content-Security-Policy" content="${policy}"><style>html,body,#root{color-scheme:dark;margin:0;width:100%;height:100%;overflow:hidden;background:transparent}</style></head><body><main aria-label="动画画面" style="width:100%;height:100%"><h1 style="position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap">动画预览</h1><div id="root"></div></main><script>${script}</script></body></html>`;
   if (process.argv[2] === "preview") {
     process.stdout.write(JSON.stringify({ html, channel }));
     return;
@@ -313,64 +318,55 @@ async function main() {
       join(request.frames, "gpu.json"),
       JSON.stringify(state.probe),
     );
-    // Bounded binary chunks avoid JSON-number arrays and whole-sequence RAM use.
-    for (const frame of request.frame_indices ||
-      Array.from({ length: spec.frames }, (_, i) => i)) {
-      const capture = await page.evaluate(
-        (f) => window.__chromaFloat.capture(f),
-        frame,
-      );
-      if (capture.bytes !== capture.width * capture.height * 16)
-        throw new Error("Float frame dimensions mismatch");
-      const path = join(request.frames, `frame-${frame}.f32`);
-      const fd = openSync(path, "w");
-      try {
-        for (let offset = 0; offset < capture.bytes; offset += 1048576) {
-          const data = await page.evaluate(
-            (o) => window.__chromaFloat.readChunk(o, 1048576),
-            offset,
-          );
-          writeSync(fd, Buffer.from(data, "base64"));
-        }
-      } finally {
-        closeSync(fd);
-      }
-      process.stdout.write(
-        JSON.stringify({ completed: frame + 1, frame }) + "\n",
-      );
-      // Python acknowledges after EXR verification, direct video encoding or
-      // preview consumption and transport removal. Never accumulate raw frames.
-      const acknowledgement = await lines.next();
-      if (
-        acknowledgement.done ||
-        JSON.parse(acknowledgement.value).accepted !== frame
-      )
-        throw new Error("Float frame consumption was not acknowledged");
-    }
+    const timing = await transportFloatFrames(
+      page,
+      request.frame_indices || Array.from({ length: spec.frames }, (_, i) => i),
+      request.frames,
+      async (frame) => {
+        process.stdout.write(
+          JSON.stringify({ completed: frame + 1, frame }) + "\n",
+        );
+        // ACK gates disk transport; one capture can overlap EXR/video consumption.
+        const acknowledgement = await lines.next();
+        if (
+          acknowledgement.done ||
+          JSON.parse(acknowledgement.value).accepted !== frame
+        )
+          throw new Error("Float frame consumption was not acknowledged");
+      },
+    );
+    writeFileSync(
+      join(request.frames, "transport.json"),
+      JSON.stringify(timing),
+    );
   } finally {
     input.close();
     await browser.close({ silent: true });
   }
 }
-main().catch(async (error) => {
-  // A failed compile/browser launch must close the ACK input rather than keep
-  // Node alive waiting on Python's intentionally open transport.
-  process.stdin.destroy();
-  if (error.errors) {
-    const messages = await formatMessages(error.errors, {
-      kind: "error",
-      color: false,
-    });
-    process.stderr.write(messages.join("\n"));
-  } else {
-    // Puppeteer embeds the whole bundled page in data-URL stack locations. Keep
-    // the message/frames readable so Python's bounded log tail retains the cause.
-    process.stderr.write(
-      String(error.stack || error).replace(
-        /data:text\/html;base64,[A-Za-z0-9+/=]+/g,
-        "data:text/html;base64,[inline scene]",
-      ),
-    );
-  }
-  process.exitCode = 1;
-});
+if (
+  process.argv[1] &&
+  fileURLToPath(import.meta.url) === resolve(process.argv[1])
+)
+  main().catch(async (error) => {
+    // A failed compile/browser launch must close the ACK input rather than keep
+    // Node alive waiting on Python's intentionally open transport.
+    process.stdin.destroy();
+    if (error.errors) {
+      const messages = await formatMessages(error.errors, {
+        kind: "error",
+        color: false,
+      });
+      process.stderr.write(messages.join("\n"));
+    } else {
+      // Puppeteer embeds the whole bundled page in data-URL stack locations. Keep
+      // the message/frames readable so Python's bounded log tail retains the cause.
+      process.stderr.write(
+        String(error.stack || error).replace(
+          /data:text\/html;base64,[A-Za-z0-9+/=]+/g,
+          "data:text/html;base64,[inline scene]",
+        ),
+      );
+    }
+    process.exitCode = 1;
+  });

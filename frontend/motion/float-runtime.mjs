@@ -469,13 +469,16 @@ function main() {
     if (display) document.body.dataset.frame = String(frame);
     return { width, height };
   }
+  // Capture owns one reusable buffer; Node finishes transferring it before the
+  // next capture. Float32 values/alpha are copied verbatim, without a display transform.
+  let captureValues;
   function capture(frame) {
     render(frame, false);
-    const values = new Float32Array(width * height * 4);
-    renderer.readRenderTargetPixels(target, 0, 0, width, height, values);
+    captureValues ??= new Float32Array(width * height * 4);
+    renderer.readRenderTargetPixels(target, 0, 0, width, height, captureValues);
     if (gl.getError() !== gl.NO_ERROR)
       throw new Error("HDR 浮点像素读取失败。");
-    data = new Uint8Array(values.buffer);
+    data = new Uint8Array(captureValues.buffer);
     return { width, height, bytes: data.length };
   }
   const bridge = {
@@ -495,9 +498,20 @@ function main() {
       return Array.from(pixel);
     },
     readChunk(offset, length) {
-      if (!data || !Number.isInteger(offset) || offset < 0 || length > 1048576)
+      if (
+        !data ||
+        !Number.isInteger(offset) ||
+        offset < 0 ||
+        offset > data.length ||
+        !Number.isInteger(length) ||
+        length < 1 ||
+        length > 4 * 1024 * 1024
+      )
         throw new Error("无效读取范围。");
       const chunk = data.subarray(offset, offset + length);
+      // Newer runtimes encode typed bytes directly. Retain the bounded fallback
+      // for installed browsers without this API; both paths preserve exact bytes.
+      if (typeof chunk.toBase64 === "function") return chunk.toBase64();
       let binary = "";
       for (let i = 0; i < chunk.length; i += 32768)
         binary += String.fromCharCode(...chunk.subarray(i, i + 32768));

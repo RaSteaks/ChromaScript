@@ -30,6 +30,7 @@ def iter_float_frames(
     # Interrupted transport is disposable, unlike the independently verified EXRs.
     for raw in directory.glob("frame-*.f32"):
         raw.unlink()
+    (directory / "transport.json").unlink(missing_ok=True)
     log_path = directory / "renderer.log"
     with log_path.open("w") as log:
         process = subprocess.Popen(
@@ -92,9 +93,9 @@ def iter_float_frames(
                     ):
                         raise ChromaError("gpu_changed", "GPU 后端已改变，请重新提交任务。")
                     raw = directory / f"frame-{frame}.f32"
-                    # Yield keeps Node waiting for ACK until EXR verification or
-                    # direct video encoding consumes the frame. Close also removes
-                    # the current transport on cancellation/encoder failure.
+                    # Node may capture one next frame into its reusable browser
+                    # buffer, but waits for ACK before writing another raw file.
+                    # Close removes the current transport on consumer failure.
                     try:
                         yield frame, raw
                     finally:

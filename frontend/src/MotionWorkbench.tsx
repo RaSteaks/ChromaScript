@@ -530,6 +530,7 @@ export const MotionWorkbench = memo(function MotionWorkbench({
         setOutput((old) =>
           !changedEngine &&
           reply.videos.some((v) => v.value === old.video) &&
+          (reply.render_workers || [1]).includes(old.render_workers ?? 1) &&
           (engine === "three-float-v1"
             ? old.master_bit_depth !== null ||
               (reply.video_only === true && old.video !== "none")
@@ -1193,6 +1194,35 @@ export const MotionWorkbench = memo(function MotionWorkbench({
                         )}
                       </select>
                     </Field>
+                    {draft.engine === "three-float-v1" &&
+                      outputOptions?.render_workers && (
+                        <Field
+                          label="渲染并发"
+                          id="motion-render-workers"
+                          hint="同时处理不同帧；并发越高，内存占用越多。共享 GPU 不保证按路数提速。"
+                        >
+                          <select
+                            id="motion-render-workers"
+                            value={output.render_workers ?? 1}
+                            disabled={!!pending}
+                            onChange={(event) => {
+                              const workers = Number(
+                                event.currentTarget.value,
+                              ) as 1 | 2 | 4;
+                              setOutput((old) => ({
+                                ...old,
+                                render_workers: workers,
+                              }));
+                            }}
+                          >
+                            {outputOptions.render_workers.map((workers) => (
+                              <option key={workers} value={workers}>
+                                {workers} 路 · {workers === 1 ? "串行" : "并行"}
+                              </option>
+                            ))}
+                          </select>
+                        </Field>
+                      )}
                     {draft.engine === "three-float-v1" && (
                       <Field
                         label="导出模式"

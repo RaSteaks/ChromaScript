@@ -305,6 +305,7 @@ export type MotionOutput = {
     | "prores-hq-hlg"
     | "prores-4444-acescct";
   render_scale?: 1 | 2 | 4;
+  render_workers?: 1 | 2 | 4;
 };
 export type MotionDeliveryOptions = {
   engine: MotionSpec["engine"];
@@ -314,6 +315,7 @@ export type MotionDeliveryOptions = {
   video_only?: boolean;
   master_archive?: "zip-stream" | null;
   render_scales?: (1 | 2 | 4)[];
+  render_workers?: (1 | 2 | 4)[];
   videos: {
     value: MotionOutput["video"];
     label: string;

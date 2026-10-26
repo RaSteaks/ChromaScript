@@ -21,6 +21,7 @@ from .encoding import check_image_metadata, check_probe, encode
 from .environment import runtime_identity
 from .errors import ChromaError
 from .exports import bundle_name, publish_bundle
+from .frame_manifest import FrameManifest
 from .gpu import Renderer
 from .images import file_hash, read_image, resize_srgb, write_image
 from .models import Artifact, DeliveryPreset, RenderSettings, SceneSpec
@@ -160,12 +161,10 @@ def run(root: Path, job_id: str) -> None:
         cache = store.file(f"cache/{render_key}/frames")
         cache.mkdir(parents=True, exist_ok=True)
         manifest_path = cache.parent / "manifest.json"
-        manifest = (
-            json.loads(manifest_path.read_text()) if manifest_path.exists() else {"frames": {}}
-        )
+        manifest = FrameManifest(manifest_path)
         for index, frame_index in enumerate(frame_indices):
             path = cache / f"{frame_index:08d}.exr"
-            entry = manifest["frames"].get(str(frame_index))
+            entry = manifest.frames.get(str(frame_index))
             reusable = path.exists() and entry and file_hash(path) == entry["sha256"]
             if not reusable:
                 progress("rendering", 0.5 * index / len(frame_indices), index)
@@ -175,15 +174,16 @@ def run(root: Path, job_id: str) -> None:
                     frame_index,
                     partial(progress, "rendering", 0.5 * index / len(frame_indices), index),
                 )
-                manifest["frames"][str(frame_index)] = write_image(
+                saved = write_image(
                     path,
                     pixels,
                     config_hash=config_hash,
                     fps=(settings.fps.numerator, settings.fps.denominator),
                     frame_index=frame_index,
                 )
-                atomic_json(manifest_path, manifest)
+                manifest.record(frame_index, saved)
             progress("rendering", 0.5 * (index + 1) / len(frame_indices), index + 1)
+        manifest.finish()
         render_seconds = time.monotonic() - start
         selected = (
             frame_indices
