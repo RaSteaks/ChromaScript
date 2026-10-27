@@ -15,6 +15,7 @@ from typing import Any, Literal
 
 import numpy as np
 
+from .artifacts import register_delivery_archive
 from .audio import mix_audio
 from .color import color_info, render_output, transform
 from .encoding import check_probe, encode
@@ -39,6 +40,7 @@ from .motion_video_plan import VideoExecution
 from .presets import builtins
 from .prores import prores_capability
 from .store import Store, canonical, now
+from .subtitles import write_subtitles
 from .video_transport import VideoFrame
 
 
@@ -108,6 +110,7 @@ def run_motion(root: Path, job_id: str) -> None:
         store.update("job", job_id, lambda current: {**current, "artifacts": artifacts})
 
     def finish() -> None:
+        register_delivery_archive(store, job_id)
         store.update(
             "job", job_id,
             lambda current: {
@@ -353,6 +356,9 @@ def run_motion(root: Path, job_id: str) -> None:
                 depth=8,
                 disk_reserve_bytes=0,  # Animation admission already accounts for disk usage.
             )
+        sidecars = write_subtitles(snapshot.get("subtitles"), directory)
+        for path in sidecars.values():
+            artifact(path, "subtitle", "application/x-subrip")
         archive = None
         if bundle is None and master_depth is not None:
             # Preserve the legacy layout only for its frozen snapshots. New jobs
@@ -362,6 +368,8 @@ def run_motion(root: Path, job_id: str) -> None:
                 for path in [*paths, manifest_file]:
                     legacy_zip.write(path, f"masters/{path.name}")
                     progress("packaging", 0.72)
+                for name, path in sidecars.items():
+                    legacy_zip.write(path, name)
             artifact(archive, "master-archive", "application/zip", {"frames": settings.frames})
         verification: dict[str, Any] = {
             "passed": True,
@@ -515,6 +523,7 @@ def run_motion(root: Path, job_id: str) -> None:
         artifact(report, "report", "application/json", {"verification": verification})
         progress("exporting", 0.98)
         files = {
+            **sidecars,
             **{str(p.relative_to(directory)): p for p in (*sources, description, frozen, thumbnail, report)},
             **({video.name: video} if video else {}),
             **({declaration_path.name: declaration_path} if declaration_path else {}),

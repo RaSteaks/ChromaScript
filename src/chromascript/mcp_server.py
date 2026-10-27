@@ -22,8 +22,9 @@ def create_mcp(root: Path) -> MCPServer:
         "ChromaScript",
         log_level="WARNING",
         version="0.1.0",
-        # Advertise the migration contract at connection time, not only in optional docs.
+        # Advertise authoring contracts at connection time, not only in optional docs.
         instructions=DOCUMENTS["workflow"]
+        + " For Chinese, English or Chinese-English bilingual subtitles, read chromascript://docs/subtitles or call get_documentation(topic=subtitles), then get_project_subtitles and set_project_subtitles to save selected SRT tracks in the workspace project. Deliveries automatically freeze/copy subtitles into output folders and delivery-archive ZIPs. Never burn subtitles into frames."
         + " Read chromascript://docs/scene before authoring WGSL or chromascript://docs/motion before authoring Three.js HDR animations. For native wide-gamut authoring or upgrading existing animations, discover chromascript.get_motion_capabilities and read chromascript://docs/motion-color. Use get_motion_scene then upgrade_motion_scene with the actual expected_revision_id to preserve old colors; changing source_color_space alone reinterprets RGB. Retain preserved_layers when saving the returned spec. HDR masters and sRGB preview are separate. Before creating audio, call chromascript.get_audio_guidelines(project_id) and read chromascript://docs/audio for local storage and production rules.",
     )
 
@@ -124,12 +125,14 @@ def create_mcp(root: Path) -> MCPServer:
             + DOCUMENTS["workflow"]
             + "\n"
             + DOCUMENTS["scene"]
+            + "\n"
+            + DOCUMENTS["subtitles"]
         )
 
     @server.prompt(name="create_hdr_animation")
     def create_hdr_animation(description: str) -> str:
         # Model authors receive the actual float contract, not legacy React guidance.
-        return f"Create this offline HDR animation: {description}\n" + DOCUMENTS["motion"] + "\n" + DOCUMENTS["motion-color"]
+        return f"Create this offline HDR animation: {description}\n" + DOCUMENTS["motion"] + "\n" + DOCUMENTS["motion-color"] + "\n" + DOCUMENTS["subtitles"]
 
     @server.prompt(name="upgrade_animation_color_space")
     def upgrade_animation_color_space(scene_id: str, source_color_space: str = "Linear Rec.2020") -> str:

@@ -255,6 +255,21 @@ export async function compileFloatDocument(request, mode) {
   return { html, channel };
 }
 
+export async function loadFloatDocument(page, html) {
+  // GPU output embeds OCIO tables; Base64 can push even a single scene past
+  // Chromium's navigation URL limit. Keep navigation small and send the document
+  // through evaluation instead, retaining the data origin and its CSP isolation.
+  await page.goto({
+    url: "data:text/html,<!doctype html><html></html>",
+    timeout: 30000,
+  });
+  await page.evaluate((documentHTML) => {
+    document.open();
+    document.write(documentHTML);
+    document.close();
+  }, html);
+}
+
 async function main() {
   // Frame mode keeps stdin open for consumption acknowledgements. Preview still
   // accepts the original JSON-to-EOF protocol used by transient compilation.
@@ -310,10 +325,7 @@ async function main() {
     await page._client().send("Network.setBlockedURLs", {
       urls: ["http://*", "https://*", "file://*"],
     });
-    await page.goto({
-      url: "data:text/html;base64," + Buffer.from(html).toString("base64"),
-      timeout: 30000,
-    });
+    await loadFloatDocument(page, html);
     const state = await page.evaluate(() => ({
       error: window.__chromaError,
       probe: window.__chromaFloat?.probe,

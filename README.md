@@ -256,7 +256,21 @@ codex mcp add chromascript -- "$PWD/.venv/bin/chromascript" --workspace "$PWD/wo
 
 MCP 启动的网页固定使用 `http://127.0.0.1:8765`。原生 MCP 工具的参数包装为 `{"request": {...}}`，HTTP / CLI 参数保持扁平。升级代码后需重启服务并重新连接 MCP。
 
-服务运行时，可用 `get_documentation(topic=...)` 或 MCP 资源 `chromascript://docs/<主题>` 读取调用约定，主题有 `scene`、`workflow`、`motion`、`motion-color`、`audio`、`auditions`。
+服务运行时，可用 `get_documentation(topic=...)` 或 MCP 资源 `chromascript://docs/<主题>` 读取调用约定，主题有 `scene`、`workflow`、`motion`、`motion-color`、`subtitles`、`audio`、`auditions`。
+
+字幕支持中文、英文和中英双语，始终以独立 UTF-8 SRT 交付，禁止烧录进视频或 EXR 母版。
+
+先调用 `get_project_subtitles(project_id)` 获取当前版本，再用 `set_project_subtitles(project_id, expected_revision_id, subtitles)` 保存。`subtitles.tracks` 是完整的选中轨道列表，每种语言模式（`zh` / `en` / `zh-en`）最多一条；每条包含原始有理帧率 `fps`、总帧数 `frames`、字幕 `cues`（`start_frame` 含起点、`end_frame` 不含终点、`zh` / `en` 文本）。传入空列表可停用后续交付的字幕，历史版本保留。
+
+字幕主档保存在 `workspace/项目/<项目目录>/字幕/<版本>/`，包含 SRT 和源码 JSON；接口返回实际绝对路径。旧布局使用 `workspace/subtitles/<项目ID>/`，迁移项目目录时会一并搬移。请使用接口修改，手动改动 SRT 后新导出会拒绝使用不一致的文件。
+
+提交视频交付时自动固定选中的字幕版本，将 `subtitles.zh.srt`、`subtitles.en.srt` 或 `subtitles.zh-en.srt` 复制到每个输出文件夹，并登记到交付清单。`delivery-archive` 成果提供包含整个文件夹的 `delivery.zip`；浮点母版 ZIP 也包含字幕。使用 `get_job` 查找成果，再通过下载链接或 `export_artifact` 保存 ZIP。后续编辑不会改变已提交或已完成的交付；修改字幕后提交新任务需使用新的幂等键。
+
+只改变输出帧率不会改变字幕时间；WGSL 的 `start_frame/frames` 裁切范围会裁切字幕并平移到输出零点。变速、重排片段需先更新字幕时间轴。`export_subtitles(spec, destination)` 仍可单独生成临时 SRT，但不会保存或选中项目字幕。完整规范通过 MCP `chromascript.get_documentation` 的 `{"request":{"topic":"subtitles"}}` 读取；CLI 使用：
+
+```sh
+.venv/bin/chromascript call get_documentation --arguments '{"topic":"subtitles"}'
+```
 
 ### 命令行
 

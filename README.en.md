@@ -256,7 +256,21 @@ codex mcp add chromascript -- "$PWD/.venv/bin/chromascript" --workspace "$PWD/wo
 
 The web app started by MCP always uses `http://127.0.0.1:8765`. Native MCP tools wrap their arguments as `{"request": {...}}`; HTTP and CLI arguments stay flat. After upgrading the code, restart the service and reconnect MCP.
 
-While the service runs, read the calling conventions with `get_documentation(topic=...)` or the MCP resource `chromascript://docs/<topic>`. Topics: `scene`, `workflow`, `motion`, `motion-color`, `audio`, `auditions`.
+While the service runs, read the calling conventions with `get_documentation(topic=...)` or the MCP resource `chromascript://docs/<topic>`. Topics: `scene`, `workflow`, `motion`, `motion-color`, `subtitles`, `audio`, `auditions`.
+
+Subtitles support Chinese, English and bilingual output as separate UTF-8 SRT files. Never burn them into video or EXR masters.
+
+Read `get_project_subtitles(project_id)`, then save with `set_project_subtitles(project_id, expected_revision_id, subtitles)`. `subtitles.tracks` replaces the complete selected list, with at most one track per mode (`zh` / `en` / `zh-en`). Each contains original rational `fps`, total `frames`, and `cues` (`start_frame` inclusive, `end_frame` exclusive, `zh` / `en` text). An empty list disables subtitles for future deliveries while retaining historical revisions.
+
+Managed SRTs and source JSON live under `workspace/项目/<project-folder>/字幕/<revision>/`; the API returns actual absolute paths. Legacy layouts use `workspace/subtitles/<project-id>/` and move these files during project-folder migration. Edit through the API: new deliveries reject manually changed SRT files that no longer match saved content.
+
+Submitting a delivery automatically freezes the selected subtitle revision and copies `subtitles.zh.srt`, `subtitles.en.srt` and/or `subtitles.zh-en.srt` to each output folder and its delivery manifest. The `delivery-archive` artifact streams the complete folder as `delivery.zip`; float master ZIPs also include subtitles. Find artifacts with `get_job` and use their download links or `export_artifact`. Later edits do not alter queued or completed deliveries; use a new idempotency key after changing subtitles.
+
+Changing output fps alone preserves subtitle times. WGSL `start_frame/frames` trims clip cues and shift them to output zero; speed changes or reordered edits require updated cues. `export_subtitles(spec, destination)` remains an ad hoc SRT utility that neither saves nor selects project subtitles. Read the full guide with MCP `chromascript.get_documentation` using `{"request":{"topic":"subtitles"}}`, or the CLI:
+
+```sh
+.venv/bin/chromascript call get_documentation --arguments '{"topic":"subtitles"}'
+```
 
 ### Command line
 

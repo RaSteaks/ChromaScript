@@ -196,8 +196,9 @@ def route_target(logical: str, name: str | None = None) -> tuple[str, str]:
         'music-sources': '音频/生成记录/配乐', 'speech-sources': '音频/生成记录/语音',
         'analysis-sources': '试听/分析记录', 'audio-reviews': '试听/审听意见',
         'auditions': '试听/候选片段', 'jobs': '.chromascript/任务',
+        'subtitles': '字幕',
     }.get(category, '素材/历史文件/' + category)
-    if category == 'audio-sources':
+    if category in ('audio-sources', 'subtitles'):
         target = base
     elif category == 'audio' and name:
         target = base + '/' + label(name, Path(identity).stem) + Path(identity).suffix
@@ -292,6 +293,8 @@ def write_views(directory: Path) -> dict[str, Any]:
             works.append(f"- {record['name']}（{identity[:8]}）")
         if ('audio_timeline', project['id']) in rows:
             view('音频/时间线.json', encode(rows['audio_timeline', project['id']]))
+        if ('subtitle_timeline', project['id']) in rows:
+            view('字幕/当前版本.json', encode(rows['subtitle_timeline', project['id']]))
         for (kind, identity), record in rows.items():
             if kind == 'audition_round':
                 view('试听/' + label(record['title'], identity) + '/轮次.json', encode(record))
@@ -320,7 +323,7 @@ def after_commit(store: Store, pid: str, changes: list[tuple[str, str]]) -> None
                     output = Path(job.get('export_path') or '/')
                     if output.is_relative_to(directory):
                         db.execute('INSERT INTO delivery_routes VALUES (?,?) ON CONFLICT(job_id) DO UPDATE SET target=excluded.target', (identity, str(output.relative_to(directory))))
-        if any(k in ('project', 'scene', 'motion_scene', 'audio_timeline', 'audition_round', 'audio_asset') for k, i in changes):
+        if any(k in ('project', 'scene', 'motion_scene', 'audio_timeline', 'subtitle_timeline', 'audition_round', 'audio_asset') for k, i in changes):
             write_views(store.project_directory(pid))
     except Exception:
         # The project transaction already committed. A stale derived index/view
@@ -473,6 +476,8 @@ def _migrate(store: Store) -> dict[str, Any]:
                     routes[logical] = target
                 if k == 'job':
                     routes.update([route_target('jobs/' + i)])
+                if k == 'subtitle_revision':
+                    routes.update([route_target('subtitles/' + pid)])
                 if k in ('music_request', 'speech_request', 'analysis_request'):
                     routes.update([route_target(k.removesuffix('_request') + '-sources/' + i)])
             if (store.root / 'audio-sources' / pid).exists():

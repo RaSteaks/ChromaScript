@@ -12,7 +12,7 @@ import {
 
 // Benchmark-only overrides load a frozen compiler/transport from a temporary
 // directory. Production never reads these environment variables.
-const { compileFloatDocument } = await import(
+const { compileFloatDocument, loadFloatDocument } = await import(
   process.env.CHROMASCRIPT_TEST_COMPILER
     ? pathToFileURL(process.env.CHROMASCRIPT_TEST_COMPILER).href
     : "../motion/runtime.mjs"
@@ -39,11 +39,25 @@ try {
   process.on("SIGINT", shutdown);
   const page = await browser.newPage();
   await page.route("**/*", (route) => route.abort());
-  await page.setContent('<iframe sandbox="allow-scripts"></iframe>');
-  await page.locator("iframe").evaluate((element, document) => {
-    element.srcdoc = document;
-  }, html);
-  const frame = page.frames().find((item) => item.parentFrame());
+  // Exercise the production loader, including its opaque origin, without Chrome.
+  // Older frozen benchmark compilers predate the shared document loader.
+  if (loadFloatDocument) {
+    await loadFloatDocument(
+      {
+        goto: ({ url, timeout }) => page.goto(url, { timeout }),
+        evaluate: (...args) => page.evaluate(...args),
+      },
+      html,
+    );
+  } else {
+    await page.setContent('<iframe sandbox="allow-scripts"></iframe>');
+    await page.locator("iframe").evaluate((element, document) => {
+      element.srcdoc = document;
+    }, html);
+  }
+  const frame = loadFloatDocument
+    ? page.mainFrame()
+    : page.frames().find((item) => item.parentFrame());
   await frame.waitForFunction(
     () => window.__chromaFloat || window.__chromaError,
   );

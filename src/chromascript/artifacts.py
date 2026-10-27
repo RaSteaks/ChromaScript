@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ChromaError
-from .exports import MANIFEST, contained_path, motion_bundle
+from .exports import MANIFEST, bundle_name, contained_path, motion_bundle
 from .images import file_hash
-from .store import Store
+from .models import Artifact
+from .store import Store, now
 
 ArchiveMember = tuple[str, Path, str]
 CHUNK_BYTES = 1024**2
@@ -20,6 +21,8 @@ CHUNK_BYTES = 1024**2
 
 def artifact_path(store: Store, artifact: dict[str, Any]) -> Path:
     """Historical records default to workspace; external roots come only from snapshots."""
+    if artifact.get("kind") == "delivery-archive" and artifact.get("representation") == "zip-stream":
+        return delivery_archive_root(store, artifact)
     if artifact.get("storage", "workspace") == "workspace":
         return store.file(artifact["relative_path"])
     if artifact.get("storage") != "delivery":
@@ -35,7 +38,25 @@ def artifact_path(store: Store, artifact: dict[str, Any]) -> Path:
 
 
 def archive_members(store: Store, artifact: dict[str, Any]) -> list[ArchiveMember]:
-    """Enumerate only published, verified sequence members, never a directory glob."""
+    """Enumerate published delivery/sequence manifests, never a directory glob."""
+    if artifact.get("kind") == "delivery-archive" and artifact.get("representation") == "zip-stream":
+        base = delivery_archive_root(store, artifact)
+        job = store.get("job", artifact["job_id"])
+        try:
+            manifest_path = contained_path(base, MANIFEST)
+            manifest = json.loads(manifest_path.read_text())
+            if manifest["job_id"] != job["id"] or manifest["snapshot_sha256"] != job["snapshot_hash"]:
+                raise ValueError("delivery identity changed")
+            delivery_members = []
+            for name, entry in manifest["files"].items():
+                path = contained_path(base, name)
+                if not path.is_file() or path.stat().st_size != entry["bytes"]:
+                    raise ValueError("delivery member missing or changed")
+                delivery_members.append((name, path, entry["sha256"]))
+            delivery_members.append((MANIFEST, manifest_path, file_hash(manifest_path)))
+            return delivery_members
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ChromaError("archive_changed", "交付文件缺失或清单已改变，请检查输出文件夹。") from exc
     if (
         artifact.get("representation") != "zip-stream"
         or artifact.get("storage") != "delivery"
@@ -60,7 +81,7 @@ def archive_members(store: Store, artifact: dict[str, Any]) -> list[ArchiveMembe
         if file_hash(sequence) != sequence_entry["sha256"]:
             raise ValueError("sequence manifest changed")
         frames = json.loads(sequence.read_text())["frames"]
-        count = snapshot["scene"]["frames"]
+        count = snapshot["settings"]["frames"]
         if set(frames) != {str(index) for index in range(count)}:
             raise ValueError("incomplete sequence")
         names = [f"masters/{index:08d}.exr" for index in range(count)]
@@ -70,7 +91,7 @@ def archive_members(store: Store, artifact: dict[str, Any]) -> list[ArchiveMembe
             frame = frames[str(index)]
             if not frame["passed"] or frame["sha256"] != entry["sha256"]:
                 raise ValueError("unverified frame")
-        for name in [*names, "masters/sequence.json"]:
+        for name in [*names, "masters/sequence.json", *snapshot.get("subtitles", {}).get("files", {})]:
             entry = delivery["files"][name]
             path = contained_path(base, name)
             if not path.is_file() or path.stat().st_size != entry["bytes"]:
@@ -81,6 +102,37 @@ def archive_members(store: Store, artifact: dict[str, Any]) -> list[ArchiveMembe
         raise ChromaError(
             "archive_changed", "母版文件缺失或内容已改变，请检查交付文件夹。"
         ) from exc
+
+
+def delivery_archive_root(store: Store, artifact: dict[str, Any]) -> Path:
+    job = store.get("job", artifact["job_id"])
+    if not job.get("export_completed"):
+        raise ChromaError("archive_pending", "交付尚未完成，请等待导出完成。")
+    from .project_storage import delivery_root
+    relocated = delivery_root(store, job["id"])
+    if relocated is not None:
+        return relocated
+    snapshot = store.get("snapshot", job["id"])
+    path = Path(snapshot["export_directory"]) / bundle_name(snapshot["scene"]["name"], job["id"])
+    if str(path) != job.get("export_path") or path.resolve() != path:
+        raise ChromaError("export_directory_changed", "交付目录与冻结快照不一致。")
+    return path
+
+
+def register_delivery_archive(store: Store, job_id: str) -> None:
+    """Publish a virtual full-bundle ZIP, including exactly the frozen sidecars."""
+    job = store.get("job", job_id)
+    aid = hashlib.sha256((job_id + "delivery-archive").encode()).hexdigest()[:32]
+    artifact = Artifact(
+        id=aid, project_id=job["project_id"], job_id=job_id, name="delivery.zip",
+        kind="delivery-archive", relative_path=".", storage="delivery",
+        representation="zip-stream", mime_type="application/zip", size_bytes=None,
+        created_at=now(),
+    )
+    store.put("artifact", aid, artifact.model_dump())
+    store.update("job", job_id, lambda current: {
+        **current, "artifacts": list(dict.fromkeys([*current["artifacts"], aid])),
+    })
 
 
 class _ZipSink:
@@ -111,14 +163,14 @@ class _ZipSink:
 
 
 def stream_zip(members: list[ArchiveMember]) -> Generator[bytes, None, None]:
-    """Stream already-compressed EXRs with ZIP64 data descriptors and per-file hashes."""
+    """Stream delivery members with ZIP64 descriptors and per-file hash checks."""
     sink = _ZipSink()
     with zipfile.ZipFile(sink, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
         for name, path, expected_hash in members:
             # Recheck links at open time; a download must not follow user-added links.
             base = path.parents[len(Path(name).parts) - 1]
             if base.resolve() != base:
-                raise ChromaError("export_directory_changed", "母版目录路径已改变。")
+                raise ChromaError("export_directory_changed", "交付目录路径已改变。")
             contained_path(base, name)
             info = zipfile.ZipInfo.from_file(path, arcname=name)
             digest = hashlib.sha256()
@@ -131,6 +183,6 @@ def stream_zip(members: list[ArchiveMember]) -> Generator[bytes, None, None]:
                 if digest.hexdigest() != expected_hash:
                     # No central directory is sent after failure: a changed delivery
                     # cannot masquerade as a complete verified ZIP download.
-                    raise ChromaError("archive_changed", "母版在下载时发生变化，请检查交付文件。")
+                    raise ChromaError("archive_changed", "交付文件在下载时发生变化，请检查交付文件。")
             yield from sink.drain()
     yield from sink.drain()

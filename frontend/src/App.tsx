@@ -1,3 +1,4 @@
+import { JobElapsed } from "./JobElapsed";
 import {
   useCallback,
   useEffect,
@@ -2099,9 +2100,7 @@ export default function App() {
                                 }
                               />
                             </div>
-                            <span className="mono job-elapsed">
-                              {fmt(j.elapsed_seconds)} s
-                            </span>
+                            <JobElapsed job={j} />
                             <div className="job-controls">
                               {["queued", "running"].includes(j.status) ? (
                                 <Button

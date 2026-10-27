@@ -78,11 +78,110 @@ chromascript.upgrade_motion_scene:
 Use "ACEScg" for AP1 or "ACES2065-1" for AP0. Do not guess scene IDs or revision IDs.
 """
 
+# One sidecar contract is shared by resources, prompts and the documentation tool.
+# Subtitles must remain independent of scene source and color-managed image output.
+SUBTITLE_GUIDE = """Subtitle production / 字幕制作规范
+
+1. Language modes: Chinese (zh, 中文), English (en, 英文), and Chinese-English bilingual
+   (zh-en, 中英双语). Export subtitles only when requested. Follow the user's language choice;
+   otherwise use the supplied script's language and state the assumption. Preserve supplied
+   Simplified/Traditional Chinese, names, numbers, units and technical terms. For requested
+   bilingual translation, retain meaning and align languages cue by cue. Flag uncertain terms;
+   never invent speech or claim estimated timings are measured transcription/alignment.
+
+2. Independent delivery is mandatory: save subtitles to their project, then deliver UTF-8 SRT sidecars.
+   Never burn subtitles into video frames or EXR masters, add subtitle text/geometry/overlays
+   to WGSL/Three/React scene source, or modify a scene revision just to export subtitles.
+   Keep the video clean. Do not switch the engine or change source_color_space for subtitles.
+   There is no subtitle track editor, automatic transcription, SRT/VTT import, VTT export or
+   soft-subtitle muxing operation. Do not invent those tools or MotionSpec fields.
+   If existing source already contains burned-in subtitles, merely exporting a sidecar does
+   not remove them: report this and remove only identified subtitle content when authorized.
+
+3. Project workflow: first call get_project_subtitles(project_id). Pass its revision_id as
+   expected_revision_id to set_project_subtitles(project_id, expected_revision_id, subtitles).
+   subtitles={tracks:[spec,...]} REPLACES THE COMPLETE selected track list. Each spec requires
+   language (zh/en/zh-en), rational fps ({numerator,denominator}), frames (source duration),
+   and a nonempty cues array. Cues use start_frame inclusive, end_frame exclusive, zh/en text;
+   require 0 <= start_frame < end_frame <= frames, sorted non-overlapping cues, and text for
+   each selected language. Include separate zh and en tracks for independently selectable
+   languages, or zh-en for Chinese above English in one file. At most one track per mode.
+   Preserve other selected tracks when editing one; tracks=[] disables subtitles for FUTURE
+   exports. Initial revision is "0". On conflict, keep the draft, re-read and reconcile.
+
+   Save creates immutable SRTs and source JSON in workspace/项目/<project>/字幕/<revision>/.
+   Read actual absolute paths from get_project_subtitles.files[].local_path; never guess the
+   project directory name. Legacy unmigrated workspaces use workspace/subtitles/<project_id>/;
+   migrate_workspace_storage moves these into project folders when the workspace is idle.
+   字幕/当前版本.json is a readable current-selection view; the project database is authoritative.
+   Direct file edits are not imported: use set_project_subtitles to author a new revision.
+   Missing or changed managed SRTs fail a new delivery rather than silently omit subtitles.
+
+   submit_delivery / submit_configured_delivery / submit_motion_render automatically freeze
+   selected subtitle text and revision in the job snapshot. Exported folders contain
+   subtitles.zh.srt, subtitles.en.srt and/or subtitles.zh-en.srt as selected. No manual copying
+   is needed for additional destinations. Later subtitle edits cannot alter queued jobs,
+   retries or completed deliveries. Use a new idempotency key after changing selection.
+   The delivery.json manifest includes the copied files and checksums. A delivery-archive
+   artifact streams delivery.zip with the entire folder, including subtitles. Read get_job,
+   choose that artifact and use export_artifact or its download URL. Float master-archive
+   ZIPs also include frozen SRTs. Subtitle-only gaps after trimming produce no empty SRT.
+   Existing completed jobs remain unchanged; submit a new delivery to include new subtitles.
+   export_subtitles(spec,destination) remains an optional standalone copy utility: it neither
+   selects nor saves project subtitles and is not the normal project-authoring workflow.
+
+4. Timing: read the actual source fps and duration first (get_motion_scene for animations;
+   use the actual render settings for WGSL). Cue frame boundaries use the original source
+   timebase. The exporter calculates frame*fps.denominator/fps.numerator and rounds each
+   absolute boundary to the nearest millisecond, half up. It never accumulates rounded
+   durations. At 30000/1001 fps, [0,60) becomes 00:00:00,000 --> 00:00:02,002.
+   Changing output fps without changing duration must not retime subtitles. WGSL delivery
+   start_frame/frames automatically clips cues and shifts them to delivery time zero using
+   rational seconds. Animation output-rate rounding does not extend subtitle timing. Source
+   timelines must cover the requested range. Apply edits, speed changes or chapter offsets
+   to the saved cues deliberately; chapter offsets are applied once. Align to supplied speech where available; otherwise
+   label timing as editorial estimates. No render or audio generation is needed to export.
+
+5. Readability: monolingual cues have at most two lines; bilingual cues have one Chinese
+   line followed by one English line. Long bilingual content should be split into aligned
+   semantic cues. Preserve English words, names and number/unit groups. Avoid leading
+   closing punctuation and trailing opening punctuation. Start around 16-20 Chinese or
+   32-42 English characters per line, 1-7 seconds per cue, <=9 Chinese or <=20 English
+   characters/second, allowing extra reading time for bilingual text. These are house
+   review targets, not platform certification or hard timing limits. Empty lines terminate
+   SRT cues and are rejected inside text; do not include timestamp arrows or control codes.
+
+6. Styling belongs to the external subtitle player/editor. SRT carries text and timing,
+   not guaranteed fonts, placement, outlines, colors or HDR luminance. Review Chinese glyph
+   coverage, wrapping, safe margins and background contrast in the intended player; missing
+   fonts must not cause Chinese to be dropped or subtitles to be burned in. Video color
+   processing and alpha remain unchanged; subtitle text does not enter OCIO or sampling.
+
+7. Verification: inspect the actual UTF-8 file, sequence numbers, millisecond timestamps,
+   selected language, punctuation, line breaks, start/end boundaries, gaps and last cue.
+   Confirm ordering, no overlaps and duration against the delivered video; check synchronization
+   in the target player when available. Confirm the video/master remains free of subtitles.
+   Keep permitted logs/screenshots and disclose unverified playback or font behavior.
+   Follow the workspace browser policy: built-in browser or headless WebKit/Firefox; do not
+   launch Chrome or a personal browser session for tests. Subtitle export itself is file-only.
+
+MCP example after get_project_subtitles (replace IDs with the actual returned values):
+chromascript.set_project_subtitles:
+{"request":{"project_id":"PROJECT_ID","expected_revision_id":"READ_REVISION_ID",
+"subtitles":{"tracks":[{"language":"zh-en","fps":{"numerator":30000,"denominator":1001},
+"frames":300,"cues":[{"start_frame":0,"end_frame":60,"zh":"你好，世界。","en":"Hello, world."}]}]}}}
+CLI uses the same flat arguments saved in a JSON file:
+chromascript call set_project_subtitles --arguments @/absolute/path/subtitle-request.json
+Read the guide: chromascript.get_documentation({"request":{"topic":"subtitles"}}).
+"""
+
 DOCUMENTS = {
+    "subtitles": SUBTITLE_GUIDE,
     "motion-color": MOTION_COLOR_GUIDE,
     # Native float generation and display copies have different, explicit contracts.
     "motion": (
         "Animation contract motion-dual-v1 supports both three-float-v1 and remotion-sdr-v1. "
+        "For Chinese, English or Chinese-English bilingual subtitles, read get_documentation(topic=subtitles) and save selected tracks with set_project_subtitles; deliveries and ZIPs automatically include sidecars. Never burn subtitles into frames. "
         "Discover get_motion_capabilities, get_motion_delivery_options(engine) and list_motion_templates. "
         "MotionSpec has engine=three-float-v1, name, code, positive signed-32-bit width/height, frames "
         "and rational fps components; actual GPU/memory/codec limits are checked. Optional files maps relative TS/TSX/JS/JSX paths to chapter source. "

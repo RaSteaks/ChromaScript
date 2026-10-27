@@ -1,6 +1,8 @@
 """Video-only float delivery never materializes masters or renders a second pass."""
 
+import io
 import json
+import zipfile
 from contextlib import closing
 from types import SimpleNamespace
 
@@ -8,6 +10,7 @@ import numpy as np
 import pytest
 
 from chromascript import motion_worker
+from chromascript.artifacts import archive_members, stream_zip
 from chromascript.color import render_output
 from chromascript.errors import ChromaError
 from chromascript.exports import RenderBundle, motion_bundle
@@ -16,6 +19,7 @@ from chromascript.motion import MotionOutput, MotionSpec, resolve_motion_output,
 from chromascript.motion_color import decode_float_frame
 from chromascript.motion_timing import MotionTimePlan
 from chromascript.service import Service
+from chromascript.subtitles import ProjectSubtitles
 from chromascript.worker import run
 
 
@@ -75,6 +79,25 @@ def transport(monkeypatch):
 
     monkeypatch.setattr(motion_worker, "write_image", write)
     return consumed, closed
+
+
+def test_video_only_includes_project_subtitles_and_delivery_zip(tmp_path, transport):
+    service, previous, _ = make_job(tmp_path, video="srgb")
+    service.set_project_subtitles(previous["project_id"], "0", ProjectSubtitles.model_validate({"tracks": [{
+        "language": "zh", "fps": {"numerator": 30000, "denominator": 1001}, "frames": 3,
+        "cues": [{"start_frame": 0, "end_frame": 3, "zh": "独立字幕"}],
+    }]}))
+    job = service.submit_motion_render(previous["scene_id"], previous["revision_id"], "sidecar-video",
+        output=MotionOutput(master_bit_depth=None, video="srgb", render_scale=1,
+                            video_processing="reference", video_encoder="software"))["job"]
+    run(service.store.root, job["id"])
+    result = service.get_job(job["id"])
+    assert result["job"]["status"] == "completed", result["job"]["error"]
+    artifact = next(a for a in result["artifacts"] if a["kind"] == "delivery-archive")
+    with zipfile.ZipFile(io.BytesIO(b"".join(stream_zip(archive_members(service.store, artifact))))) as archive:
+        assert "独立字幕" in archive.read("subtitles.zh.srt").decode()
+        assert any(name.endswith(".mp4") for name in archive.namelist())
+        assert not any(name.endswith(".exr") for name in archive.namelist())
 
 
 @pytest.mark.integration

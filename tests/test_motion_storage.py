@@ -26,6 +26,7 @@ from chromascript.mcp_server import create_mcp
 from chromascript.motion import MotionOutput, templates
 from chromascript.operations import execute
 from chromascript.service import Service
+from chromascript.subtitles import ProjectSubtitles
 from chromascript.worker import run
 
 
@@ -80,6 +81,31 @@ def float_job(tmp_path, monkeypatch):
 
 def archive_of(service, job):
     return next(a for a in service.get_job(job["id"])["artifacts"] if a["kind"] == "master-archive")
+
+
+def test_frozen_subtitles_in_motion_folder_master_and_delivery_zips(float_job):
+    service, old_job, _, _, _ = float_job
+    selected = ProjectSubtitles.model_validate({"tracks": [{
+        "language": "zh-en", "fps": {"numerator": 30, "denominator": 1}, "frames": 3,
+        "cues": [{"start_frame": 0, "end_frame": 3, "zh": "原始", "en": "Original"}],
+    }]})
+    saved = service.set_project_subtitles(old_job["project_id"], "0", selected)
+    # Output fps differs from source fps; ZIP membership must use output frame count.
+    output = MotionOutput.model_validate({"video": "none", "fps": {"numerator": 15, "denominator": 1}})
+    job = service.submit_motion_render(old_job["scene_id"], old_job["revision_id"], "subtitles", output=output)["job"]
+    service.set_project_subtitles(old_job["project_id"], saved["revision_id"], ProjectSubtitles())
+    run(service.store.root, job["id"])
+    result = service.get_job(job["id"])
+    assert result["job"]["status"] == "completed", result["job"]["error"]
+    bundle = motion_bundle(job, service.store.get("snapshot", job["id"]))
+    expected = "1\n00:00:00,000 --> 00:00:00,100\n原始\nOriginal\n\n".encode()
+    assert (bundle.target / "subtitles.zh-en.srt").read_bytes() == expected
+    for kind in ("master-archive", "delivery-archive"):
+        artifact = next(a for a in result["artifacts"] if a["kind"] == kind)
+        with zipfile.ZipFile(io.BytesIO(b"".join(stream_zip(archive_members(service.store, artifact))))) as archive:
+            assert archive.read("subtitles.zh-en.srt") == expected
+            assert len([name for name in archive.namelist() if name.endswith(".exr")]) == 2
+    assert not list(bundle.target.rglob("*.zip"))
 
 
 def test_single_copy_and_original_artifacts_outside_workspace(float_job):

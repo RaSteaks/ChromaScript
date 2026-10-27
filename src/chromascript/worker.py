@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 import psutil
 
+from .artifacts import register_delivery_archive
 from .audio import mix_audio
 from .color import color_info, output_metadata, render_output, transform
 from .encoding import check_image_metadata, check_probe, encode
@@ -26,6 +27,7 @@ from .gpu import Renderer
 from .images import file_hash, read_image, resize_srgb, write_image
 from .models import Artifact, DeliveryPreset, RenderSettings, SceneSpec
 from .store import Store, canonical, now
+from .subtitles import write_subtitles
 
 
 def atomic_json(path: Path, value: Any) -> None:
@@ -141,6 +143,10 @@ def run(root: Path, job_id: str) -> None:
             bundle_files.update(
                 {"scene.json": scene_path, "shader.wgsl": code_path, "scene-snapshot.json": source_path}
             )
+            sidecars = write_subtitles(snapshot.get("subtitles"), directory)
+            bundle_files.update(sidecars)
+            for path in sidecars.values():
+                artifact(path, "subtitle", "application/x-subrip")
         # Cache identity excludes output transforms and frame count, so matching frames
         # can be shared across multiple delivery jobs without changing scene time.
         render_key = hashlib.sha256(
@@ -431,6 +437,7 @@ def run(root: Path, job_id: str) -> None:
                 partial(progress, "exporting", 0.98),
             )
             exported = True
+            register_delivery_archive(store, job_id)
         store.update(
             "job",
             job_id,

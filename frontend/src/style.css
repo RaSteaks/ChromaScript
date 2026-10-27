@@ -2011,8 +2011,10 @@ form .modal-actions {
     grid-template-columns: minmax(0, 1fr) minmax(70px, 0.8fr) 45px;
     gap: 8px;
   }
-  .job-row > .mono {
-    display: none;
+  .job-row > .job-elapsed {
+    grid-column: 2;
+    grid-row: 2;
+    text-align: left;
   }
   .job-identity {
     padding-left: 0;

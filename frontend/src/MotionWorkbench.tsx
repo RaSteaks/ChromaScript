@@ -1,4 +1,5 @@
 import { MotionOutputReview } from "./MotionOutputReview";
+import { JobElapsed } from "./JobElapsed";
 import {
   MotionStorageEstimate,
   motionSampleKey,
@@ -1658,6 +1659,7 @@ export const MotionWorkbench = memo(function MotionWorkbench({
                   {job.settings.fps.numerator}/{job.settings.fps.denominator}{" "}
                   fps
                 </span>
+                <JobElapsed job={job} active={active && step === "jobs"} />
                 {["queued", "running"].includes(job.status) && (
                   <Button
                     disabled={!!pending}

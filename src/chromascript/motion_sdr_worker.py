@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from .artifacts import register_delivery_archive
 from .audio import mix_audio
 from .color import transform
 from .encoding import check_probe, encode
@@ -35,6 +36,7 @@ from .motion_sources import source_hash, write_sources
 from .motion_timing import motion_time_plan
 from .motion_video_plan import VideoExecution
 from .store import Store, canonical, now
+from .subtitles import write_subtitles
 
 
 def browser_pixels(path: Path, spec: MotionSpec, render_scale: int = 1) -> np.ndarray:
@@ -111,6 +113,7 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
         store.update("job", job_id, lambda current: {**current, "artifacts": artifacts})
 
     def finish() -> None:
+        register_delivery_archive(store, job_id)
         store.update("job", job_id, lambda current: {
             **current,
             "status": "completed" if current["status"] != "cancelled" else "cancelled",
@@ -315,6 +318,10 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
         artifact(report, "report", "application/json", {"verification": verification})
         progress("exporting", 0.98)
         files = {str(p.relative_to(directory)): p for p in (*sources, description, frozen, thumbnail, video, report)}
+        sidecars = write_subtitles(snapshot.get("subtitles"), directory)
+        files.update(sidecars)
+        for path in sidecars.values():
+            artifact(path, "subtitle", "application/x-subrip")
         if audio_info is not None:
             files["audio.wav"] = audio_path
         if bundle is not None:

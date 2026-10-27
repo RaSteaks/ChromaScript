@@ -56,6 +56,14 @@ from .preview import LivePreviewRequest, preview_image
 from .project_storage import ProjectStorageOperations
 from .speech import public_configuration
 from .store import Store, canonical, identifier, now
+from .subtitles import (
+    ProjectSubtitles,
+    SubtitleSpec,
+    export_subtitles,
+    freeze_subtitles,
+    read_subtitles,
+    save_subtitles,
+)
 from .templates import TEMPLATES, blank_scene, template_list
 
 
@@ -130,6 +138,14 @@ class Service(ProjectStorageOperations, AuditionOperations, MotionOperations, Mo
                 "directory_picker": directory_picker_available(),
             },
             "gpu": self.renderer.info,
+            "subtitles": {
+                "languages": ["zh", "en", "zh-en"], "format": "srt", "encoding": "utf-8",
+                "read_operation": "chromascript.get_project_subtitles",
+                "save_operation": "chromascript.set_project_subtitles",
+                "documentation_resource": "chromascript://docs/subtitles",
+                "storage": "project-owned immutable revisions", "automatic_delivery": True,
+                "delivery_archive": "delivery-archive", "burn_in": False,
+            },
             "audio": {"sample_rate": 48000, "channels": 2,
                       "storage": "signed 32-bit PCM WAV", "max_asset_seconds": 600,
                       "max_input_bytes": 128 * 1024**2,
@@ -198,13 +214,32 @@ class Service(ProjectStorageOperations, AuditionOperations, MotionOperations, Mo
             "note": "压缩体积和速度取决于画面；视频编码另需磁盘空间。",
         }
 
-    @operation("Read scene, animation, audio storage/production, color, delivery, or model workflow documentation.")
+    @operation("Read scene, animation, subtitles (Chinese, English, bilingual; topic=subtitles), audio storage/production, color, delivery, or model workflow documentation.")
     def get_documentation(self, topic: str = "workflow") -> dict[str, Any]:
         from .documentation import DOCUMENTS
 
         if topic not in DOCUMENTS:
             raise ChromaError("unknown_topic", f"Available topics: {', '.join(DOCUMENTS)}")
         return {"topic": topic, "text": DOCUMENTS[topic]}
+
+    @operation("Export Chinese, English or bilingual subtitles as a separate UTF-8 SRT file without overwriting. Never burns subtitles into video or changes scene source. For project-managed automatic delivery use set_project_subtitles instead. Read get_documentation(topic=subtitles).")
+    def export_subtitles(self, spec: SubtitleSpec, destination: str) -> dict[str, Any]:
+        return export_subtitles(spec, destination)
+
+    @operation("Read selected project subtitles, current revision and managed SRT paths. Initial revision is 0. Read get_documentation(topic=subtitles) before set_project_subtitles; selected tracks automatically accompany future deliveries and ZIP downloads.")
+    def get_project_subtitles(self, project_id: str) -> dict[str, Any]:
+        self.project(project_id)
+        record = read_subtitles(self.store, project_id)
+        return {**record, "files": [
+            {**entry, "local_path": str(self.store.file(entry["relative_path"]))}
+            for entry in record["files"]
+        ]}
+
+    @operation("Save the COMPLETE selected subtitle tracks (zh, en, zh-en) under the workspace project folder with revision checking. Empty tracks disables subtitles in future deliveries. Every delivery freezes and copies selected SRTs into its output folder and ZIP; never burns into frames. Read get_documentation(topic=subtitles).")
+    def set_project_subtitles(self, project_id: str, expected_revision_id: str, subtitles: ProjectSubtitles) -> dict[str, Any]:
+        self.project(project_id, True)
+        save_subtitles(self.store, project_id, expected_revision_id, subtitles)
+        return self.get_project_subtitles(project_id)
 
     @operation("Create a local procedural-video project.")
     def create_project(self, name: str, description: str = "") -> dict[str, Any]:
@@ -278,7 +313,7 @@ class Service(ProjectStorageOperations, AuditionOperations, MotionOperations, Mo
         return {"project": project}
 
     @operation(
-        "Clone current WGSL/animation scenes, audio assets and timeline into a new project, without render jobs or revision history."
+        "Clone current WGSL/animation scenes, audio assets, timeline and selected subtitles into a new project, without render jobs or revision history."
     )
     def clone_project(self, project_id: str, name: str) -> dict[str, Any]:
         original = self.project(project_id)
@@ -383,6 +418,33 @@ class Service(ProjectStorageOperations, AuditionOperations, MotionOperations, Mo
                     ]
                 )
                 asset_ids[asset["id"]] = aid
+            selected_subtitles = read_subtitles(self.store, project_id)
+            if selected_subtitles["revision_id"] != "0":
+                # The clone owns independent files and a new revision, just like
+                # its scene/audio sources. Never retain paths into the original.
+                subtitle_revision = identifier()
+                logical = f"subtitles/{pid}/{subtitle_revision}"
+                directory = self.store.project_file(pid, logical)
+                directory.mkdir(parents=True, exist_ok=False)
+                subtitle_files = []
+                for entry in selected_subtitles["files"]:
+                    filename = f"subtitles.{entry['language']}.srt"
+                    path = directory / filename
+                    with self.store.file(entry["relative_path"]).open("rb") as src, path.open("xb") as dst:
+                        copied.append(path)
+                        shutil.copyfileobj(src, dst)
+                    if file_hash(path) != entry["sha256"]:
+                        raise ChromaError("subtitle_changed", "Subtitle source changed; cannot clone project")
+                    subtitle_files.append({**entry, "relative_path": f"{logical}/{filename}"})
+                subtitle_record = {**selected_subtitles, "project_id": pid,
+                                   "revision_id": subtitle_revision, "files": subtitle_files}
+                source = directory / "subtitles.json"
+                copied.append(source)
+                source.write_text(canonical(subtitle_record), encoding="utf-8")
+                rows.extend([
+                    ("subtitle_timeline", pid, canonical(subtitle_record)),
+                    ("subtitle_revision", subtitle_revision, canonical(subtitle_record)),
+                ])
             timeline = AudioTimeline.model_validate(audio["timeline"])
             for clip in timeline.clips:
                 clip.asset_id = asset_ids[clip.asset_id]
@@ -803,6 +865,8 @@ class Service(ProjectStorageOperations, AuditionOperations, MotionOperations, Mo
             # Freeze audio content and edit revision alongside the visual recipe.
             if audio := freeze_audio(self.store, record["project_id"], settings):
                 snapshot["audio"] = audio
+            if subtitles := freeze_subtitles(self.store, record["project_id"], settings):
+                snapshot["subtitles"] = subtitles
         digest = hashlib.sha256(canonical(snapshot).encode()).hexdigest()
         stamp = now()
         job = Job(

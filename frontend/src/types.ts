@@ -187,6 +187,8 @@ export type Job = {
   // Sparse keyframe counts differ from the source timeline's frame extent.
   frame_indices: number[] | null;
   elapsed_seconds: number;
+  // Progress timestamp anchors the running clock; older responses may omit it.
+  updated_at?: string;
   settings: Settings;
   error: { code: string; message: string } | null;
   artifacts: string[];

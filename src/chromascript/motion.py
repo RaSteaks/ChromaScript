@@ -36,6 +36,7 @@ from .operations import operation
 from .presets import builtins
 from .prores import intermediate_preset, prores_capability
 from .store import Store, canonical, identifier, now
+from .subtitles import freeze_subtitles
 
 FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 RUNTIME = FRONTEND / "motion" / "runtime.mjs"
@@ -679,7 +680,7 @@ class MotionOperations:
         return self.get_motion_scene(scene_id)
 
     @operation(
-        "Create a blank float animation by default, or provide an explicit SDR engine, optional template_id or full spec. No template is required."
+        "Create a blank float animation by default, or provide an explicit SDR engine, optional template_id or full spec. No template is required. Save Chinese, English or bilingual subtitles with set_project_subtitles for automatic sidecar delivery; never burn them into source. Read get_documentation(topic=subtitles)."
     )
     def create_motion_scene(
         self,
@@ -732,7 +733,7 @@ class MotionOperations:
         return self.get_motion_scene(sid)
 
     @operation(
-        "Save HDR/SDR animation source with revision-conflict detection; preserves every previous revision."
+        "Save HDR/SDR animation source with revision-conflict detection; preserves every previous revision. Do not add subtitle overlays; use set_project_subtitles for managed SRTs automatically included in delivery folders and ZIPs. Read get_documentation(topic=subtitles)."
     )
     def update_motion_scene(
         self, scene_id: str, spec: MotionSpec, expected_revision_id: str
@@ -900,7 +901,7 @@ class MotionOperations:
         return estimate_storage(self.store, settings, engine, output, destination, project_id)
 
     @operation(
-        "Queue engine-specific animation rendering: float EXR with optional HDR/SDR video, direct float video (master_bit_depth=null), or SDR screenshot video. Freeze source, rational rate, runtime, color and output settings."
+        "Queue engine-specific animation rendering: float EXR with optional HDR/SDR video, direct float video (master_bit_depth=null), or SDR screenshot video. Freeze source, rational rate, runtime, color, output settings and selected project subtitles. Copy SRT sidecars into the output folder and delivery ZIP without burning into frames."
     )
     def submit_motion_render(
         self,
@@ -1030,6 +1031,9 @@ class MotionOperations:
         # Both animation engines share the same immutable project audio contract.
         if audio := freeze_audio(self.store, record["project_id"], settings):
             snapshot["audio"] = audio
+        # Freeze against the source timebase, not ceil-rounded output duration.
+        if subtitles := freeze_subtitles(self.store, record["project_id"], spec.settings()):
+            snapshot["subtitles"] = subtitles
         digest = hashlib.sha256(canonical(snapshot).encode()).hexdigest()
         stamp = now()
         job = Job(
