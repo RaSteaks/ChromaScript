@@ -8,6 +8,7 @@ import {
 import createScene from "chromascript:scene";
 import config from "chromascript:config";
 import { createHDRCapture } from "./hdr-capture.mjs";
+import { frameSamples } from "./time-sampling.mjs";
 import { createVideoCapture } from "./video-capture.mjs";
 
 function encodeBytes(bytes) {
@@ -436,8 +437,8 @@ function main() {
       }
     });
   }
-  function render(frame, display = true) {
-    if (!Number.isInteger(frame) || frame < 0 || frame >= config.frames)
+  function renderSample(frame, display = true) {
+    if (!Number.isFinite(frame) || frame < 0 || frame >= config.frames)
       throw new Error("无效动画帧。");
     const state = {
       ...context,
@@ -490,6 +491,69 @@ function main() {
         throw new Error("OCIO sRGB 预览渲染失败。");
     }
     if (display) document.body.dataset.frame = String(frame);
+    return { width, height };
+  }
+  // Integrate associated linear RGB and coverage before any OCIO/video transform.
+  // Ping-pong textures avoid float-blend requirements and texture feedback loops.
+  const temporalTargets =
+    config.timePlan?.temporal_samples > 1
+      ? [floatTarget(width, height), floatTarget(width, height)]
+      : [];
+  const temporalMaterial = temporalTargets.length
+    ? material(
+        `uniform sampler2D currentSample; uniform sampler2D previous;
+     uniform float weight;
+     void main(){fragColor=mix(texture(previous,texcoord),texture(currentSample,texcoord),weight);}`,
+        {
+          currentSample: { value: target.texture },
+          previous: { value: null },
+          weight: { value: 1 },
+        },
+      )
+    : null;
+  const copyTemporal = temporalTargets.length
+    ? material(
+        `uniform sampler2D source; void main(){fragColor=texture(source,texcoord);}`,
+        { source: { value: null } },
+      )
+    : null;
+  function render(frame, display = true) {
+    if (!config.timePlan && !Number.isInteger(frame))
+      throw new Error("无效动画帧。");
+    const samples = config.timePlan
+      ? frameSamples(config.timePlan, frame)
+      : [frame];
+    if (temporalMaterial) {
+      renderer.setRenderTarget(temporalTargets[1]);
+      renderer.setClearColor(0, 0);
+      renderer.clear();
+    }
+    for (let index = 0; index < samples.length; index++) {
+      renderSample(samples[index], false);
+      if (temporalMaterial) {
+        temporalMaterial.uniforms.previous.value =
+          temporalTargets[(index + 1) % 2].texture;
+        temporalMaterial.uniforms.weight.value = 1 / (index + 1);
+        renderer.setRenderTarget(temporalTargets[index % 2]);
+        quad.material = temporalMaterial;
+        renderer.render(quad, quadCamera);
+      }
+    }
+    if (copyTemporal) {
+      copyTemporal.uniforms.source.value =
+        temporalTargets[(samples.length - 1) % 2].texture;
+      renderer.setRenderTarget(target);
+      quad.material = copyTemporal;
+      renderer.render(quad, quadCamera);
+    }
+    if (display) {
+      quad.material = displayMaterial;
+      renderer.setRenderTarget(null);
+      renderer.render(quad, quadCamera);
+      document.body.dataset.frame = String(frame);
+    }
+    if (gl.getError() !== gl.NO_ERROR)
+      throw new Error("时间采样 GPU 渲染失败。");
     return { width, height };
   }
   // Capture owns one reusable buffer; Node finishes transferring it before the

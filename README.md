@@ -283,6 +283,20 @@ MCP 启动的网页固定使用 `http://127.0.0.1:8765`。原生 MCP 工具的�
 
 备份用 `export_project_folder`，或先停止服务再复制整个项目文件夹，不要只复制运行中的 SQLite 文件。独立副本用 `clone_project`。
 
+### 独立输出帧率与运动采样
+
+动画项目的 `fps / frames` 始终是创作时基。临时导出 30fps 时，在“设置交付 → 输出时间”选择输出帧率，不修改项目帧率。`output.fps=null` 默认跟随项目；例如 600 帧 / 60fps 导出为 300 帧 / 30fps，仍为 10 秒。
+
+`output.temporal_samples=1` 快速抽取前一源帧；`4 / 8 / 16` 在中心曝光区间内求值并合成，`output.shutter_angle` 默认 180°。源码必须支持绝对时间和小数源帧，不能按调用次数累加运动。非整除时输出帧数向上取整，尾部保持不足一帧，实际时长会显示在界面和时间计划中。
+
+“生成输出预览”按正式空间与时间采样生成 1–60 帧，并缩小为 sRGB 查看图；按输出帧率播放一次。预览不写项目修订、不创建任务，设置变化后标记旧画面失效。它展示编码前的采样，不包含有损编码误差或 HDR 显示效果。
+
+HTTP、MCP 与 CLI 共用 `get_motion_time_plan`、`render_motion_output_preview`、`render_motion_frame(..., output=...)` 和 `submit_motion_render`。例如提交时指定：
+
+```json
+{"output":{"fps":{"numerator":30,"denominator":1},"temporal_samples":8,"shutter_angle":180,"master_bit_depth":32,"video":"srgb"}}
+```
+
 ## 开发
 
 ```sh

@@ -37,7 +37,7 @@ def prepare_float_frame(
     assert depth is not None
     start = monotonic()
     saved = write_image(master, pixels, depth=depth, config_hash=config_hash,
-                        fps=(spec.fps.numerator, spec.fps.denominator), frame_index=index,
+                        fps=((output.fps or spec.fps).numerator, (output.fps or spec.fps).denominator), frame_index=index,
                         disk_reserve_bytes=0)
     seconds["exr_write_and_hash"] = monotonic() - start
     start = monotonic()

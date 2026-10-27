@@ -33,6 +33,7 @@ from .motion import (
 from .motion_color import decode_float_frame
 from .motion_render import iter_float_frames
 from .motion_storage import estimate_storage
+from .motion_timing import motion_time_plan
 from .operations import operation
 from .prores import prores_capability, prores_identity
 from .store import Store, canonical, identifier, now
@@ -219,6 +220,7 @@ def _run_sample(store: Store, estimate_id: str, task: SamplingTask) -> None:
     record = store.get("motion_estimate", estimate_id)
     spec = MotionSpec.model_validate(record["spec"])
     output = MotionOutput.model_validate(record["output"])
+    time_plan = motion_time_plan(spec.settings(), output)
     destination = Path(record["destination"])
     logs = store.root / "estimates" / estimate_id
     temporary: Path | None = None
@@ -256,7 +258,7 @@ def _run_sample(store: Store, estimate_id: str, task: SamplingTask) -> None:
         # workspace disk), so finally can still remove our disposable samples.
         record = {**record, "temporary": str(temporary)}
         store.update("motion_estimate", estimate_id, lambda r: {**r, "temporary": str(temporary)})
-        indices = sample_indices(spec.frames)
+        indices = sample_indices(time_plan.frames)
         measured: dict[str, Any] = {
             "sample_count": len(indices), "frame_indices": indices,
             # animation.json and the separate verbatim source graphs are both
@@ -272,7 +274,7 @@ def _run_sample(store: Store, estimate_id: str, task: SamplingTask) -> None:
 
         def frames() -> Any:
             with closing(iter_float_frames(
-                spec, temporary, indices, render_scale=output.render_scale,
+                spec, temporary, indices, render_scale=output.render_scale, time_plan=time_plan,
                 cancelled=task.cancelled.is_set, on_process=task.register,
             )) as iterator:
                 for step, (index, raw) in enumerate(iterator):
@@ -283,7 +285,7 @@ def _run_sample(store: Store, estimate_id: str, task: SamplingTask) -> None:
                     if output.master_bit_depth:
                         image = temporary / "sample.exr"
                         write_image(image, pixels, depth=output.master_bit_depth,
-                                    fps=(spec.fps.numerator, spec.fps.denominator), frame_index=index,
+                                    fps=(time_plan.fps.numerator, time_plan.fps.denominator), frame_index=index,
                                     disk_reserve_bytes=0)
                         measured["master_bytes"].append(image.stat().st_size)
                         image.unlink()
@@ -299,7 +301,7 @@ def _run_sample(store: Store, estimate_id: str, task: SamplingTask) -> None:
 
         if preset:
             movie = temporary / "sample.mov"
-            settings = spec.settings().model_copy(update={"frames": len(indices)})
+            settings = time_plan.settings(spec.settings()).model_copy(update={"frames": len(indices)})
             with closing(frames()) as iterator:
                 info = encode(preset, settings, movie, iterator, lambda _: check(), on_process=task.register)
             verification = check_probe(info, preset, settings)
@@ -361,7 +363,7 @@ class MotionSamplingOperations:
             raise ChromaError("idempotency_key", "提供 1–200 字符的请求标识。")
         if output.video == "prores-4444-acescct" and not prores_capability(self.store.root)["available"]:
             raise ChromaError("motion_encoder", "本机未通过 12-bit ProRes 4444 验证。")
-        required = spec.width * spec.height * (96 * output.render_scale**2 + 96)
+        required = spec.width * spec.height * ((136 if output.temporal_samples > 1 else 96) * output.render_scale**2 + 96)
         if required > psutil.virtual_memory().available * 0.7:
             raise ChromaError("motion_memory", "当前内存不足以按正式规格采样。")
         destination = resolve_directory(export_directory)
@@ -374,7 +376,7 @@ class MotionSamplingOperations:
             "spec": spec.model_dump(), "output": output.model_dump(),
             "destination": str(destination), "volume": volume_identity(destination),
             "status": "running", "created_at": now(), "completed_frames": 0,
-            "sample_count": min(12, spec.frames), "request_key": idempotency_key,
+            "sample_count": min(12, motion_time_plan(spec.settings(), output).frames), "request_key": idempotency_key,
             "request_hash": request_hash, "pid": process.pid, "process_started": process.create_time(),
         }
         # One workspace lease spans discovery and publication across all project

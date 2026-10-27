@@ -685,3 +685,22 @@ DOCUMENTS["project-storage"] = (
     "use project/交付; explicit external destinations stay frozen. Completed internal deliveries "
     "remain readable after relocation; interrupted jobs with moved frozen destinations require a new submission."
 )
+
+
+DOCUMENTS["motion"] += (
+    " Output timing: MotionSpec.fps/frames remain the authoring timebase. Set MotionOutput.fps "
+    "for temporary delivery; null follows the project. Never rewrite source fps/frames to change delivery. "
+    "get_motion_time_plan returns rational rates, output frame count and actual duration. CFR uses "
+    "ceil(source_duration*output_fps); extra tail is held for less than one output frame. "
+    "temporal_samples=1 holds floor(output_time*source_fps); 4/8/16 use centered stratified shutter "
+    "samples (shutter_angle=1..360, default 180), clamped to first/last source frame. "
+    "Three update.frame may be fractional in this mode; time=frame/source_fps, factory fps/frames "
+    "remain original. Remotion Freeze preserves the original Composition config and Sequence-relative "
+    "time. Source must be deterministic and seekable: no incremental per-call simulation, wall clock "
+    "or unseeded randomness. Float samples integrate associated linear RGBA before OCIO; SDR screenshots "
+    "integrate in linear sRGB and retain screenshot precision. render_motion_output_preview(spec, "
+    "output, start_frame, frame_count=1..60) uses final spatial/time sampling, then returns small sRGB "
+    "PNGs for review playback. This is before codec compression and does not certify HDR appearance. "
+    "render_motion_frame accepts optional output for a single output-frame review. Shared HTTP/MCP/CLI "
+    "operations do not save revisions or queue jobs."
+)

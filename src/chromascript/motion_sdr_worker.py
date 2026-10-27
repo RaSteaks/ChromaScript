@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import subprocess
+import sys
 import time
 import traceback
 from pathlib import Path
@@ -31,6 +32,7 @@ from .motion import (
 )
 from .motion import SDR_RUNTIME as RUNTIME
 from .motion_sources import source_hash, write_sources
+from .motion_timing import motion_time_plan
 from .motion_video_plan import VideoExecution
 from .store import Store, canonical, now
 
@@ -132,13 +134,16 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
         destination = Path(snapshot["export_directory"]) / bundle_name(spec.name, job_id)
         if str(destination) != job.get("export_path"):
             raise ChromaError("snapshot_corrupt", "动画导出位置与冻结快照不一致。")
-        settings = spec.settings()
         output = MotionOutput.model_validate(snapshot["output"])
+        time_plan = motion_time_plan(spec.settings(), output)
+        settings = time_plan.settings(spec.settings())
+        if snapshot.get("time_plan", time_plan.model_dump()) != time_plan.model_dump():
+            raise ChromaError("snapshot_corrupt", "输出时间采样计划与冻结快照不一致。")
         if direct:
             bundle = motion_bundle(job, snapshot)
             directory, published = bundle.prepare()
             if published:
-                progress("exporting", 0.98, spec.frames)
+                progress("exporting", 0.98, settings.frames)
                 finish()
                 return
         else:
@@ -182,6 +187,8 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
                             "frames": str(frames),
                             "browser": browser_executable(),
                             "scale": output.render_scale,
+                            "time_plan": time_plan.model_dump(),
+                            "python": sys.executable,
                         }
                     )
                 )
@@ -193,7 +200,7 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
                         continue
                     if isinstance(event, dict) and "completed" in event:
                         count = int(event["completed"])
-                        progress("rendering", 0.75 * count / spec.frames, count)
+                        progress("rendering", 0.75 * count / settings.frames, count)
                 code = process.wait()
                 if code:
                     log.flush()
@@ -216,7 +223,7 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
             match = re.fullmatch(r"frame-(\d+)\.png", path.name)
             if match:
                 paths[int(match[1])] = path
-        if set(paths) != set(range(spec.frames)):
+        if set(paths) != set(range(settings.frames)):
             raise ChromaError("motion_frames", "浏览器输出帧不完整，请重试任务。")
         thumbnail = directory / "thumbnail.png"
         write_image(
@@ -251,8 +258,8 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
             preset,
             settings,
             encoded_video,
-            (video_pixels(paths[i]) for i in range(spec.frames)),
-            lambda count: progress("encoding", 0.75 + 0.2 * count / spec.frames),
+            (video_pixels(paths[i]) for i in range(settings.frames)),
+            lambda count: progress("encoding", 0.75 + 0.2 * count / settings.frames),
             # Audio is an independent optional input, never part of the pixel stream.
             audio_path=audio_path if audio_info is not None else None,
             speed=video_plan.speed if video_plan is not None else "slow",
@@ -260,11 +267,12 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
         verification = check_probe(info, preset, settings)
         # Padding an 8-bit screenshot into the encoder's 16-bit input pipe adds
         # no precision. File tags declare sRGB; no ACES transform was performed.
+        verification["time_plan"] = time_plan.model_dump()
         verification["source_precision"] = "8-bit browser screenshot"
         verification["scene_linear_master"] = False
         verification["float_pipeline_verified"] = False
         verification["source_color_contract"] = {"status": "not_applicable"}
-        verification["sampling"] = {"render_scale": output.render_scale, "spatial_samples": output.render_scale**2, "temporal_samples": 1}
+        verification["sampling"] = {"render_scale": output.render_scale, "spatial_samples": output.render_scale**2, "temporal_samples": output.temporal_samples, "shutter_angle": output.shutter_angle}
         verification["color_encoding"] = {
             **verification.get("color_encoding", {}),
             "output_transform": None,
@@ -292,7 +300,7 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
                     "audio": audio_info,
                     "source_sha256": source_hash(spec.code, spec.files),
                     "video_sha256": file_hash(video),
-                    "fps": spec.fps.model_dump(),
+                    "fps": settings.fps.model_dump(),
                     "notes": [
                         "Browser sRGB screenshot source; no ACEScg/HDR/float master",
                         "Transparent source is composited on black in linear sRGB",

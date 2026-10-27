@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import psutil
-from pydantic import Field, StrictBool, field_validator, model_validator
+from pydantic import Field, StrictBool, StrictInt, field_validator, model_validator
 
 from .audio import freeze_audio
 from .color import color_info, output_metadata, video_tag_issue
@@ -31,6 +31,7 @@ from .motion_color import (
 )
 from .motion_hdr_preview import HDRPreviewChunk, encode_hdr_preview
 from .motion_sources import source_hash, validate_sources
+from .motion_timing import MotionTiming, motion_time_plan
 from .operations import operation
 from .presets import builtins
 from .prores import intermediate_preset, prores_capability
@@ -43,7 +44,7 @@ MotionEngine = Literal["three-float-v1", "remotion-sdr-v1"]
 IMPORTS = ["three"]
 
 
-class MotionOutput(Model):
+class MotionOutput(MotionTiming):
     # None opts into direct video encoding; historical EXR defaults stay unchanged.
     master_bit_depth: Literal[16, 32] | None = 32
     # Codec and transfer are explicit together; legacy values retain their meaning.
@@ -385,6 +386,11 @@ def motion_identity() -> dict[str, Any]:
         RUNTIME,
         SDR_RUNTIME,
         FRONTEND / "motion" / "preview.tsx",
+        FRONTEND / "motion" / "time-sampling.mjs",
+        FRONTEND / "motion" / "sdr-sampling.mjs",
+        Path(__file__).with_name("motion_timing.py"),
+        Path(__file__).with_name("motion_sdr_sampling.py"),
+        Path(__file__).with_name("motion_output_preview.py"),
         Path(__file__).with_name("motion_sdr_worker.py"),
         FRONTEND / "motion" / "float-runtime.mjs",
         FRONTEND / "motion" / "float-transport.mjs",
@@ -588,6 +594,9 @@ class MotionOperations:
             "master_archive": "zip-stream" if floating else None,
             "preview": "sRGB SDR; independent of delivery",
             "render_scales": [1, 2, 4],
+            "temporal_samples": [1, 4, 8, 16],
+            "output_frame_rate": "independent rational rate; source timebase preserved",
+            "time_sampling_policy": "hold-centered-v1",
             "render_workers": [1, 2, 4] if floating else [1],
             "video_processing": ["auto", "reference"] if floating else ["reference"],
             "video_encoders": ["auto", "software", "hardware"],
@@ -798,10 +807,21 @@ class MotionOperations:
     def encode_motion_hdr_preview(self, chunk: HDRPreviewChunk) -> dict[str, Any]:
         return encode_hdr_preview(chunk)
 
+    @operation("Resolve output frame rate, duration and sampling without changing source, saving a revision or creating a job.")
+    def get_motion_time_plan(self, settings: MotionRenderSettings, output: MotionTiming | None = None) -> dict[str, Any]:
+        plan = motion_time_plan(settings, output or MotionTiming())
+        return {"plan": plan.model_dump(), "settings": plan.settings(settings).model_dump(),
+                "source_duration": settings.duration,
+                "output_duration": plan.settings(settings).duration}
+
     @operation(
-        "Render one unsaved HDR/SDR frame to a transient sRGB PNG for model inspection. HDR sources include original ACEScg statistics; SDR sources declare 8-bit screenshot precision."
+        "Render one unsaved HDR/SDR frame to a transient sRGB PNG for model inspection. Authoring previews include original ACEScg statistics for HDR sources; optional output selects a delivery frame with final temporal/spatial sampling before codec compression. SDR sources retain screenshot precision."
     )
-    def render_motion_frame(self, spec: MotionSpec, frame: int = 0) -> dict[str, Any]:
+    def render_motion_frame(self, spec: MotionSpec, frame: int = 0, output: MotionOutput | None = None) -> dict[str, Any]:
+        if output is not None:
+            from .motion_output_preview import render_output_preview
+
+            return {**render_output_preview(spec, resolve_motion_output(spec.engine, output), frame, 1), "frame": frame}
         import base64
         import tempfile
 
@@ -853,6 +873,13 @@ class MotionOperations:
             result["color_configuration"] = color_info()
             return result
 
+    @operation("Render 1–60 output frames with the frozen output time/sampling recipe, then resize sRGB review copies. No jobs/revisions; before codec compression.", serialized=False)
+    def render_motion_output_preview(self, spec: MotionSpec, output: MotionOutput,
+                                     start_frame: StrictInt = 0, frame_count: StrictInt = 30) -> dict[str, Any]:
+        from .motion_output_preview import render_output_preview
+
+        return render_output_preview(spec, resolve_motion_output(spec.engine, output), start_frame, frame_count)
+
     @operation("Estimate animation master/intermediate/video/audio disk budgets and current destination/workspace free space without rendering or creating files. ZIP size is content-dependent. Pass project_id to include its current soundtrack.")
     def estimate_motion_render(
         self,
@@ -900,6 +927,8 @@ class MotionOperations:
                 "本地浮点渲染需要动画依赖和 Chrome；请运行 ./install.sh 并安装 Chrome。",
             )
         output = resolve_motion_output(spec.engine, output)
+        time_plan = motion_time_plan(spec.settings(), output)
+        settings = time_plan.settings(spec.settings())
         precision = None
         if output.video == "prores-4444-acescct":
             precision = prores_capability(self.store.root)
@@ -932,12 +961,14 @@ class MotionOperations:
             packed_bytes = 6 if output.video == "prores-4444-acescct" else 4 if output.video.startswith("prores-hq-") else 1.5 if output.video == "srgb" else 3
             working_bytes = int(pixels * (output.render_scale**2 * (40 if spec.preserved_layers else 20)
                                          + 96 + packed_bytes * 20))
-        active_workers = min(output.render_workers, spec.frames)
+        active_workers = min(output.render_workers, settings.frames)
+        if output.temporal_samples > 1:
+            working_bytes += pixels * output.render_scale**2 * 40
         working_bytes *= active_workers
         if output.render_workers > 1:
             # One final-resolution float32 shared slot per producer bounds reordering.
             working_bytes += pixels * 16 * active_workers
-        working_bytes += spec.frames * 1024
+        working_bytes += settings.frames * 1024
         if working_bytes > psutil.virtual_memory().available * 0.7:
             raise ChromaError("motion_memory", "当前可用内存不足；请减少渲染并发、超采样倍率、尺寸或释放内存。", required_bytes=working_bytes)
         estimate = self.estimate_motion_render(
@@ -969,7 +1000,7 @@ class MotionOperations:
         else:
             from .motion_video_plan import resolve_video_execution
 
-            video_plan = resolve_video_execution(spec.engine, output, spec.settings())
+            video_plan = resolve_video_execution(spec.engine, output, settings)
             video_execution = video_plan.model_dump() if video_plan is not None else None
         snapshot = {
             "engine": spec.engine,
@@ -979,7 +1010,8 @@ class MotionOperations:
             "kind": "motion",
             "scene": spec.model_dump(),
             "revision_id": rid,
-            "settings": spec.settings().model_dump(),
+            "settings": settings.model_dump(),
+            "time_plan": time_plan.model_dump(),
             "runtime": motion_identity(),
             "export_directory": str(destination),
             "export_root": str(destination),  # Freeze this selection, never a global allowlist.
@@ -996,7 +1028,7 @@ class MotionOperations:
         if precision:
             snapshot["precision_verification"] = precision
         # Both animation engines share the same immutable project audio contract.
-        if audio := freeze_audio(self.store, record["project_id"], spec.settings()):
+        if audio := freeze_audio(self.store, record["project_id"], settings):
             snapshot["audio"] = audio
         digest = hashlib.sha256(canonical(snapshot).encode()).hexdigest()
         stamp = now()
@@ -1007,7 +1039,7 @@ class MotionOperations:
             revision_id=rid,
             kind="motion",
             status="queued",
-            settings=spec.settings(),
+            settings=settings,
             created_at=stamp,
             updated_at=stamp,
             snapshot_hash=digest,

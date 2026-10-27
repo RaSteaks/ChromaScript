@@ -283,6 +283,20 @@ Data is stored in `workspace/` by default (ignored by Git). Each project has its
 
 To back up, use `export_project_folder`, or stop the service and copy the whole project folder. Never copy just the SQLite file of a running service. Use `clone_project` for an independent copy.
 
+### Independent output frame rate and temporal sampling
+
+The animation's `fps / frames` remain its authoring timebase. Choose an output rate under delivery settings for a temporary 30fps export; `output.fps=null` inherits the project. A 600-frame / 60fps source becomes 300 frames / 30fps, preserving its 10-second timing.
+
+`output.temporal_samples=1` holds the preceding source frame; `4 / 8 / 16` integrate centered shutter samples (`output.shutter_angle`, default 180°). Source code must be deterministic and seekable at fractional source frames, without per-call motion accumulation. Non-integral durations round output count up, holding the tail for less than one output frame; the actual duration is reported.
+
+Output review renders 1–60 frames with final spatial/temporal sampling, then resizes sRGB display copies for one-shot playback at the output rate. It creates no jobs/revisions and marks retained images stale when settings change. Review is before codec compression and does not represent HDR display appearance.
+
+HTTP, MCP and CLI share `get_motion_time_plan`, `render_motion_output_preview`, optional `output` on `render_motion_frame`, and `submit_motion_render`. Example output arguments:
+
+```json
+{"output":{"fps":{"numerator":30,"denominator":1},"temporal_samples":8,"shutter_angle":180,"master_bit_depth":32,"video":"srgb"}}
+```
+
 ## Development
 
 ```sh

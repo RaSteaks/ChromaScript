@@ -1,4 +1,5 @@
 // Source is compiled as browser code only. Never import/evaluate it in Node.
+import { renderSampledFrames, sampledScene } from "./sdr-sampling.mjs";
 import { build, formatMessages } from "esbuild";
 import { sourceModules } from "./source-modules.mjs";
 import { randomUUID } from "node:crypto";
@@ -30,9 +31,10 @@ async function compile(spec, mode, channel) {
     mode === "preview"
       ? readFileSync(join(root, "motion/preview.tsx"), "utf8")
       : `import React from 'react';
-       import {Composition, registerRoot} from 'remotion';
+       import {Composition, registerRoot, Freeze, useCurrentFrame} from 'remotion';
        import Scene from 'chromascript:scene';
-       registerRoot(() => <Composition id="Animation" component={Scene} width={${spec.width}} height={${spec.height}} fps={${config.fps}} durationInFrames={${spec.frames}} />);`;
+       ${sampledScene}
+       registerRoot(() => <Composition id="Animation" component={SampledScene} width={${spec.width}} height={${spec.height}} fps={${config.fps}} durationInFrames={${spec.frames}} />);`;
   return build({
     stdin: {
       contents: entry,
@@ -92,7 +94,7 @@ async function main() {
   if (process.argv[2] !== "frames")
     throw new Error("Unknown animation runtime mode");
   const { bundle } = await import("@remotion/bundler");
-  const { renderFrames } = await import("@remotion/renderer");
+  const { renderFrames, openBrowser } = await import("@remotion/renderer");
   mkdirSync(request.directory, { recursive: true });
   const entryPoint = join(request.directory, "compiled.js");
   writeFileSync(entryPoint, javascript);
@@ -126,7 +128,7 @@ async function main() {
       `<head><meta http-equiv="Content-Security-Policy" content="${policy}"><link rel="icon" href="data:,">`,
     ),
   );
-  await renderFrames({
+  const options = {
     serveUrl,
     browserExecutable: request.browser,
     composition: {
@@ -158,7 +160,23 @@ async function main() {
       process.stdout.write(
         JSON.stringify({ stage: "rendering", completed }) + "\n",
       ),
-  });
+  };
+  if (request.time_plan) {
+    const browser = await openBrowser("chrome", {
+      browserExecutable: request.browser,
+      chromiumOptions: { gl: "angle" },
+      logLevel: "error",
+    });
+    try {
+      await renderSampledFrames(
+        renderFrames,
+        { ...options, puppeteerInstance: browser },
+        request,
+      );
+    } finally {
+      await browser.close({ silent: true });
+    }
+  } else await renderFrames(options);
 }
 
 main().catch(async (error) => {

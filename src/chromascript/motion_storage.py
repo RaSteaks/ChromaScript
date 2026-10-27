@@ -10,6 +10,7 @@ from typing import Any
 
 from .audio import audio_sample_window, read_timeline
 from .models import MotionRenderSettings
+from .motion_timing import motion_time_plan
 from .store import Store, canonical, now
 
 
@@ -20,6 +21,8 @@ def estimate_storage(
 ) -> dict[str, Any]:
     from .motion import prores_hq_frame_bits
 
+    time_plan = motion_time_plan(settings, output)
+    settings = time_plan.settings(settings)
     volume = destination
     while not volume.exists():
         volume = volume.parent
@@ -79,6 +82,14 @@ def estimate_storage(
     # screenshot sequence, whose compressed size is unknown without sampling.
     gpu_video = floating and output.master_bit_depth is None and output.video_processing == "auto"
     intermediate = (0 if gpu_video else pixels * 16 * output.render_scale**2 * min(output.render_workers, count)) if floating else pixels * 4 * output.render_scale**2 * count
+    if not floating and output.temporal_samples > 1:
+        # Retained output PNGs coexist with one disposable sample batch until
+        # its merge finishes. Match the runtime's actual batch/tail sizes.
+        batch = max(1, min(64, time_plan.source_frames) // output.temporal_samples)
+        tail = count % batch or batch
+        extra = max(tail * output.temporal_samples,
+                    batch * output.temporal_samples - tail if count > tail else 0)
+        intermediate += pixels * 4 * output.render_scale**2 * extra
     auxiliary = measured.get("source_metadata_bytes", 0)
     final = master + video + audio_bytes + auxiliary
     # Float EXR and video now stream together: account for their simultaneous

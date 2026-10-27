@@ -291,6 +291,9 @@ export type MotionCapabilities = {
 };
 
 export type MotionOutput = {
+  fps?: MotionSpec["fps"] | null;
+  temporal_samples?: 1 | 4 | 8 | 16;
+  shutter_angle?: number;
   // null selects direct encoding without an EXR sequence.
   master_bit_depth: 16 | 32 | null;
   // Values freeze codec and transfer together across HTTP, CLI and MCP.

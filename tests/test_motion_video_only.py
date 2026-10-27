@@ -14,6 +14,7 @@ from chromascript.exports import RenderBundle, motion_bundle
 from chromascript.models import MotionRate, MotionRenderSettings
 from chromascript.motion import MotionOutput, MotionSpec, resolve_motion_output, templates
 from chromascript.motion_color import decode_float_frame
+from chromascript.motion_timing import MotionTimePlan
 from chromascript.service import Service
 from chromascript.worker import run
 
@@ -39,7 +40,13 @@ def transport(monkeypatch):
         monkeypatch.setattr(f"chromascript.{module}.motion_identity", lambda: {"test": 1})
     monkeypatch.setattr("chromascript.motion.motion_environment", lambda: {"render_available": True})
 
-    def frames(spec, directory, indices, *, render_scale=1):
+    def frames(spec, directory, indices, *, render_scale=1, time_plan: MotionTimePlan | None = None):
+        # Synthetic pixels model native-rate frame holds only. Retiming and temporal
+        # integration are exercised through the real renderer in test_motion_timing.
+        assert time_plan is not None
+        assert time_plan.source_frames == time_plan.frames == spec.frames
+        assert time_plan.source_fps == time_plan.fps == spec.fps
+        assert time_plan.temporal_samples == 1
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "gpu.json").write_text(json.dumps({"format": "RGBA32F", "renderer": "test"}))
         try:

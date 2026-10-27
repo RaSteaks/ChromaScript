@@ -48,9 +48,9 @@ def create_mcp(root: Path) -> MCPServer:
     def register(name: str, model: type[BaseModel], description: str) -> None:
         async def invoke(request):
             info = endpoint(root)
-            # Audition preparation, cloud analysis and audio/music generation, model reviews and exports must not time out while their exclusive
+            # Output frame reviews, audition preparation, generation and exports must not time out while their exclusive
             # destination is still being written by the shared service.
-            timeout = httpx.Timeout(60, read=None) if name in {"export_artifact", "export_project_folder", "migrate_workspace_storage", "create_audition", "create_audio", "import_audio", "create_music", "inspect_soundfont", "review_audio", "generate_speech", "generate_music", "analyze_media"} else httpx.Timeout(60)
+            timeout = httpx.Timeout(60, read=None) if name in {"render_motion_output_preview", "render_motion_frame", "export_artifact", "export_project_folder", "migrate_workspace_storage", "create_audition", "create_audio", "import_audio", "create_music", "inspect_soundfont", "review_audio", "generate_speech", "generate_music", "analyze_media"} else httpx.Timeout(60)
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
                     info["url"] + "/api/operations/" + name,

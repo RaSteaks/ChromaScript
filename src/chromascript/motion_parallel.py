@@ -24,6 +24,7 @@ from .exports import RenderBundle
 from .images import read_image, resize_srgb, write_image
 from .motion import MotionOutput, MotionSpec, motion_video_preset
 from .motion_processing import PreparedFrame, prepare_float_frame
+from .motion_timing import motion_time_plan
 from .store import canonical
 from .video_transport import VideoPixelFormat, video_frame_bytes
 
@@ -77,7 +78,7 @@ def iter_parallel_frames(
         gpu = expected_gpu
         # Verify every device before allowing any child to write reusable masters.
         for connection, process in zip(connections, processes, strict=True):
-            message = _receive(connection, process, cancelled, output.render_scale)
+            message = _receive(connection, process, cancelled, output.render_scale, output.temporal_samples)
             if message["kind"] != "gpu":
                 raise ChromaError("motion_parallel", "并行渲染器未返回 GPU 身份。")
             if gpu is not None and message["gpu"] != gpu:
@@ -92,7 +93,7 @@ def iter_parallel_frames(
             connection.send("gpu-accepted")
         for position, index in enumerate(indices):
             owner = position % count
-            message = _receive(connections[owner], processes[owner], cancelled, output.render_scale)
+            message = _receive(connections[owner], processes[owner], cancelled, output.render_scale, output.temporal_samples)
             if message["kind"] != "frame" or message["index"] != index:
                 raise ChromaError("motion_frames", "并行渲染器返回了无效帧顺序。")
             yield PreparedFrame(index, arrays[owner], message["record"], message["seconds"])
@@ -100,7 +101,7 @@ def iter_parallel_frames(
             connections[owner].send("next")
         timings = []
         for connection, process in zip(connections, processes, strict=True):
-            message = _receive(connection, process, cancelled, output.render_scale)
+            message = _receive(connection, process, cancelled, output.render_scale, output.temporal_samples)
             if message["kind"] != "done":
                 raise ChromaError("motion_frames", "并行渲染未完整结束。")
             timings.append(message["transport"])
@@ -153,8 +154,8 @@ def iter_parallel_frames(
 
 
 def _receive(connection: Connection, process: BaseProcess, cancelled: Callable[[], bool] | None,
-             render_scale: int) -> dict[str, Any]:
-    deadline = time.monotonic() + 60 * render_scale**2
+             render_scale: int, temporal_samples: int = 1) -> dict[str, Any]:
+    deadline = time.monotonic() + 60 * render_scale**2 * temporal_samples
     while time.monotonic() < deadline:
         if cancelled is not None and cancelled():
             raise ChromaError("cancelled", "并行渲染已取消。")
@@ -191,7 +192,7 @@ def _produce(
             shared = stack.enter_context(closing(SharedMemory(name=slot_name)))
             pixels = np.ndarray((spec.height, spec.width, 4), np.float32, buffer=shared.buf)
             frames = stack.enter_context(closing(motion_render.iter_float_frames(
-                spec, directory, missing, expected_gpu=expected_gpu, render_scale=output.render_scale,
+                spec, directory, missing, expected_gpu=expected_gpu, render_scale=output.render_scale, time_plan=motion_time_plan(spec.settings(), output),
                 cancelled=stop.is_set,
             ))) if missing else None
             first = next(frames) if frames is not None else None
@@ -251,7 +252,7 @@ def _produce_video(connection: Connection, stop: Event, slot_name: str, spec: Mo
 
     with closing(SharedMemory(name=slot_name)) as shared, closing(iter_video_frames(
         spec, directory, indices, motion_video_preset(output.video).color.output,
-        render_scale=output.render_scale, thumbnail=thumbnail, cancelled=stop.is_set, pixel_format=video_input,
+        render_scale=output.render_scale, time_plan=motion_time_plan(spec.settings(), output), thumbnail=thumbnail, cancelled=stop.is_set, pixel_format=video_input,
     )) as frames:
         pixels = np.ndarray((video_frame_bytes(spec.width, spec.height, video_input),), np.uint8, buffer=shared.buf)
         first = next(frames)

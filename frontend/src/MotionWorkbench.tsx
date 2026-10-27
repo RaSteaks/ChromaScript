@@ -1,3 +1,4 @@
+import { MotionOutputReview } from "./MotionOutputReview";
 import {
   MotionStorageEstimate,
   motionSampleKey,
@@ -214,6 +215,7 @@ export const MotionWorkbench = memo(function MotionWorkbench({
   const [masterDepth, setMasterDepth] = useState<16 | 32>(32);
   const outputEngine = useRef<MotionSpec["engine"]>("three-float-v1");
   const [outputError, setOutputError] = useState("");
+  const [timePlanReady, setTimePlanReady] = useState(false);
   const [accelerationOpen, setAccelerationOpen] = useState(false);
   const [outputOptions, setOutputOptions] =
     useState<MotionDeliveryOptions | null>(null);
@@ -755,6 +757,7 @@ export const MotionWorkbench = memo(function MotionWorkbench({
   async function render() {
     if (
       !saved ||
+      !timePlanReady ||
       dirty ||
       !valid.spec ||
       outputOptions?.engine !== valid.spec.engine ||
@@ -1126,7 +1129,11 @@ export const MotionWorkbench = memo(function MotionWorkbench({
                         />
                       </Field>
                     ))}
-                    <Field label="常用帧率" id="motion-fps">
+                    <Field
+                      label="常用帧率"
+                      id="motion-fps"
+                      hint="项目创作时基；临时降帧请在配置交付中修改输出帧率。"
+                    >
                       <select
                         id="motion-fps"
                         value={draft.fps}
@@ -1521,11 +1528,20 @@ export const MotionWorkbench = memo(function MotionWorkbench({
                   />
                 </div>
               </div>
+              <MotionOutputReview
+                key={saved?.record.id}
+                spec={valid.spec}
+                output={output}
+                active={active && step === "delivery" && !composing}
+                onChange={setOutput}
+                onReady={setTimePlanReady}
+              />
               <div className="motion-export-actions">
                 <Button
                   className="primary"
                   disabled={
                     dirty ||
+                    !timePlanReady ||
                     directoryPicking ||
                     !valid.spec ||
                     !!pending ||

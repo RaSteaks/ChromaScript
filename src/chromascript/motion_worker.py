@@ -34,6 +34,7 @@ from .motion_color import decode_float_frame
 from .motion_processing import prepare_float_frame
 from .motion_render import iter_float_frames, render_float_frames
 from .motion_sources import write_sources
+from .motion_timing import motion_time_plan
 from .motion_video_plan import VideoExecution
 from .presets import builtins
 from .prores import prores_capability
@@ -140,8 +141,11 @@ def run_motion(root: Path, job_id: str) -> None:
         destination = Path(snapshot["export_directory"]) / bundle_name(spec.name, job_id)
         if str(destination) != job.get("export_path"):
             raise ChromaError("snapshot_corrupt", "动画导出位置与冻结快照不一致。")
-        settings = spec.settings()
         output = resolve_motion_output(spec.engine, MotionOutput.model_validate(snapshot["output"]))
+        time_plan = motion_time_plan(spec.settings(), output)
+        settings = time_plan.settings(spec.settings())
+        if snapshot.get("time_plan", time_plan.model_dump()) != time_plan.model_dump():
+            raise ChromaError("snapshot_corrupt", "输出时间采样计划与冻结快照不一致。")
         video_plan = VideoExecution.model_validate(snapshot["video_execution"]) if snapshot.get("video_execution") else None
         gpu_video = video_plan is not None and video_plan.processing == "gpu"
         if output.video == "prores-4444-acescct":
@@ -155,10 +159,10 @@ def run_motion(root: Path, job_id: str) -> None:
                 if output.master_bit_depth is not None:
                     artifact(
                         directory / "masters", "master-archive", "application/zip",
-                        {"frames": spec.frames, "color_space": "ACEScg", "on_demand": True},
+                        {"frames": settings.frames, "color_space": "ACEScg", "on_demand": True},
                         representation="zip-stream",
                     )
-                progress("exporting", 0.98, spec.frames)
+                progress("exporting", 0.98, settings.frames)
                 finish()
                 return
         else:
@@ -219,7 +223,7 @@ def run_motion(root: Path, job_id: str) -> None:
                     for stage, seconds in frame.seconds.items():
                         stage_seconds[stage] = stage_seconds.get(stage, 0) + seconds
                     progress("encoding" if video_preset else "rendering",
-                             (0.95 if video_preset else 0.7) * (frame.index + 1) / spec.frames,
+                             (0.95 if video_preset else 0.7) * (frame.index + 1) / settings.frames,
                              frame.index + 1)
                     if gpu_video:
                         assert video_plan is not None and video_plan.pixel_format is not None
@@ -240,11 +244,11 @@ def run_motion(root: Path, job_id: str) -> None:
             # Each cached master is tied to the frozen source/runtime/configuration.
             # Hash failures invalidate only that frame; output retries retain good masters.
             todo = []
-            for i in range(spec.frames):
+            for i in range(settings.frames):
                 path = masters / f"{i:08d}.exr"
                 if not path.is_file() or entries.get(str(i), {}).get("sha256") != file_hash(path):
                     todo.append(i)
-            if direct and len(todo) < spec.frames and not (work / "gpu-verified.json").is_file():
+            if direct and len(todo) < settings.frames and not (work / "gpu-verified.json").is_file():
                 # A fresh GPU probe cannot prove which backend produced existing
                 # masters. Missing recovery identity must never certify a mixed cache.
                 raise ChromaError("gpu_changed", "母版缓存缺少已验证的 GPU 身份，请重新提交任务。")
@@ -265,7 +269,7 @@ def run_motion(root: Path, job_id: str) -> None:
                 manifest.record(index, prepared.record)
                 stage_seconds["manifest_record"] += time.monotonic() - stage_start
                 progress("encoding" if video_preset else "rendering",
-                         (0.95 if video_preset else 0.7) * len(entries) / spec.frames, len(entries))
+                         (0.95 if video_preset else 0.7) * len(entries) / settings.frames, len(entries))
                 return prepared.pixels
 
             def accept_frame(index: int, raw: Path) -> None:
@@ -276,12 +280,12 @@ def run_motion(root: Path, job_id: str) -> None:
                 json.loads((work / "gpu-verified.json").read_text())
                 if (work / "gpu-verified.json").is_file() else None
             )
-            paths = [masters / f"{i:08d}.exr" for i in range(spec.frames)]
+            paths = [masters / f"{i:08d}.exr" for i in range(settings.frames)]
             if output.render_workers > 1 and video_preset is not None:
                 assert encoded_video is not None
-                with closing(parallel_pixels(list(range(spec.frames)), masters, todo, expected_gpu)) as frames:
+                with closing(parallel_pixels(list(range(settings.frames)), masters, todo, expected_gpu)) as frames:
                     info = encode(video_preset, settings, encoded_video, frames,
-                                  lambda count: progress("encoding", 0.95 * count / spec.frames, count),
+                                  lambda count: progress("encoding", 0.95 * count / settings.frames, count),
                                   audio_path=audio_path if audio_info is not None else None, speed=encode_speed)
             elif output.render_workers > 1 and todo:
                 with closing(parallel_pixels(todo, masters, todo, expected_gpu)) as frames:
@@ -299,7 +303,7 @@ def run_motion(root: Path, job_id: str) -> None:
                         return
                     missing = set(todo)
                     with closing(iter_float_frames(
-                        spec, work, todo, expected_gpu=expected_gpu, render_scale=output.render_scale,
+                        spec, work, todo, expected_gpu=expected_gpu, render_scale=output.render_scale, time_plan=time_plan,
                     )) as frames:
                         for index, path in enumerate(paths):
                             if index in missing:
@@ -319,17 +323,17 @@ def run_motion(root: Path, job_id: str) -> None:
 
                 with closing(master_video_frames()) as frames:
                     info = encode(video_preset, settings, encoded_video, frames,
-                                  lambda count: progress("encoding", 0.95 * count / spec.frames, count),
+                                  lambda count: progress("encoding", 0.95 * count / settings.frames, count),
                                   audio_path=audio_path if audio_info is not None else None, speed=encode_speed)
             elif todo or expected_gpu is None:
-                gpu = render_float_frames(spec, work, todo, accept_frame, expected_gpu=expected_gpu, render_scale=output.render_scale)
+                gpu = render_float_frames(spec, work, todo, accept_frame, expected_gpu=expected_gpu, render_scale=output.render_scale, time_plan=time_plan)
                 atomic_json(work / "gpu-verified.json", gpu)
             else:
                 gpu = expected_gpu
             manifest.finish()
             # Publish representative master artifacts for original-pixel inspection on MCP,
             # CLI and HTTP; the sequence manifest enumerates all frames and hashes.
-            for index in sorted({0, spec.frames // 2, spec.frames - 1}):
+            for index in sorted({0, settings.frames // 2, settings.frames - 1}):
                 path = paths[index]
                 artifact(
                     path,
@@ -358,23 +362,24 @@ def run_motion(root: Path, job_id: str) -> None:
                 for path in [*paths, manifest_file]:
                     legacy_zip.write(path, f"masters/{path.name}")
                     progress("packaging", 0.72)
-            artifact(archive, "master-archive", "application/zip", {"frames": spec.frames})
+            artifact(archive, "master-archive", "application/zip", {"frames": settings.frames})
         verification: dict[str, Any] = {
             "passed": True,
+            "time_plan": time_plan.model_dump(),
             "scene_linear_master": master_depth is not None,
             "delivery_mode": "video-only" if master_depth is None else "exr-master",
             "source_precision": "RGBA32F scene/processing; packed video readback" if gpu_video else "RGBA32F GPU readback",
             "source_color_space": spec.source_color_space,
             "preserved_layer_spaces": [layer.source_color_space for layer in spec.preserved_layers],
-            "linear_processing": "source, spatial sampling, layer compositing and master conversion; display rendering only at preview/video exits",
+            "linear_processing": "source, spatial/temporal sampling, layer compositing and master conversion; display rendering only at preview/video exits",
             "master_bit_depth": output.master_bit_depth,
-            "verified_frame_rate": f"{spec.fps.numerator}/{spec.fps.denominator}",
+            "verified_frame_rate": f"{settings.fps.numerator}/{settings.fps.denominator}",
             # Float transport/storage evidence is independent of an explicit
             # reviewer attestation; arbitrary shader semantics are never auto-certified.
             "float_pipeline_verified": True,
             "source_color_contract": snapshot.get("source_color_review", {"status": "unreviewed"}),
             "scene_reference_basis": "declared source contract; see source_color_contract",
-            "sampling": {"render_scale": output.render_scale, "spatial_samples": output.render_scale**2, "temporal_samples": 1},
+            "sampling": {"render_scale": output.render_scale, "spatial_samples": output.render_scale**2, "temporal_samples": output.temporal_samples, "shutter_angle": output.shutter_angle},
             "render_workers": output.render_workers,
             "video_execution": video_plan.model_dump() if video_plan is not None else None,
         }
@@ -385,7 +390,7 @@ def run_motion(root: Path, job_id: str) -> None:
 
             def video_frames() -> Generator[np.ndarray | VideoFrame, None, None]:
                 if output.render_workers > 1:
-                    with closing(parallel_pixels(list(range(spec.frames)))) as frames:
+                    with closing(parallel_pixels(list(range(settings.frames)))) as frames:
                         yield from frames
                     return
                 if gpu_video:
@@ -393,15 +398,15 @@ def run_motion(root: Path, job_id: str) -> None:
 
                     assert video_plan is not None and video_plan.pixel_format is not None
                     with closing(iter_video_frames(
-                        spec, work, list(range(spec.frames)), preset.color.output,
-                        render_scale=output.render_scale, thumbnail=thumbnail,
+                        spec, work, list(range(settings.frames)), preset.color.output,
+                        render_scale=output.render_scale, time_plan=time_plan, thumbnail=thumbnail,
                         cancelled=lambda: store.get("job", job_id)["status"] == "cancelled",
                         pixel_format=video_plan.pixel_format,
                     )) as packets:
                         for index, data in enumerate(packets):
                             if bundle is not None:
                                 bundle.check_volume()
-                            progress("encoding", 0.95 * index / spec.frames, index)
+                            progress("encoding", 0.95 * index / settings.frames, index)
                             yield VideoFrame(data, video_plan.pixel_format)
                     gpu.update(json.loads((work / "gpu.json").read_text()))
                     return
@@ -409,12 +414,12 @@ def run_motion(root: Path, job_id: str) -> None:
                 # next. No EXR, whole-sequence cache, or second GPU render is involved.
                 # Interrupted video retries start at frame zero: no reusable EXRs exist.
                 with closing(iter_float_frames(
-                    spec, work, list(range(spec.frames)), render_scale=output.render_scale
+                    spec, work, list(range(settings.frames)), render_scale=output.render_scale, time_plan=time_plan
                 )) as frames:
                     for index, raw in frames:
                         if bundle is not None:
                             bundle.check_volume()
-                        progress("encoding", 0.95 * index / spec.frames, index)
+                        progress("encoding", 0.95 * index / settings.frames, index)
                         # The current transport already occupies disk and is
                         # removed before the next one; do not reserve it twice.
                         if shutil.disk_usage(work).free <= 0:
@@ -435,7 +440,7 @@ def run_motion(root: Path, job_id: str) -> None:
                 with closing(video_frames()) as frames:
                     info = encode(
                         preset, settings, encoded_video, frames,
-                        lambda count: progress("encoding", 0.95 * count / spec.frames, count),
+                        lambda count: progress("encoding", 0.95 * count / settings.frames, count),
                         audio_path=audio_path if audio_info is not None else None,
                         video_input=video_plan.pixel_format if gpu_video and video_plan is not None else None,
                         speed=encode_speed,
@@ -486,7 +491,7 @@ def run_motion(root: Path, job_id: str) -> None:
                     "audio": audio_info,
                     "source_sha256": spec.source_digest(),
                     "video_sha256": file_hash(video) if video else None,
-                    "fps": spec.fps.model_dump(),
+                    "fps": settings.fps.model_dump(),
                     "color_configuration": snapshot["color_configuration"],
                     "performance": {
                         "elapsed_before_publication_seconds": time.monotonic() - start,
@@ -523,7 +528,7 @@ def run_motion(root: Path, job_id: str) -> None:
             if master_depth is not None:
                 artifact(
                     directory / "masters", "master-archive", "application/zip",
-                    {"frames": spec.frames, "color_space": "ACEScg", "on_demand": True},
+                    {"frames": settings.frames, "color_space": "ACEScg", "on_demand": True},
                     representation="zip-stream",
                 )
         else:

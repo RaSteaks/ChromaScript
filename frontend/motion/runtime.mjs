@@ -143,6 +143,7 @@ async function compile(
   layerIndex = null,
   hdrPreview = true,
   videoCapture,
+  timePlan,
 ) {
   const config = {
     width: spec.width,
@@ -158,6 +159,7 @@ async function compile(
     renderScale,
     hdrPreview,
     videoCapture,
+    timePlan,
   };
   // Retain isolated ColorManagement for top-level colors and update closures,
   // but share resource IDs across those bundles and the host's Three instance.
@@ -241,6 +243,7 @@ export async function compileFloatDocument(request, mode) {
     null,
     request.hdr_preview,
     request.video_capture,
+    request.time_plan,
   );
   const script = [...layerScripts, result.outputFiles[0].text]
     .join("\n")
@@ -344,7 +347,10 @@ async function main() {
         : await transportFloatFrames(
             page,
             request.frame_indices ||
-              Array.from({ length: spec.frames }, (_, i) => i),
+              Array.from(
+                { length: request.time_plan?.frames ?? spec.frames },
+                (_, i) => i,
+              ),
             request.frames,
             async (frame) => {
               process.stdout.write(

@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from .errors import ChromaError
 from .motion import FRONTEND, RUNTIME, MotionSpec, browser_executable
+from .motion_timing import MotionTimePlan
 from .store import canonical
 
 
@@ -25,6 +26,7 @@ def iter_float_frames(
     render_scale: int = 1,
     cancelled: Callable[[], bool] | None = None,
     on_process: Callable[[subprocess.Popen[Any]], None] | None = None,
+    time_plan: MotionTimePlan | None = None,
 ) -> Generator[tuple[int, Path], None, None]:
     directory.mkdir(parents=True, exist_ok=True)
     # Interrupted transport is disposable, unlike the independently verified EXRs.
@@ -55,6 +57,7 @@ def iter_float_frames(
                         "browser": browser_executable(),
                         "frame_indices": indices,
                         "render_scale": render_scale,
+                        "time_plan": time_plan.model_dump() if time_plan else None,
                     }
                 ) + "\n"
             )
@@ -62,7 +65,7 @@ def iter_float_frames(
             received: set[int] = set()
             # A stalled shader/source must not occupy a worker forever. Successful
             # frame progress resets the deadline; total sequence length is unrestricted.
-            frame_timeout = 60 * render_scale**2
+            frame_timeout = 60 * render_scale**2 * (time_plan.temporal_samples if time_plan else 1)
             deadline = time.monotonic() + frame_timeout
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
@@ -134,11 +137,12 @@ def render_float_frames(
     max_dimension: int | None = None,
     expected_gpu: dict[str, Any] | None = None,
     render_scale: int = 1,
+    time_plan: MotionTimePlan | None = None,
 ) -> dict[str, Any]:
     # Keep the callback API for previews and resumable EXRs; streaming video
     # consumes the same verified transport lazily without an extra render pass.
     with closing(iter_float_frames(
-        spec, directory, indices, max_dimension, expected_gpu, render_scale
+        spec, directory, indices, max_dimension, expected_gpu, render_scale, time_plan=time_plan
     )) as frames:
         for index, raw in frames:
             on_frame(index, raw)

@@ -19,6 +19,7 @@ from .errors import ChromaError
 from .images import resize_srgb, write_image
 from .motion import FRONTEND, MotionSpec, browser_executable
 from .motion_color import VideoOutput, video_shader
+from .motion_timing import MotionTimePlan
 from .store import canonical
 from .video_transport import VideoPixelFormat, video_frame_bytes
 
@@ -28,6 +29,7 @@ def iter_video_frames(
     render_scale: int = 1, thumbnail: Path | None = None,
     cancelled: Callable[[], bool] | None = None,
     pixel_format: VideoPixelFormat | None = None,
+    time_plan: MotionTimePlan | None = None,
 ) -> Generator[bytes, None, None]:
     if output not in {"sRGB", "PQ", "HLG", "ACEScct"}:
         raise ChromaError("video_output", "GPU 视频出口不支持此色彩编码。")
@@ -45,12 +47,13 @@ def iter_video_frames(
             process.stdin.write((canonical({
                 "spec": spec.model_dump(), "display": spec.display(), "frames": str(directory),
                 "browser": browser_executable(), "frame_indices": indices, "render_scale": render_scale,
+                "time_plan": time_plan.model_dump() if time_plan else None,
                 "video_capture": contract, "thumbnail": thumbnail is not None,
             }) + "\n").encode())
             process.stdin.flush()
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
-                deadline = time.monotonic() + 60 * render_scale**2
+                deadline = time.monotonic() + 60 * render_scale**2 * (time_plan.temporal_samples if time_plan else 1)
 
                 def receive(size: int) -> bytes:
                     result = bytearray()
@@ -87,7 +90,7 @@ def iter_video_frames(
                     yield pixels
                     process.stdin.write((canonical({"accepted": index}) + "\n").encode())
                     process.stdin.flush()
-                    deadline = time.monotonic() + 60 * render_scale**2
+                    deadline = time.monotonic() + 60 * render_scale**2 * (time_plan.temporal_samples if time_plan else 1)
             process.stdin.close()
             if process.wait(timeout=15):
                 raise ChromaError("motion_render", log_path.read_text(errors="replace")[-6000:])
