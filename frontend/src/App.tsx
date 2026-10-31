@@ -2429,8 +2429,8 @@ export default function App() {
         onClose={() => setDiscard(null)}
       >
         <p>
-          当前工作区有未保存修改。切换项目会影响 WGSL
-          与动画草稿；切换同类作品会替换该编辑器的草稿。
+          当前工作区有未保存修改。切换项目会影响
+          WGSL、动画与声音草稿；切换同类作品会替换该编辑器的草稿。已开始的云端生成不会因切换而取消。
         </p>
         <div className="modal-actions">
           <Button className="primary" onClick={() => setDiscard(null)}>

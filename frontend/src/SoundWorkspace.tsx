@@ -118,6 +118,7 @@ export function SoundWorkspace({
     Record<string, Direction>
   >({});
   const [timelineDirty, setTimelineDirty] = useState(false);
+  const [speechDirty, setSpeechDirty] = useState(false);
   const [create, setCreate] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
@@ -159,6 +160,7 @@ export function SoundWorkspace({
     directionDrafts[selectedRound] ?? round?.direction ?? emptyDirection();
   const dirty =
     timelineDirty ||
+    speechDirty ||
     create ||
     apply ||
     !!Object.keys(feedbackDrafts).length ||
@@ -415,6 +417,7 @@ export function SoundWorkspace({
           >
             {name}
             {id === "timeline" && timelineDirty ? " · 未保存" : ""}
+            {id === "assets" && speechDirty ? " · 未完成配音" : ""}
           </Button>
         ))}
       </nav>
@@ -1113,6 +1116,7 @@ export function SoundWorkspace({
           addition={addition}
           onAdded={added}
           onDirty={setTimelineDirty}
+          onSpeechDirty={setSpeechDirty}
         />
       </div>
       <Modal

@@ -12,13 +12,15 @@ import threading
 import time
 import wave
 from pathlib import Path
-from typing import Annotated, Any, Callable, Literal
+from typing import Annotated, Any, Callable, Literal, Self
 
 import httpx
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
+from . import openai_speech
 from .audio import MAX_INPUT_BYTES, MAX_SECONDS, AudioOperations
 from .cloud_privacy import (
+    api_secrets,
     assert_no_secret,
     private_directory,
     private_directory_tree,
@@ -36,6 +38,9 @@ from .store import Store, canonical, now
 ENDPOINT = "https://openrouter.ai/api/v1/audio/speech"
 DEFAULT_MODEL = "google/gemini-3.8-flash-tts"
 ENV_KEYS = {
+    "OPENAI_API_KEY",
+    "OPENAI_TTS_MODEL",
+    "OPENAI_TTS_VOICE",
     "OPENROUTER_API_KEY",
     "OPENROUTER_TTS_MODEL",
     "OPENROUTER_TTS_VOICE",
@@ -44,9 +49,11 @@ ENV_KEYS = {
     "OPENROUTER_MUSIC_REQUIRE_ZDR",
     "OPENROUTER_ANALYSIS_MODEL",
 }
+SpeechProvider = Literal["openrouter", "openai"]
 
 
 class SpeechRequest(Input):
+    provider: SpeechProvider = "openrouter"
     text: str = Field(min_length=1, max_length=12000, strict=True)
     instructions: str = Field(default="", max_length=4000, strict=True)
     model: str | None = Field(default=None, max_length=200, strict=True)
@@ -60,12 +67,25 @@ class SpeechRequest(Input):
             raise ValueError("Text and voice must not be blank")
         return value
 
-    @field_validator("model")
     @classmethod
     def model_id(cls, value: str | None) -> str | None:
+        # Music and media analysis also use this OpenRouter-only ID validator.
         if value is not None and not re.fullmatch(r"[A-Za-z0-9_.:-]+/[A-Za-z0-9_./:-]+", value):
             raise ValueError("Use an exact OpenRouter provider/model ID")
         return value
+
+    @model_validator(mode="after")
+    def provider_options(self) -> Self:
+        if self.provider == "openrouter":
+            self.model_id(self.model)
+            return self
+        if self.model is not None and self.model not in openai_speech.MODELS:
+            raise ValueError("Use a supported OpenAI Realtime model")
+        if self.voice is not None and self.voice not in openai_speech.VOICES:
+            raise ValueError("Use a supported OpenAI Realtime voice")
+        if self.response_format != "pcm":
+            raise ValueError("OpenAI Realtime speech requires response_format=pcm")
+        return self
 
 
 def configuration(store: Store) -> dict[str, str]:
@@ -91,36 +111,55 @@ def configuration(store: Store) -> dict[str, str]:
             # Never include dotenv contents or parser exception text in errors.
             raise ChromaError(
                 "speech_config",
-                "Unable to read OpenRouter .env; require an owner-only regular file (chmod 600) and literal KEY=value lines",
+                "Unable to read cloud .env; require an owner-only regular file (chmod 600) and literal KEY=value lines",
             ) from None
     values.update({key: os.environ[key] for key in ENV_KEYS if key in os.environ})
     return values
 
 
-def public_configuration(store: Store) -> dict[str, Any]:
-    try:
-        values = configuration(store)
-        privacy = provider_policy(values)
-    except ChromaError as exc:
-        # Optional cloud configuration must not break offline capability discovery.
-        return {
-            "provider": "OpenRouter",
-            "configuration_error": exc.code,
-            "api_key_configured": False,
-            "cloud": True,
-            "note": "Unable to read TTS .env; offline audio remains available",
-        }
-    return {
-        "provider": "OpenRouter",
-        "endpoint": ENDPOINT,
-        "api_key_configured": bool(values.get("OPENROUTER_API_KEY", "").strip()),
-        "model": public_setting(values.get("OPENROUTER_TTS_MODEL") or DEFAULT_MODEL, values),
-        "voice": public_setting(values.get("OPENROUTER_TTS_VOICE") or "Kore", values),
+def public_configuration(store: Store, provider: SpeechProvider = "openrouter") -> dict[str, Any]:
+    openai = provider == "openai"
+    prefix = "OPENAI" if openai else "OPENROUTER"
+    common: dict[str, Any] = {
+        "provider": "OpenAI" if openai else "OpenRouter",
+        "provider_id": provider,
+        "supported_providers": ["openrouter", "openai"],
+        "endpoint": openai_speech.ENDPOINT if openai else ENDPOINT,
         "env_files": [str(store.root.parent / ".env"), str(store.root / ".env")],
         "precedence": "process environment > workspace/.env > workspace parent/.env",
         "cloud": True,
         "generation_may_incur_cost": True,
         "generate_operation": "chromascript.generate_speech",
+        "status_operation": "chromascript.get_speech_request",
+        "supported_voices": list(openai_speech.VOICES) if openai else [],
+        "supported_models": list(openai_speech.MODELS) if openai else [],
+        "max_text_characters": 12000,
+        "max_instruction_characters": 4000,
+    }
+    try:
+        values = configuration(store)
+        privacy = openai_speech.PRIVACY if openai else provider_policy(values)
+    except ChromaError as exc:
+        # Optional cloud configuration must not break offline capability discovery.
+        return {
+            **common,
+            "configuration_error": exc.code,
+            "api_key_configured": False,
+            "note": "Unable to read TTS .env; offline audio remains available",
+        }
+    model = values.get(prefix + "_TTS_MODEL") or (openai_speech.MODELS[0] if openai else DEFAULT_MODEL)
+    voice = values.get(prefix + "_TTS_VOICE") or (openai_speech.DEFAULT_VOICE if openai else "Kore")
+    try:
+        SpeechRequest(provider=provider, text="configuration", model=model, voice=voice)
+    except ValueError:
+        # Discovery still returns safe settings so users can correct local config.
+        common["configuration_error"] = "speech_config"
+    return {
+        **common,
+        "api_key_configured": bool(values.get(prefix + "_API_KEY", "").strip()),
+        "model": public_setting(model, values),
+        "voice": public_setting(voice, values),
+        "supported_formats": ["pcm"] if openai or model.startswith("google/gemini-") else ["pcm", "mp3"],
         "privacy_policy": privacy,
         "note": "Local configuration only; credentials and model availability have not been tested",
     }
@@ -184,6 +223,7 @@ def download_speech(
                 "response_sha256": file_hash(raw),
                 "created_at": now(),
                 "privacy_policy": payload["provider"],
+                "ai_generated": True,
                 "precision_note": "Source encoding is not model precision; managed PCM is resampled",
             }
             if payload["response_format"] == "pcm":
@@ -237,14 +277,38 @@ class SpeechOperations(AudioOperations):
     operation_lock: Any
 
     @operation(
-        "Read local OpenRouter TTS configuration and key presence, never the key. No network request or charge.",
+        "Read local speech configuration for openrouter (default) or openai and key presence, never the key. No network request or charge.",
         serialized=False,
     )
-    def get_speech_config(self) -> dict[str, Any]:
-        return public_configuration(self.store)
+    def get_speech_config(self, provider: SpeechProvider = "openrouter") -> dict[str, Any]:
+        return public_configuration(self.store, provider)
 
     @operation(
-        "Generate CLOUD speech via OpenRouter (billable): sends text/style/voice, not video. Reads key from local .env. Requires a unique idempotency_key; reuse it for safe retries. Returns an immutable audio asset; attach separately with revision-checked set_project_audio. Failed/pending keys never automatically resubmit a paid request.",
+        "Read a speech request's durable status or verified completed asset by its original idempotency_key. Never submits generation, retries the provider, or charges. Does not return the private script.",
+        serialized=False,
+    )
+    def get_speech_request(
+        self,
+        project_id: str,
+        idempotency_key: Annotated[
+            str, Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$", strict=True)
+        ],
+    ) -> dict[str, Any]:
+        self._audio_project(project_id, False)
+        rid = hashlib.sha256(f"{project_id}:{idempotency_key}".encode()).hexdigest()
+        with self.store.connect(project_id) as connection:
+            row = connection.execute(
+                "SELECT data FROM records WHERE kind='speech_request' AND id=?", (rid,)
+            ).fetchone() or self.store.legacy_record("speech_request", rid)
+        if row is None:
+            return {"request_id": rid, "status": "not_found"}
+        record = json.loads(row[0])
+        if record["status"] == "complete":
+            return {"status": "complete", **completed_audio(self.store, record)}
+        return {"request_id": rid, "status": record["status"], "error_code": record.get("error_code")}
+
+    @operation(
+        "Generate CLOUD speech via request.provider=openrouter (default) or openai (Realtime; billable): sends text/style/voice, not video. Reads the selected provider key from local .env. Requires a unique idempotency_key; reuse it for safe retries. Returns an immutable AI-generated audio asset; attach separately with revision-checked set_project_audio. Failed/pending keys never automatically resubmit a paid request.",
         serialized=False,
     )
     def generate_speech(
@@ -271,29 +335,39 @@ class SpeechOperations(AudioOperations):
         def prepare(
             values: dict[str, str], secret: str
         ) -> Callable[[Path], tuple[Path, dict[str, Any]]]:
-            model = request.model or values.get("OPENROUTER_TTS_MODEL") or DEFAULT_MODEL
-            voice = request.voice or values.get("OPENROUTER_TTS_VOICE") or "Kore"
+            openai = request.provider == "openai"
+            prefix = "OPENAI" if openai else "OPENROUTER"
+            model = request.model or values.get(prefix + "_TTS_MODEL") or (openai_speech.MODELS[0] if openai else DEFAULT_MODEL)
+            voice = request.voice or values.get(prefix + "_TTS_VOICE") or (openai_speech.DEFAULT_VOICE if openai else "Kore")
             try:
-                SpeechRequest(text=request.text, model=model, voice=voice)
+                SpeechRequest(provider=request.provider, text=request.text, model=model, voice=voice, response_format=request.response_format)
             except ValueError:
                 raise ChromaError(
                     "speech_config", "Invalid configured TTS model or voice"
                 ) from None
             if model.startswith("google/gemini-") and request.response_format != "pcm":
                 raise ChromaError("speech_format", "Gemini TTS requires response_format=pcm")
-            payload = {
+            payload: dict[str, Any] = {
                 "model": model,
                 "input": request.text,
                 "voice": voice,
                 "instructions": request.instructions,
                 "response_format": request.response_format,
-                "provider": provider_policy(values),
             }
-            assert_no_secret(payload, secret)
+            if not openai:
+                payload["provider"] = provider_policy(values)
+            assert_no_secret(payload, api_secrets(values))
+            if openai:
+                return lambda directory: openai_speech.download_openai_speech(secret, payload, directory)
             return lambda directory: download_speech(secret, payload, directory)
 
+        inputs = request.model_dump()
+        if request.provider == "openrouter":
+            # Preserve pre-provider fingerprints, including explicit OpenRouter
+            # retries. The same durable key cannot switch to OpenAI and rebill.
+            inputs.pop("provider")
         return self._generate_cloud_audio(
-            project_id, name, request.model_dump(), key, "speech", prepare
+            project_id, name, inputs, key, "speech", prepare, provider=request.provider
         )
 
     def _generate_cloud_audio(
@@ -304,6 +378,8 @@ class SpeechOperations(AudioOperations):
         key: str,
         kind: Literal["speech", "music"],
         prepare: Callable[[dict[str, str], str], Callable[[Path], tuple[Path, dict[str, Any]]]],
+        *,
+        provider: SpeechProvider = "openrouter",
     ) -> dict[str, Any]:
         # Speech/music share recovery semantics but keep independent namespaces,
         # locks and source directories. Existing speech request IDs remain valid.
@@ -331,15 +407,7 @@ class SpeechOperations(AudioOperations):
                         "idempotency_conflict", "Use a new key for changed audio inputs"
                     )
                 if previous["status"] == "complete":
-                    result = previous["result"]
-                    asset = result["asset"]
-                    path = self.store.file(asset["relative_path"])
-                    if not path.is_file() or file_hash(path) != asset["sha256"]:
-                        raise ChromaError(
-                            "audio_asset_changed",
-                            "Saved audio is missing or changed; no resubmission",
-                        )
-                    return dict(result)
+                    return completed_audio(self.store, previous)
                 raise ChromaError(
                     kind + "_not_retried",
                     "Previous request is pending or failed; inspect its source before explicitly using a new billable key",
@@ -349,11 +417,12 @@ class SpeechOperations(AudioOperations):
                     **previous.get("diagnostics", {}),
                 )
             values = configuration(self.store)
-            secret = values.get("OPENROUTER_API_KEY", "").strip()
+            key_name = "OPENAI_API_KEY" if provider == "openai" else "OPENROUTER_API_KEY"
+            secret = values.get(key_name, "").strip()
             if not secret or any(c.isspace() for c in secret) or not secret.isascii():
-                raise ChromaError(kind + "_config", "Set a valid OPENROUTER_API_KEY in local .env")
+                raise ChromaError(kind + "_config", "Set a valid " + key_name + " in local .env")
             # Names and reference descriptions also flow into durable metadata.
-            assert_no_secret({"name": name, "inputs": inputs}, secret)
+            assert_no_secret({"name": name, "inputs": inputs}, api_secrets(values))
             if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
                 raise ChromaError(
                     "ffmpeg_unavailable", "FFmpeg and ffprobe are required before paid generation"
@@ -382,7 +451,7 @@ class SpeechOperations(AudioOperations):
             source, report = generate(directory)
             # Retain paid source/provenance if decoding fails. No cloud inference
             # holds the operation lock; only the final immutable publication does.
-            report = redact_secret(report, secret)
+            report = redact_secret(report, api_secrets(values))
             report["source_path"] = str(source)
             (directory / "generation.json").write_text(canonical(report), encoding="utf-8")
             with self.operation_lock:
@@ -391,7 +460,7 @@ class SpeechOperations(AudioOperations):
                     name,
                     source_path=str(source),
                     metadata={
-                        "source": "openrouter_tts" if kind == "speech" else "openrouter_music",
+                        "source": provider + "_tts" if kind == "speech" else "openrouter_music",
                         kind + "_generation": public_report(report),
                     },
                 )
@@ -415,3 +484,13 @@ class SpeechOperations(AudioOperations):
                 for retained in directory.iterdir():
                     if retained.is_file() and not retained.is_symlink():
                         retained.chmod(0o600)
+
+
+def completed_audio(store: Store, record: dict[str, Any]) -> dict[str, Any]:
+    # Both retry and read-only recovery verify the immutable published bytes.
+    result = record["result"]
+    asset = result["asset"]
+    path = store.file(asset["relative_path"])
+    if not path.is_file() or file_hash(path) != asset["sha256"]:
+        raise ChromaError("audio_asset_changed", "Saved audio is missing or changed; no resubmission")
+    return dict(result)

@@ -1,12 +1,13 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { ApiError, artifactUrl, call } from "./api";
 import { Button, Field, Modal, Notice } from "./components";
+import { SpeechGenerator } from "./SpeechGenerator";
 
-type Asset = {
+export type AudioAsset = {
   id: string;
   name: string;
   duration_seconds: number;
-  metadata?: { clipped_samples?: number };
+  metadata?: { clipped_samples?: number; source?: string };
   usage?: { auditions: number; timeline_clips: number };
 };
 export type AudioClip = {
@@ -29,7 +30,7 @@ type ClipDraft = {
 };
 type Reply = {
   revision_id: string;
-  assets: Asset[];
+  assets: AudioAsset[];
   timeline: { clips: AudioClip[] };
 };
 const toDraft = (clip: AudioClip): ClipDraft => ({
@@ -56,6 +57,7 @@ export function ProjectAudio({
   addition,
   onAdded,
   onDirty,
+  onSpeechDirty,
 }: {
   projectId: string;
   disabled?: boolean;
@@ -65,6 +67,7 @@ export function ProjectAudio({
   addition?: AudioClip | null;
   onAdded?: () => void;
   onDirty?: (dirty: boolean) => void;
+  onSpeechDirty?: (dirty: boolean) => void;
 }) {
   const prefix = useId();
   const [open, setOpen] = useState(embedded && active);
@@ -74,6 +77,8 @@ export function ProjectAudio({
   const [clips, setClips] = useState<ClipDraft[]>([]);
   const [baseline, setBaseline] = useState("[]");
   const [pending, setPending] = useState("");
+  const [speechDirty, setSpeechDirty] = useState(false);
+  const [speechPending, setSpeechPending] = useState(false);
   const busy = useRef(false);
   const [error, setError] = useState("");
   const [conflict, setConflict] = useState(false);
@@ -93,6 +98,9 @@ export function ProjectAudio({
   useEffect(() => {
     onDirty?.(dirty || !!pending);
   }, [dirty, pending, onDirty]);
+  useEffect(() => {
+    onSpeechDirty?.(speechDirty || speechPending);
+  }, [speechDirty, speechPending, onSpeechDirty]);
 
   const applying = useRef<AudioClip | null>(null);
   useEffect(() => {
@@ -145,13 +153,13 @@ export function ProjectAudio({
   }, [open, projectId, reload]);
 
   useEffect(() => {
-    if (!open || !dirty) return;
+    if (!open || !(dirty || speechDirty || speechPending)) return;
     const warn = (event: BeforeUnloadEvent) => {
       event.preventDefault();
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [open, dirty]);
+  }, [open, dirty, speechDirty, speechPending]);
 
   // Focus after pending controls are re-enabled; focusing a disabled field during
   // validation is ignored by the browser and leaves keyboard users stranded.
@@ -244,9 +252,17 @@ export function ProjectAudio({
     });
   }
 
-  function addAsset(asset: Asset) {
+  function addAsset(asset: AudioAsset) {
     setLoaded((current) =>
-      current ? { ...current, assets: [asset, ...current.assets] } : current,
+      current
+        ? {
+            ...current,
+            assets: [
+              asset,
+              ...current.assets.filter((old) => old.id !== asset.id),
+            ],
+          }
+        : current,
     );
     setStatus(
       asset.metadata?.clipped_samples
@@ -256,8 +272,8 @@ export function ProjectAudio({
   }
 
   function close() {
-    if (busy.current) return;
-    if (dirty) setDiscard(true);
+    if (busy.current || speechPending) return;
+    if (dirty || speechDirty) setDiscard(true);
     else setOpen(false);
   }
 
@@ -313,8 +329,21 @@ export function ProjectAudio({
           重新读取音频
         </Button>
       )}
+      <div hidden={embedded && section !== "assets"}>
+        <SpeechGenerator
+          projectId={projectId}
+          active={active && (!embedded || section === "assets")}
+          disabled={!loaded || !!pending}
+          onCreated={addAsset}
+          onDirty={setSpeechDirty}
+          onPending={setSpeechPending}
+        />
+      </div>
       {loaded && (
-        <fieldset disabled={!!pending} className="audio-editor-fields">
+        <fieldset
+          disabled={!!pending || speechPending}
+          className="audio-editor-fields"
+        >
           <section
             aria-label="创建音频素材"
             hidden={embedded && section !== "assets"}
@@ -367,21 +396,24 @@ export function ProjectAudio({
                     20,
                     20000,
                   );
-                  const reply = await call<{ asset: Asset }>("create_audio", {
-                    project_id: projectId,
-                    name,
-                    spec: {
-                      duration_seconds: seconds,
-                      events: [
-                        {
-                          waveform,
-                          duration_seconds: seconds,
-                          frequency_hz: hz,
-                          gain_db: -18,
-                        },
-                      ],
+                  const reply = await call<{ asset: AudioAsset }>(
+                    "create_audio",
+                    {
+                      project_id: projectId,
+                      name,
+                      spec: {
+                        duration_seconds: seconds,
+                        events: [
+                          {
+                            waveform,
+                            duration_seconds: seconds,
+                            frequency_hz: hz,
+                            gain_db: -18,
+                          },
+                        ],
+                      },
                     },
-                  });
+                  );
                   addAsset(reply.asset);
                 })
               }
@@ -415,11 +447,14 @@ export function ProjectAudio({
                       reject(new Error("读取文件失败，请重新选择。"));
                     reader.readAsDataURL(selected);
                   });
-                  const reply = await call<{ asset: Asset }>("import_audio", {
-                    project_id: projectId,
-                    name: selected.name.slice(0, 120),
-                    data_base64: data,
-                  });
+                  const reply = await call<{ asset: AudioAsset }>(
+                    "import_audio",
+                    {
+                      project_id: projectId,
+                      name: selected.name.slice(0, 120),
+                      data_base64: data,
+                    },
+                  );
                   addAsset(reply.asset);
                   if (file.current) file.current.value = "";
                 })
@@ -581,10 +616,10 @@ export function ProjectAudio({
 
       <Modal
         open={discard}
-        title="放弃音轨草稿？"
+        title={speechDirty ? "放弃音频草稿？" : "放弃音轨草稿？"}
         onClose={() => setDiscard(false)}
       >
-        <p>未保存的音轨编辑将丢失。已创建的音频素材会保留。</p>
+        <p>未保存的音轨编辑与配音草稿将丢失。已创建的音频素材会保留。</p>
         <div className="modal-actions">
           <Button onClick={() => setDiscard(false)}>继续编辑</Button>
           <Button
@@ -612,9 +647,9 @@ function AssetList({
   full,
   onAdd,
 }: {
-  assets: Asset[];
+  assets: AudioAsset[];
   full: boolean;
-  onAdd: (asset: Asset) => void;
+  onAdd: (asset: AudioAsset) => void;
 }) {
   const [page, setPage] = useState(0);
   const index = Math.min(page, Math.max(0, Math.ceil(assets.length / 5) - 1));
@@ -625,6 +660,9 @@ function AssetList({
           <div className="section-heading">
             <span>
               {asset.name} · {asset.duration_seconds.toFixed(2)} 秒
+              {(asset.metadata?.source === "openai_tts" ||
+                asset.metadata?.source === "openrouter_tts") &&
+                " · AI 生成配音"}
               {asset.usage &&
                 ` · 用于 ${asset.usage.auditions} 轮试听 · 已挂载 ${asset.usage.timeline_clips} 处`}
             </span>

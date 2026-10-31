@@ -54,7 +54,7 @@ def execute(service: Any, name: str, arguments: dict[str, Any]) -> dict[str, Any
     try:
         request = op.input_model.model_validate(arguments)
     except ValidationError as exc:
-        if op.name in {"generate_speech", "generate_music", "analyze_media"}:
+        if op.name in {"generate_speech", "get_speech_config", "get_speech_request", "generate_music", "analyze_media"}:
             # Do not echo private scripts or credentials mistakenly supplied as fields.
             raise ChromaError("invalid_arguments", "Invalid cloud audio arguments",
                               fields=validation_fields(exc.errors(include_input=False, include_url=False, include_context=False))) from None

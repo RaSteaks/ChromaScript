@@ -608,14 +608,21 @@ DOCUMENTS["color"] += " Animation prores-4444-acescct is a narrowly validated de
 
 # Cloud speech is an explicit, billable exception to offline music/rendering.
 DOCUMENTS["audio"] += (
-    " CLOUD TTS (explicit user request only): get_speech_config() reads local configuration without "
+    " CLOUD TTS (explicit user request only): get_speech_config(provider='openrouter'|'openai') reads local configuration without "
     "network access or exposing the key. generate_speech(project_id,name,idempotency_key,request={"
-    "text, instructions?, model?, voice?, response_format?}) sends only text/style/voice to OpenRouter "
-    "and may incur costs. The daemon reads OPENROUTER_API_KEY, OPENROUTER_TTS_MODEL and "
+    "provider?, text, instructions?, model?, voice?, response_format?}) sends only text/style/voice to the selected provider "
+    "and may incur costs. Omitted provider remains openrouter. The daemon reads OPENROUTER_API_KEY, OPENROUTER_TTS_MODEL and "
     "OPENROUTER_TTS_VOICE from process environment > workspace/.env > workspace parent/.env, "
     "independent of client cwd. Never ask for keys in chat/tool arguments. Defaults: "
     "google/gemini-3.8-flash-tts, Kore, pcm. Gemini supports pcm only; other TTS models may accept "
     "mp3. Use exact OpenRouter model/voice IDs, not model-name guesses. Put verbatim dialogue in "
+    "text. OpenAI uses OPENAI_API_KEY / OPENAI_TTS_MODEL / OPENAI_TTS_VOICE with the same local precedence. "
+    "OpenAI defaults to gpt-realtime-2.1-mini, marin and pcm; gpt-realtime-2.1 is also supported. "
+    "OpenAI built-in voices: alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar. "
+    "OpenAI makes one backend Realtime response, no microphone/tools/automatic turns/reconnects; source is confirmed 24 kHz mono PCM16. "
+    "Its account-managed retention is NOT OpenRouter ZDR; this application does not verify account ZDR. "
+    "Read get_speech_request(project_id,idempotency_key) to check status or recover a verified completed asset WITHOUT submitting generation. "
+    "The web Sound/materials form requires a supplier choice and explicit billable confirmation; it never accepts keys. Put verbatim dialogue in "
     "text and delivery directions in instructions. One request at a time, max 12000 text characters, "
     "4000 instruction characters, 128 MiB / 600 seconds audio. Reuse the SAME idempotency_key "
     "for client retries: completed requests return the saved asset; pending/failed requests never "
@@ -634,7 +641,7 @@ DOCUMENTS["audio"] += (
 # single revision-safe timeline edit to avoid competing partial track writes.
 DOCUMENTS["audio"] += (
     " CLOUD MUSIC: get_music_config() reads OPENROUTER_MUSIC_MODEL (default "
-    "google/lyria-3-pro-preview); it shares OPENROUTER_API_KEY with speech but never changes "
+    "google/lyria-3-pro-preview); it shares OPENROUTER_API_KEY with OpenRouter speech but never changes "
     "OPENROUTER_TTS_MODEL/VOICE. generate_music(project_id,name,idempotency_key,request={prompt, "
     "model?,instrumental:true,target_duration_seconds?,reference_images:[{path,time_seconds?,description?}]}) "
     "calls OpenRouter chat streaming audio, not the TTS endpoint. This is cloud/billable and uploads "
@@ -662,7 +669,7 @@ DOCUMENTS["audio"] += (
 
 # Privacy policies are enforced by server code; prompt descriptions alone are not a boundary.
 DOCUMENTS["audio"] += (
-    " CLOUD PRIVACY: Both generators always request data_collection=deny and default zdr=true. "
+    " CLOUD PRIVACY: OpenRouter generators always request data_collection=deny and default zdr=true. "
     "No compliant endpoint means failure, never automatic fallback to weaker policies. "
     "Only an explicit local OPENROUTER_MUSIC_REQUIRE_ZDR=false setting should relax music ZDR; keep OPENROUTER_REQUIRE_ZDR=true for speech; analysis always enforces ZDR; do not edit it "
     "without the user's instruction. This may block Lyria Preview if only non-ZDR providers exist. "
@@ -675,7 +682,7 @@ DOCUMENTS["audio"] += (
     "Images must be explicitly selected project references; sanitization does not hide visible "
     "private content such as faces, names or screen text. Original images are unchanged; only "
     "sanitized PNG snapshots are uploaded/stored. These cloud operations do send content to "
-    "OpenRouter/upstream providers; local generation remains available separately."
+    "the selected speech provider (OpenAI or OpenRouter) or OpenRouter/upstream music/analysis providers; local generation remains available separately."
 )
 
 
@@ -697,7 +704,7 @@ DOCUMENTS["audio"] += (
     "relative to the clip; do not infer stereo imaging or exact LUFS from a mono listening copy. "
     "Analysis always requires data_collection=deny AND zdr=true, even if global/music ZDR is false. "
     "Only music may be opted out via local OPENROUTER_MUSIC_REQUIRE_ZDR=false; retain global true "
-    "for speech. All three operations share the key but have independent locks and model settings. "
+    "for OpenRouter speech. OpenRouter operations share the key but have independent locks and model settings; OpenAI speech uses its own key in the shared speech lane. "
     "Reuse idempotency_key to retrieve the same private media-analysis JSON artifact; failed/pending "
     "requests never auto-resubmit. Stored prompts/listening copies/results are 0600 within "
     "analysis-sources/<request_id>/ (0700); SQLite stores only minimal metadata/file references. "

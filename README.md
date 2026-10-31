@@ -187,7 +187,7 @@ HLG 实现先取得 PQ 视图结果，再经显示参考空间 CIE XYZ D65 转�
 | 导入 | `import_audio` | 本地绝对路径或 Base64，最多 128 MiB |
 | 本地合成 | `create_audio` | 正弦、三角、噪声与定时事件 |
 | SoundFont 配乐 | `inspect_soundfont` · `create_music` | 本地 SF2 + FluidSynth，最多 15 声部 |
-| 云端配音 | `generate_speech` | OpenRouter Gemini TTS，**可能付费** |
+| 云端配音 | `generate_speech` | OpenRouter Gemini TTS／OpenAI Realtime，**可能付费** |
 | 云端配乐 | `generate_music` | OpenRouter Lyria，可附参考图，**可能付费** |
 | 云端分析 | `analyze_media` | Gemini 文本／音频分析，**可能付费** |
 | 本地听审 | `review_audio` | 连接本机 llama.cpp 兼容服务 |
@@ -209,13 +209,21 @@ OPENROUTER_TTS_VOICE=Kore
 OPENROUTER_MUSIC_MODEL=google/lyria-3-pro-preview
 OPENROUTER_ANALYSIS_MODEL=google/gemini-3.8-flash
 OPENROUTER_REQUIRE_ZDR=true
+# 可选：直接使用 OpenAI 配音
+OPENAI_API_KEY=你的OpenAI密钥
+OPENAI_TTS_MODEL=gpt-realtime-2.1-mini
+OPENAI_TTS_VOICE=marin
 ```
 
 - 读取优先级：服务进程环境变量 > `<workspace>/.env` > `<workspace 父目录>/.env`。
-- 请求默认要求零数据留存（ZDR）且拒绝数据收集；无合规提供商则失败，不自动降级。
+- OpenRouter 请求默认要求零数据留存（ZDR）且拒绝数据收集；无合规提供商则失败，不自动降级。OpenAI 的留存由账户数据控制设置决定，本应用不验证账户是否启用 ZDR。
 - 每次调用需要 `idempotency_key`，同键重试返回已有结果，不重复付费。
-- 提示词、台词与指定的参考图会发送给 OpenRouter 及其提供商。密钥不要发给 Agent，也不要提交 Git。
+- 选择 OpenAI 时，台词与演绎要求直接发送至 OpenAI；其他云端功能使用 OpenRouter 及其提供商。密钥不要发给 Agent、填写到网页或提交 Git。
 - 原始制作记录保存在 `speech-sources/`、`music-sources/`、`analysis-sources/`，未加密。
+
+在网页“声音 → 音频素材 → 云端配音”选择供应商，填写台词、演绎要求和音色，确认可能付费后生成。生成素材可试听，再手动添加、保存音轨。供应商切换保留草稿；“检查本次结果”只读取已有记录，不会重新生成。
+
+MCP／CLI／HTTP 共用 `get_speech_config(provider="openai")`、`generate_speech(request={provider:"openai",text:"需要朗读的原文",…},…)` 和只读的 `get_speech_request(project_id,idempotency_key)`。省略 provider 仍使用 OpenRouter。OpenAI 支持 `gpt-realtime-2.1-mini`（默认）和 `gpt-realtime-2.1`、10 种内置音色与 PCM 输出；默认音色 `marin`，也可选 `cedar` 等。保留的源音频为已确认的 24 kHz 单声道 16-bit PCM，素材导入后的 48 kHz 双声道 32-bit PCM 是重采样存储，不代表模型精度。实时模型的原文朗读仍需试听核对，不提供逐字校对、精确对齐或实时通话认证。
 
 ## MCP 与 CLI
 

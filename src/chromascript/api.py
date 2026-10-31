@@ -104,7 +104,7 @@ def create_app(root: Path, port: int = 8765, export_roots: list[Path] | None = N
     async def private_cloud_validation(request: Request, exc: RequestValidationError):
         # FastAPI validates before execute(); redact this boundary too, including
         # unknown api_key fields and malformed JSON that could contain secrets.
-        if request.url.path in {"/api/operations/generate_speech", "/api/operations/generate_music", "/api/operations/analyze_media"}:
+        if request.url.path in {"/api/operations/generate_speech", "/api/operations/get_speech_config", "/api/operations/get_speech_request", "/api/operations/generate_music", "/api/operations/analyze_media"}:
             return JSONResponse({"error": {"code": "invalid_arguments", "message": "Invalid cloud audio arguments", "fields": validation_fields(exc.errors())}}, status_code=422)
         return await request_validation_exception_handler(request, exc)
 

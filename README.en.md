@@ -187,7 +187,7 @@ The Sound stage has direction auditions, a timeline and audio assets. Deliveries
 | Import | `import_audio` | Local absolute path or Base64, up to 128 MiB |
 | Local synthesis | `create_audio` | Sine, triangle, noise and timed events |
 | SoundFont score | `inspect_soundfont` · `create_music` | Local SF2 + FluidSynth, up to 15 parts |
-| Cloud narration | `generate_speech` | OpenRouter Gemini TTS, **may cost money** |
+| Cloud narration | `generate_speech` | OpenRouter Gemini TTS / OpenAI Realtime, **may cost money** |
 | Cloud music | `generate_music` | OpenRouter Lyria, optional reference images, **may cost money** |
 | Cloud analysis | `analyze_media` | Gemini text / audio analysis, **may cost money** |
 | Local review | `review_audio` | Connects to a local llama.cpp-compatible server |
@@ -209,13 +209,21 @@ OPENROUTER_TTS_VOICE=Kore
 OPENROUTER_MUSIC_MODEL=google/lyria-3-pro-preview
 OPENROUTER_ANALYSIS_MODEL=google/gemini-3.8-flash
 OPENROUTER_REQUIRE_ZDR=true
+# Optional direct OpenAI speech
+OPENAI_API_KEY=your-openai-key
+OPENAI_TTS_MODEL=gpt-realtime-2.1-mini
+OPENAI_TTS_VOICE=marin
 ```
 
 - Precedence: service process environment > `<workspace>/.env` > `<workspace parent>/.env`.
-- Requests require zero data retention (ZDR) and deny data collection by default. With no compliant provider they fail rather than downgrade.
+- OpenRouter requests require zero data retention (ZDR) and deny data collection by default. With no compliant provider they fail rather than downgrade. OpenAI retention follows account data controls; this application does not verify whether an account has ZDR enabled.
 - Every call needs an `idempotency_key`; retrying with the same key returns the existing result and does not bill twice.
-- Prompts, lines and any reference images you pick are sent to OpenRouter and its providers. Never give the key to an agent or commit it to Git.
+- Selecting OpenAI sends scripts and delivery directions directly to OpenAI; other cloud features use OpenRouter and its providers. Never give keys to an agent, enter them in the web interface or commit them to Git.
 - Raw production records are kept, unencrypted, in `speech-sources/`, `music-sources/` and `analysis-sources/`.
+
+In the web interface, open Sound → Audio assets → Cloud speech, choose a provider, enter the script, delivery directions and voice, then confirm the potentially billable generation. Audition the generated asset before adding and saving it to the timeline. Provider changes retain drafts. “Check this result” only reads existing records and never generates speech.
+
+MCP, CLI and HTTP share `get_speech_config(provider="openai")`, `generate_speech(request={provider:"openai",text:"Verbatim script",…},…)` and the read-only `get_speech_request(project_id,idempotency_key)`. Omitting provider preserves OpenRouter. OpenAI supports `gpt-realtime-2.1-mini` (default) and `gpt-realtime-2.1`, ten built-in voices and PCM output; `marin` is the default voice, with alternatives including `cedar`. Retained source audio uses confirmed 24 kHz mono 16-bit PCM. Managed 48 kHz stereo 32-bit PCM is resampled storage, not model precision. Listen to check the model's verbatim reading; completion does not certify transcript accuracy, exact alignment or live calling.
 
 ## MCP and CLI
 

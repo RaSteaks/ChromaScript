@@ -31,7 +31,7 @@ def create_mcp(root: Path) -> MCPServer:
     async def private_cloud_validation(ctx: ServerRequestContext[Any, Any], call_next: CallNext) -> HandlerResult:
         params = ctx.params or {}
         name = params.get("name")
-        if ctx.method == "tools/call" and name in {"chromascript.generate_speech", "chromascript.generate_music", "chromascript.analyze_media"}:
+        if ctx.method == "tools/call" and name in {"chromascript.generate_speech", "chromascript.get_speech_config", "chromascript.get_speech_request", "chromascript.generate_music", "chromascript.analyze_media"}:
             # The SDK wraps function arguments in its own Pydantic model, whose
             # error formatter echoes values even if our nested model hides them.
             # Validate before that layer and return only a constant error message.

@@ -26,12 +26,29 @@ def provider_policy(
     return {"data_collection": "deny", "zdr": scope == "analysis" or value == "true"}
 
 
-def assert_no_secret(payload: dict[str, Any], secret: str) -> None:
+def api_secrets(values: dict[str, str]) -> tuple[str, ...]:
+    """Both configured credentials stay private, even when using the other provider."""
+    return tuple(
+        value.strip()
+        for key in ("OPENROUTER_API_KEY", "OPENAI_API_KEY")
+        if (value := values.get(key, "")).strip()
+    )
+
+
+def contains_secret(value: str, secrets: Sequence[str]) -> bool:
+    return any(secret in value for secret in secrets) or bool(
+        re.search(r"sk-(?:or-v1-|proj-|svcacct-)?[A-Za-z0-9_-]{16,}", value)
+    )
+
+
+def assert_no_secret(payload: dict[str, Any], secret: str | Sequence[str]) -> None:
     # The credential belongs solely in the HTTPS Authorization header, never in
     # a transcript, model ID, style prompt or a provider-specific parameter.
+    secrets = (secret,) if isinstance(secret, str) else secret
+
     def contains(value: Any) -> bool:
         if isinstance(value, str):
-            return secret in value or bool(re.search(r"sk-or-v1-[A-Za-z0-9_-]{16,}", value))
+            return contains_secret(value, secrets)
         if isinstance(value, dict):
             return any(contains(k) or contains(v) for k, v in value.items())
         return isinstance(value, list) and any(contains(v) for v in value)
@@ -40,14 +57,21 @@ def assert_no_secret(payload: dict[str, Any], secret: str) -> None:
         raise ChromaError("cloud_secret_in_input", "Remove credentials from generation inputs")
 
 
-def redact_secret(value: Any, secret: str) -> Any:
-    if isinstance(value, str):
-        return value.replace(secret, "[redacted]")
-    if isinstance(value, dict):
-        return {str(redact_secret(k, secret)): redact_secret(v, secret) for k, v in value.items()}
-    if isinstance(value, list):
-        return [redact_secret(v, secret) for v in value]
-    return value
+def redact_secret(value: Any, secret: str | Sequence[str]) -> Any:
+    secrets = (secret,) if isinstance(secret, str) else secret
+
+    def redact(item: Any) -> Any:
+        if isinstance(item, str):
+            for credential in secrets:
+                item = item.replace(credential, "[redacted]")
+            return item
+        if isinstance(item, dict):
+            return {str(redact(k)): redact(v) for k, v in item.items()}
+        if isinstance(item, list):
+            return [redact(v) for v in item]
+        return item
+
+    return redact(value)
 
 
 def private_directory(path: Path) -> None:
@@ -93,6 +117,7 @@ def public_report(report: dict[str, Any]) -> dict[str, Any]:
             "format_requested",
             "timing_verified",
             "privacy_policy",
+            "ai_generated",
         )
         if key in report
     }
@@ -132,8 +157,9 @@ def read_private_env(path: Path) -> str:
 def public_setting(value: str, values: dict[str, str]) -> str:
     # A key accidentally pasted into a model/voice field must not escape through
     # the otherwise read-only configuration discovery endpoint.
-    secret = values.get("OPENROUTER_API_KEY", "").strip()
-    if (secret and secret in value) or "sk-or-" in value:
+    if contains_secret(value, api_secrets(values)) or any(
+        prefix in value for prefix in ("sk-or-", "sk-proj-", "sk-svcacct-")
+    ):
         return "[redacted invalid configuration]"
     return value
 
