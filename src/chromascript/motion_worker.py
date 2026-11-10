@@ -171,12 +171,12 @@ def run_motion(root: Path, job_id: str) -> None:
         else:
             # Historical snapshots retain their original workspace/copy layout.
             directory.mkdir(parents=True, exist_ok=True)
-        # Freeze every chapter alongside the entry so exported sources remain reproducible.
-        sources = write_sources(directory, spec.engine, spec.code, spec.files)
+        # Export revision-owned chapters and models; no source filesystem is needed to replay.
+        sources = write_sources(directory, spec.engine, spec.code, spec.files, spec.assets)
         # Every retained graph is exported with its original linear-space declaration
         # in animation.json; relative module paths remain portable within each layer.
         for index, layer in enumerate(spec.preserved_layers):
-            sources += write_sources(directory / "preserved-layers" / str(index), spec.engine, layer.code, layer.files)
+            sources += write_sources(directory / "preserved-layers" / str(index), spec.engine, layer.code, layer.files, layer.assets)
         description = directory / "animation.json"
         description.write_text(json.dumps(spec.model_dump(), ensure_ascii=False, indent=2))
         audio_path = directory / "audio.wav"
@@ -187,7 +187,7 @@ def run_motion(root: Path, job_id: str) -> None:
         frozen = directory / "scene-snapshot.json"
         frozen.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2))
         for path in (*sources, description, frozen):
-            artifact(path, "source", "application/json" if path.suffix == ".json" else "text/plain")
+            artifact(path, "source", {".json": "application/json", ".gltf": "model/gltf+json"}.get(path.suffix, "text/plain"))
 
         master_depth = output.master_bit_depth
         work = bundle.work if bundle is not None else store.file(f"jobs/{job_id}/motion")

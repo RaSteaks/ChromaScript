@@ -290,6 +290,8 @@ def write_views(directory: Path) -> dict[str, Any]:
             view(base + '/配置.json', encode({'scene_id': identity, 'revision_id': record['revision_id'], 'kind': kind, 'spec': spec}))
             for name, content in spec.get('files', {}).items():
                 view(base + '/附属文件/' + name, content)
+            for name, content in spec.get('assets', {}).items():
+                view(base + '/资源/' + name + '.gltf', content)
             works.append(f"- {record['name']}（{identity[:8]}）")
         if ('audio_timeline', project['id']) in rows:
             view('音频/时间线.json', encode(rows['audio_timeline', project['id']]))

@@ -32,7 +32,7 @@ from .motion import (
     motion_video_preset,
 )
 from .motion import SDR_RUNTIME as RUNTIME
-from .motion_sources import source_hash, write_sources
+from .motion_sources import write_sources
 from .motion_timing import motion_time_plan
 from .motion_video_plan import VideoExecution
 from .store import Store, canonical, now
@@ -151,8 +151,8 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
                 return
         else:
             directory.mkdir(parents=True, exist_ok=True)
-        # Freeze every chapter alongside the entry so exported sources remain reproducible.
-        sources = write_sources(directory, spec.engine, spec.code, spec.files)
+        # Export revision-owned chapters and models; no source filesystem is needed to replay.
+        sources = write_sources(directory, spec.engine, spec.code, spec.files, spec.assets)
         description = directory / "animation.json"
         description.write_text(json.dumps(spec.model_dump(), ensure_ascii=False, indent=2))
         audio_path = directory / "audio.wav"
@@ -163,7 +163,7 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
         frozen = directory / "scene-snapshot.json"
         frozen.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2))
         for path in (*sources, description, frozen):
-            artifact(path, "source", "application/json" if path.suffix == ".json" else "text/plain")
+            artifact(path, "source", {".json": "application/json", ".gltf": "model/gltf+json"}.get(path.suffix, "text/plain"))
 
         work = bundle.work if bundle is not None else store.file(f"jobs/{job_id}/motion")
         frames = work / "frames"
@@ -301,7 +301,7 @@ def run_sdr_motion(root: Path, job_id: str) -> None:
                     "verification": verification,
                     "probe": info,
                     "audio": audio_info,
-                    "source_sha256": source_hash(spec.code, spec.files),
+                    "source_sha256": spec.source_digest(),
                     "video_sha256": file_hash(video),
                     "fps": settings.fps.model_dump(),
                     "notes": [

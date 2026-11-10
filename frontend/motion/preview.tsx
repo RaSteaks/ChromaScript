@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { Player, type PlayerRef } from "@remotion/player";
 import Scene from "chromascript:scene";
 import config from "chromascript:config";
+import { prepareAssets } from "chromascript:assets";
 
 // The bridge contains playback state only; no editor token, path or API is exposed.
 function send(type: string, value: unknown = null) {
@@ -116,8 +117,9 @@ window.addEventListener("error", (event) => send("error", event.message));
 window.addEventListener("unhandledrejection", (event) =>
   send("error", String(event.reason?.message || event.reason)),
 );
-createRoot(document.getElementById("root")!).render(
+// Parse textures and geometry before the preview can replace the previous picture.
+prepareAssets().then(() => createRoot(document.getElementById("root")!).render(
   <Boundary>
     <Preview />
   </Boundary>,
-);
+)).catch((error: Error) => send("error", error.message));

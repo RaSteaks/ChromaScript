@@ -1,0 +1,17 @@
+{
+  "blender_version": "3.6.10",
+  "blender_build_hash": "e871de5bc190",
+  "settings": {
+    "export_yup": true,
+    "export_animations": true,
+    "export_skins": true,
+    "export_morph": true,
+    "export_force_sampling": true,
+    "export_nla_strips": true,
+    "export_apply": false,
+    "export_cameras": true,
+    "export_lights": true,
+    "export_draco_mesh_compression_enable": false
+  },
+  "fixture": "Original generated geometry and images; no third-party assets."
+}

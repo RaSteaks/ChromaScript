@@ -100,8 +100,10 @@ flowchart LR
 ```
 
 - **WGSL**: `shade(ctx)` returns straight (non-premultiplied) linear ACEScg RGBA. RGB may be negative or above 1; alpha is 0–1.
-- **Three.js float**: `three` is the only external package. The default export is `createScene({width, height, frames, fps, frameRate})`, returning `{scene, camera, update}`. Pick the authoring space with `source_color_space` (`Linear Rec.709 (sRGB)`, `Linear Rec.2020`, `ACEScg` or `ACES2065-1`; new scenes default to linear BT.2020). One scene can be split into chapter files with `files`; see the [multi-file example](examples/motion-chapters/README.md).
+- **Three.js float**: `three` is the only external package; local resources are available through `chromascript:assets`. The default export is a synchronous or async `createScene({width, height, frames, fps, frameRate})`, returning `{scene, camera, update}`. Pick the authoring space with `source_color_space` (`Linear Rec.709 (sRGB)`, `Linear Rec.2020`, `ACEScg` or `ACES2065-1`; new scenes default to linear BT.2020). One scene can be split into chapter files with `files`; see the [multi-file example](examples/motion-chapters/README.md).
 - **React SDR**: React, Remotion, ThreeCanvas and Three.js imports are allowed. SDR provides no float master.
+
+**Local glTF / GLB models**: HTTP, MCP and CLI share `import_motion_gltf(scene_id, expected_revision_id, name, path)`. Import embeds the model, local buffers and textures into a new revision's `assets`, so moving the original files does not break rendering. Source reads them with `getGLTF` (SDR) or `await loadGLTF` (float factories) from `chromascript:assets`. Assets travel with historical revisions, job snapshots and deliveries. Supported source engines are React SDR and linear Rec.709 float; Draco, Meshopt and KTX2/Basis compression are currently unsupported. Each source graph supports 16 assets; embedded JSON including retained layers is limited to 64 MiB. See the [local model guide](examples/motion-assets/README.md) for calls, examples and color/animation constraints.
 
 [examples/](examples/README.md) has six scenes (exposure ramp, wide-gamut gradient, shapes and transparency, spiral particles, procedural noise, animated chart) and sample call parameters for the other operations.
 

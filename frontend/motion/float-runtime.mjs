@@ -146,7 +146,7 @@ function guardShaderAlpha(m) {
   m.needsUpdate = true;
 }
 
-function main() {
+async function main() {
   const renderer = new THREE.WebGLRenderer({
     alpha: true,
     antialias: false,
@@ -275,28 +275,31 @@ function main() {
       );
     return value;
   };
-  const scene = checkedScene(createScene(context));
-  const layers = (window.__chromaLayers || []).map((layer, index) => {
+  // Await resource-backed factories before exposing capture/ready. Old synchronous
+  // factories keep their contract; updates remain synchronous and frame-derived.
+  const scene = checkedScene(await createScene(context));
+  const layers = [];
+  for (const [index, layer] of (window.__chromaLayers || []).entries()) {
     const contract = config.display.layers[index];
     const space = registerSpace(contract);
     const toTarget = new THREE.Matrix3()
       .set(...config.display.working_space.to_linear_rec709.flat())
       .invert()
       .multiply(new THREE.Matrix3().set(...contract.to_linear_rec709.flat()));
-    return {
+    layers.push({
       ...layer,
       space,
       sourceSpace: contract.source,
       toTarget,
       scene: checkedScene(
-        layer.factory({
+        await layer.factory({
           ...context,
           sourceColorSpace: contract.source,
           workingColorSpace: space,
         }),
       ),
-    };
-  });
+    });
+  }
   const scratch = layers.length ? floatTarget(width, height) : null;
   const composite = layers.length
     ? material(
@@ -745,9 +748,7 @@ function main() {
   send("ready");
 }
 window.addEventListener("error", (event) => send("error", event.message));
-try {
-  main();
-} catch (error) {
+main().catch((error) => {
   window.__chromaError = error.message;
   send("error", error.message);
-}
+});

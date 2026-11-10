@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import psutil
-from pydantic import Field, StrictBool, StrictInt, field_validator, model_validator
+from pydantic import Field, StrictBool, StrictInt, ValidationError, field_validator, model_validator
 
 from .audio import freeze_audio
 from .color import color_info, output_metadata, video_tag_issue
@@ -22,6 +22,7 @@ from .errors import ChromaError
 from .exports import DESTINATION_LAYOUT, bundle_name, volume_identity
 from .exports import export_directory as resolve_export_directory
 from .models import ColorPipeline, DeliveryPreset, Job, Model, MotionRate, MotionRenderSettings
+from .motion_assets import MAX_ASSET_BYTES, describe_gltf, import_gltf, validate_assets
 from .motion_color import (
     SOURCE_SPACE,
     SOURCE_SPACES,
@@ -42,7 +43,7 @@ FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 RUNTIME = FRONTEND / "motion" / "runtime.mjs"
 SDR_RUNTIME = FRONTEND / "motion" / "sdr-runtime.mjs"
 MotionEngine = Literal["three-float-v1", "remotion-sdr-v1"]
-IMPORTS = ["three"]
+IMPORTS = ["three", "chromascript:assets"]
 
 
 class MotionOutput(MotionTiming):
@@ -149,9 +150,18 @@ class MotionSource(Model):
         max_length=128,
         description="Relative TS/TSX/JS/JSX chapter paths mapped to source; import them from code.",
     )
+    assets: dict[str, str] = Field(
+        default_factory=dict, max_length=16,
+        description="Named, self-contained glTF 2.0 JSON documents. Import local glTF/GLB with import_motion_gltf; load with loadGLTF from chromascript:assets. Frozen with the revision.",
+    )
     @model_validator(mode="after")
     def valid_sources(self) -> MotionSource:
         validate_sources(self.code, self.files)
+        validate_assets(self.assets)
+        # glTF factors/vertex colors and color textures have a defined Rec.709 basis.
+        # The current float texture contract cannot relabel those as AP1/BT.2020.
+        if self.assets and self.source_color_space != SOURCE_SPACE:
+            raise ValueError("glTF 资源支持 React SDR 或 Linear Rec.709 (sRGB) 浮点源码；不能直接重标记为宽色域。")
         return self
 
 
@@ -173,16 +183,19 @@ class MotionSpec(MotionSource):
         graphs = [self, *self.preserved_layers]
         if sum(len(s.code) + sum(map(len, s.files.values())) for s in graphs) > 2_000_000:
             raise ValueError("包含保留图层在内的全部源码最多 2000000 字符")
+        if sum(len(asset.encode()) for graph in graphs for asset in graph.assets.values()) > MAX_ASSET_BYTES:
+            raise ValueError("包含保留图层在内的 glTF 资源合计最多 64 MiB。")
         return self
 
     def source_digest(self) -> str:
         # Preserve historical attestations, while binding all new color semantics
         # and retained source graphs to the evidence exported with a revision.
         if self.source_color_space == SOURCE_SPACE and not self.preserved_layers:
-            return source_hash(self.code, self.files)
+            return source_hash(self.code, self.files, self.assets)
         return hashlib.sha256(canonical({
             "code": self.code, "files": self.files, "source_color_space": self.source_color_space,
-            "preserved_layers": [layer.model_dump() for layer in self.preserved_layers],
+            **({"assets": self.assets} if self.assets else {}),
+            "preserved_layers": [layer.model_dump(exclude=set() if layer.assets else {"assets"}) for layer in self.preserved_layers],
         }).encode()).hexdigest()
 
     def display(self, hdr_preview: bool = False) -> dict[str, Any]:
@@ -324,6 +337,18 @@ def motion_environment() -> dict[str, Any]:
             "resolution": "relative virtual paths only; explicit extension or extensionless/index",
             "entry": {"three-float-v1": "Animation.ts", "remotion-sdr-v1": "Animation.tsx"},
         },
+        "local_gltf": {
+            "operation": "chromascript.import_motion_gltf",
+            "inspect_operation": "chromascript.get_motion_asset_info",
+            "field": "assets", "formats": [".gltf", ".glb"],
+            "max_assets": 16, "max_total_json_bytes": MAX_ASSET_BYTES,
+            "loader": "import {loadGLTF} from 'chromascript:assets'",
+            "instances": "createGLTFInstance(name): independent skeletons, morphs, materials and animation clips; shared read-only geometry/textures",
+            "blender_export": "glTF 2.0 / GLB, +Y Up, skinning and shape keys enabled, uncompressed geometry; bake procedural materials/constraints before export",
+            "source_color_space": SOURCE_SPACE,
+            "dependencies": "embedded at import; relative paths within the model folder only",
+            "unsupported": ["Draco", "Meshopt", "KTX2/Basis"],
+        },
         "contract": "motion-dual-v1",
         # Discoverable workflow pointers are identical through the shared registry.
         "color_authoring": {
@@ -339,7 +364,7 @@ def motion_environment() -> dict[str, Any]:
         },
         "engines": {
             "three-float-v1": {
-                "imports": ["three"],
+                "imports": IMPORTS,
                 "source_color_spaces": SOURCE_SPACES,
                 "default_source_color_space": "Linear Rec.2020",
                 "upgrade": "preserve source as a linear-composited background layer; new source uses target space",
@@ -354,6 +379,7 @@ def motion_environment() -> dict[str, Any]:
                     "@remotion/three",
                     "@react-three/fiber",
                     "three",
+                    "chromascript:assets",
                 ],
                 "source_precision": "8-bit sRGB screenshot",
                 "scene_linear_master": False,
@@ -402,7 +428,9 @@ def motion_identity() -> dict[str, Any]:
         FRONTEND / "motion" / "hdr-capture.mjs",
         FRONTEND / "motion" / "source-color.mjs",
         FRONTEND / "motion" / "source-modules.mjs",
+        FRONTEND / "motion" / "assets.mjs",
         Path(__file__).with_name("motion_sources.py"),
+        Path(__file__).with_name("motion_assets.py"),
         Path(__file__).with_name("motion_color.py"),
         Path(__file__).with_name("models.py"),
         # Workers resolve video presets at execution time. A preset change must
@@ -756,6 +784,43 @@ class MotionOperations:
         )
         return self.get_motion_scene(scene_id)
 
+    @operation("Import a local glTF 2.0/GLB model into a named revision-owned asset, embedding its local buffers/textures. Replaces that asset only; preserves code/timing and all previous revisions. Requires expected_revision_id. Supports React SDR and Linear Rec.709 float sources. No network or decoder downloads.")
+    def import_motion_gltf(
+        self, scene_id: str, expected_revision_id: str, name: str, path: str,
+    ) -> dict[str, Any]:
+        record, spec, revision = self._motion_scene(scene_id)
+        self._motion_project(record["project_id"], True)
+        if revision != expected_revision_id:
+            raise ChromaError("revision_conflict", "动画修订已改变，请保留草稿并重新读取。", current_revision_id=revision)
+        try:
+            source = import_gltf(Path(path))
+            updated = MotionSpec.model_validate({
+                **spec.model_dump(), "assets": {**spec.assets, name: source},
+            })
+        except ValidationError as exc:
+            # A large embedded model is not a useful diagnostic payload.
+            raise ChromaError("motion_asset", "资源名称、大小或颜色空间不符合要求。",
+                              fields=exc.errors(include_input=False, include_url=False, include_context=False)) from exc
+        except (OSError, ValueError) as exc:
+            raise ChromaError("motion_asset", str(exc)) from exc
+        return self.update_motion_scene(scene_id, updated, expected_revision_id)
+
+    @operation("Inspect a frozen glTF asset's exporter, nodes, transforms, materials, skins, morph target names, animation names/channels and decoded keyframe ranges without returning embedded buffers or textures. Use this before selecting Blender clips or bones. Read-only; supports historical revisions. Metadata does not certify rendered appearance.")
+    def get_motion_asset_info(
+        self, scene_id: str, name: str, revision_id: str | None = None,
+    ) -> dict[str, Any]:
+        _, spec, revision = self._motion_scene(scene_id, revision_id)
+        if name not in spec.assets:
+            raise ChromaError("motion_asset", f"该修订中不存在 glTF 资源：{name}")
+        source = spec.assets[name]
+        try:
+            metadata = describe_gltf(source)
+        except ValueError as exc:
+            raise ChromaError("motion_asset", str(exc)) from exc
+        return {"scene_id": scene_id, "revision_id": revision, "name": name,
+                "sha256": hashlib.sha256(source.encode()).hexdigest(),
+                "size_bytes": len(source.encode()), "metadata": metadata}
+
     @operation("Upgrade a saved float animation to another linear source space without reinterpreting old RGB. Preserve original source graphs as background layers; create an empty native foreground for continued authoring. Revision checked; old revisions remain unchanged.")
     def upgrade_motion_scene(
         self, scene_id: str, expected_revision_id: str, source_color_space: MotionSourceSpace,
@@ -768,10 +833,10 @@ class MotionOperations:
             raise ChromaError("motion_color", "SDR 截图不能升级为原生宽色域场景。")
         if source_color_space == spec.source_color_space:
             return self.get_motion_scene(scene_id)
-        previous = MotionSource(code=spec.code, files=spec.files, source_color_space=spec.source_color_space)
+        previous = MotionSource(code=spec.code, files=spec.files, assets=spec.assets, source_color_space=spec.source_color_space)
         native = blank_motion(source_color_space=source_color_space)
         layers = list(spec.preserved_layers)
-        if spec.code != native.code or spec.files:
+        if spec.code != native.code or spec.files or spec.assets:
             if len(layers) >= 16:
                 raise ChromaError("motion_color", "已达 16 个保留图层；请整理源码后再升级。")
             layers.append(previous)
@@ -779,7 +844,7 @@ class MotionOperations:
         # rewritten as colors, so conversion happens once at a linear image boundary.
         upgraded = MotionSpec.model_validate({
             **spec.model_dump(), "source_color_space": source_color_space,
-            "code": native.code, "files": {},
+            "code": native.code, "files": {}, "assets": {},
             "preserved_layers": [layer.model_dump() for layer in layers],
         })
         return self.update_motion_scene(scene_id, upgraded, expected_revision_id)

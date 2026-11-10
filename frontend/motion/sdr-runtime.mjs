@@ -15,6 +15,7 @@ const allowed = new Set([
   "@remotion/three",
   "@react-three/fiber",
   "three",
+  "chromascript:assets",
 ]);
 const policy =
   "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; media-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'";
@@ -31,10 +32,16 @@ async function compile(spec, mode, channel) {
     mode === "preview"
       ? readFileSync(join(root, "motion/preview.tsx"), "utf8")
       : `import React from 'react';
-       import {Composition, registerRoot, Freeze, useCurrentFrame} from 'remotion';
+       import {Composition, registerRoot, Freeze, useCurrentFrame, delayRender, continueRender, cancelRender} from 'remotion';
        import Scene from 'chromascript:scene';
+       import {prepareAssets} from 'chromascript:assets';
        ${sampledScene}
-       registerRoot(() => <Composition id="Animation" component={SampledScene} width={${spec.width}} height={${spec.height}} fps={${config.fps}} durationInFrames={${spec.frames}} />);`;
+       // Hold the renderer's first seek until assets AND root registration complete.
+       const assetsReady = delayRender('Loading local glTF resources');
+       prepareAssets().then(() => {
+         registerRoot(() => <Composition id="Animation" component={SampledScene} width={${spec.width}} height={${spec.height}} fps={${config.fps}} durationInFrames={${spec.frames}} />);
+         continueRender(assetsReady);
+       }).catch(cancelRender);`;
   return build({
     stdin: {
       contents: entry,
@@ -79,6 +86,9 @@ async function main() {
   for await (const chunk of process.stdin) chunks.push(chunk);
   const request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   const spec = request.spec || request;
+  // Embedded buffers use fetch(), but the document still cannot reach any server.
+  const documentPolicy = Object.keys(spec.assets ?? {}).length
+    ? policy.replace("connect-src 'none'", "connect-src data: blob:") : policy;
   const channel = randomUUID();
   const result = await compile(spec, process.argv[2], channel);
   const javascript = result.outputFiles[0].text;
@@ -87,11 +97,11 @@ async function main() {
     // and network requests. Escaping script terminators prevents HTML injection.
     const script = javascript.replace(/<\/script/gi, "<\\/script");
     // The sandbox keeps its own landmark/heading when the expanded viewer makes the host inert.
-    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>动画预览</title><meta http-equiv="Content-Security-Policy" content="${policy}"><style>html,body,#root{color-scheme:dark;margin:0;width:100%;height:100%;overflow:hidden;background:transparent}*{box-sizing:border-box}</style></head><body><main style="width:100%;height:100%"><h1 style="position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap">动画预览</h1><div id="root"></div></main><script>${script}</script></body></html>`;
+    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>动画预览</title><meta http-equiv="Content-Security-Policy" content="${documentPolicy}"><style>html,body,#root{color-scheme:dark;margin:0;width:100%;height:100%;overflow:hidden;background:transparent}*{box-sizing:border-box}</style></head><body><main style="width:100%;height:100%"><h1 style="position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap">动画预览</h1><div id="root"></div></main><script>${script}</script></body></html>`;
     process.stdout.write(JSON.stringify({ html, channel }));
     return;
   }
-  if (process.argv[2] !== "frames")
+  if (!["frames", "bundle"].includes(process.argv[2]))
     throw new Error("Unknown animation runtime mode");
   const { bundle } = await import("@remotion/bundler");
   const { renderFrames, openBrowser } = await import("@remotion/renderer");
@@ -125,9 +135,15 @@ async function main() {
     index,
     readFileSync(index, "utf8").replace(
       /<head>/i,
-      `<head><meta http-equiv="Content-Security-Policy" content="${policy}"><link rel="icon" href="data:,">`,
+      `<head><meta http-equiv="Content-Security-Policy" content="${documentPolicy}"><link rel="icon" href="data:,">`,
     ),
   );
+  // Compile-only preflight shares the exact export bundle and CSP without
+  // launching a production browser. It also permits WebKit verification.
+  if (process.argv[2] === "bundle") {
+    process.stdout.write(JSON.stringify({ serveUrl }));
+    return;
+  }
   const options = {
     serveUrl,
     browserExecutable: request.browser,

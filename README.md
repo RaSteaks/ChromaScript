@@ -100,8 +100,10 @@ flowchart LR
 ```
 
 - **WGSL**：`shade(ctx)` 返回非预乘的线性 ACEScg RGBA，RGB 可为负或大于 1，Alpha 取 0–1。
-- **Three.js 浮点**：外部包仅允许 `three`；默认导出 `createScene({width, height, frames, fps, frameRate})`，返回 `{scene, camera, update}`。通过 `source_color_space` 选择创作空间（`Linear Rec.709 (sRGB)`、`Linear Rec.2020`、`ACEScg`、`ACES2065-1`，新建默认线性 BT.2020）。单场景可用 `files` 拆成多个分章文件，见[多文件示例](examples/motion-chapters/README.md)。
+- **Three.js 浮点**：外部包仅允许 `three`，本地资源通过 `chromascript:assets` 读取；默认导出同步或异步的 `createScene({width, height, frames, fps, frameRate})`，返回 `{scene, camera, update}`。通过 `source_color_space` 选择创作空间（`Linear Rec.709 (sRGB)`、`Linear Rec.2020`、`ACEScg`、`ACES2065-1`，新建默认线性 BT.2020）。单场景可用 `files` 拆成多个分章文件，见[多文件示例](examples/motion-chapters/README.md)。
 - **React SDR**：允许 React、Remotion、ThreeCanvas 与 Three.js 导入。SDR 不提供浮点母版。
+
+**本地 glTF / GLB 模型**：HTTP、MCP、CLI 共用 `import_motion_gltf(scene_id, expected_revision_id, name, path)`。导入会把模型及目录内的缓冲区、贴图内嵌到新修订的 `assets`，原文件移动后仍可预览和渲染。源码通过 `chromascript:assets` 的 `getGLTF`（SDR）或 `await loadGLTF`（浮点工厂）读取；模型与任务快照、历史修订和交付一起保留。支持 React SDR 和线性 Rec.709 浮点源码；目前不支持 Draco、Meshopt 或 KTX2/Basis 压缩资源。每个源码图最多 16 个资源，含保留图层的内嵌 JSON 合计不超过 64 MiB。操作示例及颜色、动画约束见[本地模型说明](examples/motion-assets/README.md)。
 
 [examples/](examples/README.md) 提供六个场景示例（曝光阶梯、广色域渐变、几何与透明度、螺旋粒子、程序纹理、动态图表）和各类调用参数样例。
 

@@ -96,6 +96,15 @@ export function sourceModules(spec, allowed, root, external = false) {
   return {
     name: "animation-source-modules",
     setup(plugin) {
+      plugin.onResolve({ filter: /^chromascript:assets$/ }, () => ({
+        path: posix.join(root, "motion/assets.mjs"),
+      }));
+      plugin.onResolve({ filter: /^chromascript:asset-data$/ }, () => ({
+        path: "assets", namespace: "asset-data",
+      }));
+      plugin.onLoad({ filter: /.*/, namespace: "asset-data" }, () => ({
+        contents: JSON.stringify(spec.assets ?? {}), loader: "json",
+      }));
       plugin.onResolve({ filter: /^chromascript:scene$/ }, () => ({
         path: entry,
         namespace: "scene",

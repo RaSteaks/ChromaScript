@@ -6,6 +6,7 @@ import hashlib
 import re
 from pathlib import Path
 
+from .motion_assets import validate_assets
 from .store import canonical
 
 MAX_FILES = 128
@@ -37,20 +38,28 @@ def validate_sources(code: str, files: dict[str, str]) -> dict[str, str]:
     return files
 
 
-def source_hash(code: str, files: dict[str, str]) -> str:
-    # Preserve single-file attestations; any chapter change invalidates the full graph.
+def source_hash(code: str, files: dict[str, str], assets: dict[str, str] | None = None) -> str:
+    # Preserve historical attestations; any chapter or model change invalidates the graph.
     source = canonical({"code": code, "files": files}) if files else code
+    if assets:
+        source = canonical({"code": code, "files": files, "assets": assets})
     return hashlib.sha256(source.encode()).hexdigest()
 
 
-def write_sources(directory: Path, engine: str, code: str, files: dict[str, str]) -> list[Path]:
+def write_sources(directory: Path, engine: str, code: str, files: dict[str, str], assets: dict[str, str] | None = None) -> list[Path]:
     """Export a self-contained tree, separate from masters and renderer work files."""
     validate_sources(code, files)
+    validate_assets(assets or {})
     root = directory / "sources" if files else directory
     entry = "Animation.tsx" if engine == "remotion-sdr-v1" else "Animation.ts"
     paths = []
     for name, contents in {entry: code, **files}.items():
         path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+        paths.append(path)
+    for name, contents in (assets or {}).items():
+        path = directory / "assets" / f"{name}.gltf"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(contents, encoding="utf-8")
         paths.append(path)

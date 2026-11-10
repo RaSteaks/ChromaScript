@@ -45,6 +45,7 @@ type Draft = {
   name: string;
   code: string;
   files: Record<string, string>;
+  assets: Record<string, string>;
   width: string;
   height: string;
   frames: string;
@@ -107,6 +108,7 @@ const fromSpec = (spec: MotionSpec): Draft => ({
   name: spec.name,
   code: spec.code,
   files: spec.files ?? {},
+  assets: spec.assets ?? {},
   width: String(spec.width),
   height: String(spec.height),
   frames: String(spec.frames),
@@ -170,6 +172,7 @@ function validate(draft: Draft | null): {
       name: draft.name,
       code: draft.code,
       files: draft.files,
+      assets: draft.assets,
       width: Number(draft.width),
       height: Number(draft.height),
       frames: Number(draft.frames),

@@ -237,6 +237,7 @@ export type MotionSourceSpace =
 export type MotionSource = {
   code: string;
   files?: Record<string, string>;
+  assets?: Record<string, string>;
   source_color_space?: MotionSourceSpace;
 };
 export type MotionSpec = {
@@ -245,6 +246,8 @@ export type MotionSpec = {
   preserved_layers?: MotionSource[];
   // Optional for historical single-file revisions. New saves include every chapter.
   files?: Record<string, string>;
+  // Frozen glTF documents must survive editor saves and draft recovery unchanged.
+  assets?: Record<string, string>;
   engine: "three-float-v1" | "remotion-sdr-v1";
   schema_version?: number;
   name: string;
