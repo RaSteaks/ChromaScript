@@ -10,7 +10,7 @@ A procedural video workbench built on ACES 2.0 · One service behind the web UI,
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![Node](https://img.shields.io/badge/Node.js-22.12+-5FA04E?logo=nodedotjs&logoColor=white)
 ![Color](https://img.shields.io/badge/color-ACES_2.0_·_OCIO-8A2BE2)
-![License](https://img.shields.io/badge/license-MIT-blue)
+![License](https://img.shields.io/badge/license-AGPL--3.0-blue)
 
 **English** · [简体中文](README.md)
 
@@ -393,4 +393,4 @@ Use `./start.sh --workspace /path/to/data` for data. Choose the export directory
 
 ## License
 
-[MIT](LICENSE) © 2026 RaSteaks
+[AGPL-3.0](LICENSE) © 2026 RaSteaks

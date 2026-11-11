@@ -10,7 +10,7 @@ ACES 2.0 程序化视频工作台 · 网页 / MCP / CLI 三端同源 · 全程�
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![Node](https://img.shields.io/badge/Node.js-22.12+-5FA04E?logo=nodedotjs&logoColor=white)
 ![色彩](https://img.shields.io/badge/色彩-ACES_2.0_·_OCIO-8A2BE2)
-![许可证](https://img.shields.io/badge/许可证-MIT-blue)
+![许可证](https://img.shields.io/badge/许可证-AGPL--3.0-blue)
 
 [English](README.en.md) · **简体中文**
 
@@ -393,4 +393,4 @@ CHROMASCRIPT_URL=http://127.0.0.1:8875 npm --prefix frontend run test:e2e -- tes
 
 ## 许可证
 
-[MIT](LICENSE) © 2026 RaSteaks
+[AGPL-3.0](LICENSE) © 2026 RaSteaks
